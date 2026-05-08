@@ -34,18 +34,34 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 ALERT_CHAT_ID = int(os.environ["ALERT_CHAT_ID"])
 HEALTH_PORT = int(os.environ.get("PORT", "10000"))
 
-ZAI_MODEL = "glm-4.6v-flash"
+ZAI_MODEL = "glm-ocr"
 RECEIPTS_TABLE = "receipts"
 
 zai_client = OpenAI(api_key=ZAI_API_KEY, base_url=ZAI_BASE_URL)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 OCR_PROMPT = (
-    "You are a receipt OCR assistant. Extract the receipt fields and respond "
-    "ONLY with a compact JSON object using these keys: "
+    "You are a receipt OCR assistant specialised in Malaysian supplier invoices "
+    "and receipts (often handwritten or dot-matrix printed, mixing English, "
+    "Bahasa Malaysia, and Chinese). Extract the fields and respond ONLY with a "
+    "compact JSON object using these keys: "
     "merchant (string), date (YYYY-MM-DD or null), total (number or null), "
-    "currency (string or null), items (array of {name, price}), "
-    "raw_text (full transcription). No markdown, no commentary."
+    "currency (string, default \"MYR\" if a Malaysian supplier and not stated), "
+    "items (array of {name, price}), raw_text (full transcription).\n\n"
+    "Merchant guidance: many invoices come from local Malaysian suppliers such "
+    "as BESTARI FARM, FOOK LEONG, SAIDA, BALAJI, HANEE, JASMINE, and MEWAH. "
+    "Match these names even with OCR noise, spacing, or trailing words like "
+    "ENTERPRISE, SDN BHD, TRADING, MARKETING, or SUPPLY. Prefer the supplier "
+    "name printed at the top of the document over any customer or 'Bill To' "
+    "name. If the merchant is ambiguous, use the most prominent letterhead.\n\n"
+    "Date guidance: Malaysian dates are typically DD/MM/YYYY or DD-MM-YY. "
+    "Convert to YYYY-MM-DD; if only two-digit year, assume 20YY.\n\n"
+    "Total guidance: pick the final amount payable (look for GRAND TOTAL, "
+    "TOTAL, JUMLAH, or AMOUNT DUE). Numbers may use commas as thousand "
+    "separators; return as a plain number (e.g. 1234.50, not \"1,234.50\").\n\n"
+    "Items: capture each line item with its unit/quantity in the name when "
+    "present (e.g. \"Ayam 5kg\"). If a field is unreadable, use null. "
+    "No markdown, no commentary, JSON only."
 )
 
 flask_app = Flask(__name__)
