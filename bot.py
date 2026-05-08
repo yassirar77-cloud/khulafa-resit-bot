@@ -41,6 +41,11 @@ MALAYSIA_TZ = ZoneInfo("Asia/Kuala_Lumpur")
 MIN_PLAUSIBLE_YEAR = 2024
 FALLBACK_YEAR = 2026
 
+# Explicit chat_id -> outlet overrides take precedence over title parsing.
+GROUP_OUTLET_MAP: dict[int, str] = {}
+OUTLET_TITLE_PREFIX = "khulafa"
+OUTLET_TRAILING_NOISE = {"resit", "resits", "receipt", "receipts"}
+
 zai_client = OpenAI(api_key=ZAI_API_KEY, base_url=ZAI_BASE_URL)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -129,20 +134,40 @@ def store_receipt(record: dict) -> dict:
     return result.data[0] if result.data else record
 
 
-def format_alert(record: dict, parsed: dict) -> str:
+def derive_outlet(chat_id: int | None, chat_title: str | None) -> str | None:
+    if chat_id is not None and chat_id in GROUP_OUTLET_MAP:
+        return GROUP_OUTLET_MAP[chat_id]
+    if not chat_title:
+        return None
+    cleaned = chat_title.strip()
+    if cleaned.lower().startswith(OUTLET_TITLE_PREFIX):
+        cleaned = cleaned[len(OUTLET_TITLE_PREFIX):].strip(" -_:")
+    tokens = cleaned.split()
+    while tokens and tokens[-1].lower() in OUTLET_TRAILING_NOISE:
+        tokens.pop()
+    if not tokens:
+        return None
+    remainder = " ".join(tokens)
+    if any(ch.isdigit() for ch in remainder):
+        return remainder.upper()
+    return remainder.title()
+
+
+def format_alert(record: dict, parsed: dict, outlet: str | None = None) -> str:
     merchant = parsed.get("merchant") or "Unknown merchant"
     total = parsed.get("total")
     currency = parsed.get("currency") or ""
     date = parsed.get("date") or "—"
     user = record.get("telegram_username") or record.get("telegram_user_id")
     total_str = f"{total} {currency}".strip() if total is not None else "n/a"
-    lines = [
-        "New receipt logged",
-        f"From: {user}",
+    lines = ["New receipt logged", f"From: {user}"]
+    if outlet:
+        lines.append(f"Outlet: {outlet}")
+    lines.extend([
         f"Merchant: {merchant}",
         f"Date: {date}",
         f"Total: {total_str}",
-    ]
+    ])
     item_lines = format_items(parsed.get("items"))
     if item_lines:
         lines.append("")
@@ -173,6 +198,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     message = update.effective_message
     if not message or not message.photo:
         return
+
+    chat = message.chat
+    chat_title = chat.title if chat else None
+    outlet = derive_outlet(message.chat_id, chat_title)
+    logger.info(
+        "Receipt photo received: chat_id=%s chat_title=%r outlet=%s",
+        message.chat_id,
+        chat_title,
+        outlet,
+    )
 
     await message.reply_text("Processing receipt…")
 
@@ -209,10 +244,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await message.reply_text("Saved OCR locally but database write failed.")
         stored = record
 
-    alert = format_alert(stored, parsed)
-    await message.reply_text(alert)
+    user_alert = format_alert(stored, parsed)
+    ops_alert = format_alert(stored, parsed, outlet=outlet)
+    await message.reply_text(user_alert)
     try:
-        await context.bot.send_message(chat_id=ALERT_CHAT_ID, text=alert)
+        await context.bot.send_message(chat_id=ALERT_CHAT_ID, text=ops_alert)
     except Exception:
         logger.exception("Failed to send alert to ALERT_CHAT_ID")
 
