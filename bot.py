@@ -12,7 +12,13 @@ from zoneinfo import ZoneInfo
 from flask import Flask, jsonify, render_template
 from openai import OpenAI
 from supabase import create_client, Client
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+    WebAppInfo,
+)
 from telegram.error import Conflict, TelegramError
 from telegram.ext import (
     Application,
@@ -288,18 +294,42 @@ async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message:
         return
+    chat = message.chat
+    logger.info(
+        "/dashboard from chat_id=%s chat_type=%s user=%s",
+        message.chat_id,
+        chat.type if chat else None,
+        update.effective_user.id if update.effective_user else None,
+    )
     if not WEBAPP_URL:
         await message.reply_text(
             "Dashboard URL not configured. Set WEBAPP_URL to the public /webapp endpoint."
         )
         return
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Open dashboard", web_app=WebAppInfo(url=WEBAPP_URL))]]
-    )
-    await message.reply_text(
-        "Tap below to open the Khulafa Resit Monitor dashboard.",
-        reply_markup=keyboard,
-    )
+
+    is_private = chat is not None and chat.type == "private"
+    try:
+        if is_private:
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Open dashboard", web_app=WebAppInfo(url=WEBAPP_URL))]]
+            )
+            await message.reply_text(
+                "Tap below to open the Khulafa Resit Monitor dashboard.",
+                reply_markup=keyboard,
+            )
+        else:
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Open dashboard", url=WEBAPP_URL)]]
+            )
+            await message.reply_text(
+                "Open the dashboard below. For the full Mini App experience, "
+                "message the bot directly and run /dashboard there.",
+                reply_markup=keyboard,
+                disable_web_page_preview=True,
+            )
+    except Exception:
+        logger.exception("Failed to send /dashboard reply")
+        await message.reply_text(f"Dashboard: {WEBAPP_URL}")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -504,6 +534,14 @@ async def run_bot() -> None:
 
     async with app:
         await app.start()
+        with contextlib.suppress(Exception):
+            await app.bot.set_my_commands([
+                BotCommand("start", "Greeting"),
+                BotCommand("summary", "Today's spending grouped by merchant"),
+                BotCommand("compare", "Compare an item's unit price across outlets"),
+                BotCommand("dashboard", "Open the Mini App dashboard"),
+                BotCommand("help", "Show command list"),
+            ])
         await app.updater.start_polling(
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True,
