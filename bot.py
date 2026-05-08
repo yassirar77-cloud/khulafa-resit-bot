@@ -6,10 +6,10 @@ import os
 import threading
 from datetime import datetime, timezone
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, render_template
 from openai import OpenAI
 from supabase import create_client, Client
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -28,8 +28,10 @@ TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ZHIPU_API_KEY = os.environ["ZHIPU_API_KEY"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 ALERT_CHAT_ID = int(os.environ["ALERT_CHAT_ID"])
 HEALTH_PORT = int(os.environ.get("PORT", "10000"))
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "")
 
 ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"
 ZHIPU_MODEL = "glm-4.6v-flash"
@@ -53,6 +55,16 @@ flask_app = Flask(__name__)
 @flask_app.get("/health")
 def health():
     return jsonify(status="ok", service="khulafa-resit-bot")
+
+
+@flask_app.get("/webapp")
+def webapp():
+    return render_template(
+        "dashboard.html",
+        supabase_url=SUPABASE_URL,
+        supabase_anon_key=SUPABASE_ANON_KEY,
+        receipts_table=RECEIPTS_TABLE,
+    )
 
 
 def run_health_server() -> None:
@@ -156,7 +168,25 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
-        "Send a receipt photo and I'll log it."
+        "Send a receipt photo and I'll log it. Use /dashboard to view stats."
+    )
+
+
+async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message:
+        return
+    if not WEBAPP_URL:
+        await message.reply_text(
+            "Dashboard URL not configured. Set WEBAPP_URL to the public /webapp endpoint."
+        )
+        return
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Open dashboard", web_app=WebAppInfo(url=WEBAPP_URL))]]
+    )
+    await message.reply_text(
+        "Tap below to open the Khulafa Resit Monitor dashboard.",
+        reply_markup=keyboard,
     )
 
 
@@ -165,6 +195,7 @@ def main() -> None:
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("dashboard", dashboard))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     logger.info("Bot starting (health on :%d)", HEALTH_PORT)
     app.run_polling(allowed_updates=Update.ALL_TYPES)

@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Khulafa Resit Monitor</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --text: var(--tg-theme-text-color, #1c1c1e);
+    --hint: var(--tg-theme-hint-color, #8e8e93);
+    --link: var(--tg-theme-link-color, #007aff);
+    --button: var(--tg-theme-button-color, #007aff);
+    --button-text: var(--tg-theme-button-text-color, #ffffff);
+    --secondary-bg: var(--tg-theme-secondary-bg-color, #f2f2f7);
+    --section-bg: var(--tg-theme-section-bg-color, #ffffff);
+    --separator: var(--tg-theme-section-separator-color, #e5e5ea);
+    --header-bg: var(--tg-theme-header-bg-color, #ffffff);
+    --accent: var(--tg-theme-accent-text-color, #007aff);
+    --destructive: var(--tg-theme-destructive-text-color, #ff3b30);
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro", "Segoe UI", Roboto, sans-serif;
+    font-size: 15px;
+    line-height: 1.4;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .container {
+    padding: 16px;
+    padding-bottom: calc(24px + env(safe-area-inset-bottom));
+    max-width: 720px;
+    margin: 0 auto;
+  }
+
+  h1 {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 0 0 4px 0;
+  }
+
+  .subtitle {
+    color: var(--hint);
+    font-size: 13px;
+    margin-bottom: 20px;
+  }
+
+  .section {
+    background: var(--section-bg);
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+    border: 1px solid var(--separator);
+  }
+
+  .section-title {
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--hint);
+    letter-spacing: 0.5px;
+    margin: 0 0 10px 0;
+  }
+
+  .summary-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .outlet-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--separator);
+  }
+
+  .outlet-row:last-child { border-bottom: none; }
+
+  .outlet-name {
+    font-weight: 500;
+  }
+
+  .outlet-meta {
+    color: var(--hint);
+    font-size: 12px;
+  }
+
+  .amount {
+    font-weight: 600;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .total-banner {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 8px 0 12px 0;
+    border-bottom: 1px solid var(--separator);
+    margin-bottom: 4px;
+  }
+
+  .total-banner .label {
+    color: var(--hint);
+    font-size: 13px;
+  }
+
+  .total-banner .value {
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .receipt {
+    padding: 10px 0;
+    border-bottom: 1px solid var(--separator);
+  }
+
+  .receipt:last-child { border-bottom: none; }
+
+  .receipt-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .receipt-merchant {
+    font-weight: 600;
+  }
+
+  .receipt-date {
+    color: var(--hint);
+    font-size: 12px;
+    margin-top: 2px;
+  }
+
+  .receipt-total {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .receipt-items {
+    margin-top: 8px;
+    padding: 10px;
+    background: var(--secondary-bg);
+    border-radius: 8px;
+    display: none;
+  }
+
+  .receipt-items.open { display: block; }
+
+  .item-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    font-size: 13px;
+  }
+
+  .item-name {
+    color: var(--text);
+    flex: 1;
+    margin-right: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .item-price {
+    color: var(--hint);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .compare-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+
+  .compare-table td {
+    padding: 8px 0;
+    border-bottom: 1px solid var(--separator);
+    vertical-align: top;
+  }
+
+  .compare-table tr:last-child td { border-bottom: none; }
+
+  .compare-item-name {
+    font-weight: 500;
+    margin-bottom: 4px;
+  }
+
+  .compare-outlets {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .compare-chip {
+    font-size: 12px;
+    padding: 3px 8px;
+    background: var(--secondary-bg);
+    border-radius: 10px;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .compare-chip.cheapest {
+    background: rgba(52, 199, 89, 0.15);
+    color: #34c759;
+    font-weight: 600;
+  }
+
+  .compare-chip.priciest {
+    background: rgba(255, 59, 48, 0.12);
+    color: var(--destructive);
+  }
+
+  .empty {
+    color: var(--hint);
+    font-size: 13px;
+    text-align: center;
+    padding: 12px 0;
+  }
+
+  .skeleton {
+    height: 14px;
+    background: var(--secondary-bg);
+    border-radius: 4px;
+    margin: 6px 0;
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+
+  .error {
+    color: var(--destructive);
+    font-size: 13px;
+    padding: 12px;
+    background: rgba(255, 59, 48, 0.08);
+    border-radius: 8px;
+  }
+
+  .top-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--separator);
+  }
+
+  .top-item:last-child { border-bottom: none; }
+
+  .rank {
+    color: var(--hint);
+    font-size: 12px;
+    margin-right: 8px;
+    min-width: 18px;
+    display: inline-block;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Khulafa Resit Monitor</h1>
+  <div class="subtitle" id="subtitle">Loading receipts…</div>
+
+  <div class="section">
+    <div class="section-title">Today's spending</div>
+    <div class="total-banner">
+      <span class="label">Total today</span>
+      <span class="value" id="today-total">—</span>
+    </div>
+    <div class="summary-grid" id="today-outlets">
+      <div class="skeleton"></div>
+      <div class="skeleton"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Recent receipts</div>
+    <div id="recent-receipts">
+      <div class="skeleton"></div>
+      <div class="skeleton"></div>
+      <div class="skeleton"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Top items this week</div>
+    <div id="top-items">
+      <div class="skeleton"></div>
+      <div class="skeleton"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Price comparison across outlets</div>
+    <div id="price-compare">
+      <div class="skeleton"></div>
+      <div class="skeleton"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const SUPABASE_URL = "{{ supabase_url }}";
+  const SUPABASE_ANON_KEY = "{{ supabase_anon_key }}";
+  const RECEIPTS_TABLE = "{{ receipts_table }}";
+
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) {
+    tg.ready();
+    tg.expand();
+    try { tg.setHeaderColor("secondary_bg_color"); } catch (e) {}
+  }
+
+  function fmtMoney(n, currency) {
+    if (n === null || n === undefined || isNaN(n)) return "—";
+    const num = Number(n).toFixed(2);
+    return currency ? `${num} ${currency}` : num;
+  }
+
+  function normaliseMerchant(name) {
+    if (!name) return "Unknown";
+    return String(name).trim();
+  }
+
+  function normaliseItemName(name) {
+    if (!name) return "";
+    return String(name).trim().toLowerCase();
+  }
+
+  function startOfToday() {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }
+
+  function startOfWeek() {
+    const d = new Date();
+    d.setDate(d.getDate() - 7);
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }
+
+  function parseReceiptDate(r) {
+    return new Date(r.receipt_date || r.created_at);
+  }
+
+  async function fetchReceipts() {
+    const url = `${SUPABASE_URL}/rest/v1/${RECEIPTS_TABLE}?select=*&order=created_at.desc&limit=200`;
+    const res = await fetch(url, {
+      headers: {
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
+      },
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Supabase ${res.status}: ${body}`);
+    }
+    return res.json();
+  }
+
+  function renderTodaySpending(receipts) {
+    const today = startOfToday();
+    const todays = receipts.filter(r => parseReceiptDate(r) >= today);
+
+    const totals = {};
+    let grand = 0;
+    let currency = "";
+    for (const r of todays) {
+      const m = normaliseMerchant(r.merchant);
+      const t = Number(r.total) || 0;
+      totals[m] = (totals[m] || 0) + t;
+      grand += t;
+      if (!currency && r.currency) currency = r.currency;
+    }
+
+    document.getElementById("today-total").textContent = todays.length ? fmtMoney(grand, currency) : "0.00";
+
+    const container = document.getElementById("today-outlets");
+    const entries = Object.entries(totals).sort((a, b) => b[1] - a[1]);
+
+    if (!entries.length) {
+      container.innerHTML = '<div class="empty">No receipts yet today.</div>';
+      return;
+    }
+
+    container.innerHTML = entries.map(([outlet, sum]) => {
+      const count = todays.filter(r => normaliseMerchant(r.merchant) === outlet).length;
+      return `
+        <div class="outlet-row">
+          <div>
+            <div class="outlet-name">${escapeHtml(outlet)}</div>
+            <div class="outlet-meta">${count} receipt${count === 1 ? "" : "s"}</div>
+          </div>
+          <div class="amount">${fmtMoney(sum, currency)}</div>
+        </div>
+      `;
+    }).join("");
+  }
+
+  function renderRecentReceipts(receipts) {
+    const container = document.getElementById("recent-receipts");
+    const recent = receipts.slice(0, 10);
+
+    if (!recent.length) {
+      container.innerHTML = '<div class="empty">No receipts logged yet.</div>';
+      return;
+    }
+
+    container.innerHTML = recent.map((r, idx) => {
+      const items = Array.isArray(r.items) ? r.items : [];
+      const itemsHtml = items.length
+        ? items.map(it => `
+            <div class="item-row">
+              <span class="item-name">${escapeHtml(it.name || "Item")}</span>
+              <span class="item-price">${fmtMoney(it.price, r.currency)}</span>
+            </div>
+          `).join("")
+        : '<div class="empty">No itemised data.</div>';
+      const date = r.receipt_date || (r.created_at ? new Date(r.created_at).toISOString().slice(0, 10) : "");
+      return `
+        <div class="receipt">
+          <div class="receipt-head" data-idx="${idx}">
+            <div>
+              <div class="receipt-merchant">${escapeHtml(normaliseMerchant(r.merchant))}</div>
+              <div class="receipt-date">${escapeHtml(date)}</div>
+            </div>
+            <div class="receipt-total">${fmtMoney(r.total, r.currency)}</div>
+          </div>
+          <div class="receipt-items" id="items-${idx}">${itemsHtml}</div>
+        </div>
+      `;
+    }).join("");
+
+    container.querySelectorAll(".receipt-head").forEach(el => {
+      el.addEventListener("click", () => {
+        const idx = el.getAttribute("data-idx");
+        document.getElementById(`items-${idx}`).classList.toggle("open");
+      });
+    });
+  }
+
+  function renderTopItems(receipts) {
+    const container = document.getElementById("top-items");
+    const since = startOfWeek();
+    const recent = receipts.filter(r => parseReceiptDate(r) >= since);
+
+    const counts = {};
+    for (const r of recent) {
+      const items = Array.isArray(r.items) ? r.items : [];
+      for (const it of items) {
+        const key = normaliseItemName(it.name);
+        if (!key) continue;
+        if (!counts[key]) counts[key] = { name: it.name, count: 0, total: 0 };
+        counts[key].count += 1;
+        const p = Number(it.price);
+        if (!isNaN(p)) counts[key].total += p;
+      }
+    }
+
+    const top = Object.values(counts).sort((a, b) => b.count - a.count).slice(0, 8);
+
+    if (!top.length) {
+      container.innerHTML = '<div class="empty">No items in the last 7 days.</div>';
+      return;
+    }
+
+    container.innerHTML = top.map((it, i) => `
+      <div class="top-item">
+        <div>
+          <span class="rank">#${i + 1}</span>
+          <span>${escapeHtml(it.name)}</span>
+        </div>
+        <div class="outlet-meta">${it.count}× · avg ${(it.total / it.count).toFixed(2)}</div>
+      </div>
+    `).join("");
+  }
+
+  function renderPriceComparison(receipts) {
+    const container = document.getElementById("price-compare");
+    const map = {};
+
+    for (const r of receipts) {
+      const merchant = normaliseMerchant(r.merchant);
+      const items = Array.isArray(r.items) ? r.items : [];
+      for (const it of items) {
+        const key = normaliseItemName(it.name);
+        const price = Number(it.price);
+        if (!key || isNaN(price) || price <= 0) continue;
+        if (!map[key]) map[key] = { name: it.name, outlets: {} };
+        if (!map[key].outlets[merchant]) map[key].outlets[merchant] = [];
+        map[key].outlets[merchant].push(price);
+      }
+    }
+
+    const compared = Object.values(map)
+      .map(item => {
+        const outlets = Object.entries(item.outlets).map(([o, prices]) => ({
+          outlet: o,
+          avg: prices.reduce((a, b) => a + b, 0) / prices.length,
+        }));
+        return { name: item.name, outlets };
+      })
+      .filter(item => item.outlets.length >= 2)
+      .sort((a, b) => b.outlets.length - a.outlets.length)
+      .slice(0, 8);
+
+    if (!compared.length) {
+      container.innerHTML = '<div class="empty">Need the same item across 2+ outlets.</div>';
+      return;
+    }
+
+    container.innerHTML = `
+      <table class="compare-table">
+        ${compared.map(item => {
+          const sorted = [...item.outlets].sort((a, b) => a.avg - b.avg);
+          const cheapest = sorted[0].outlet;
+          const priciest = sorted[sorted.length - 1].outlet;
+          const chips = sorted.map(o => {
+            const cls = o.outlet === cheapest ? "cheapest" : (o.outlet === priciest ? "priciest" : "");
+            return `<span class="compare-chip ${cls}">${escapeHtml(o.outlet)} · ${o.avg.toFixed(2)}</span>`;
+          }).join("");
+          return `
+            <tr>
+              <td>
+                <div class="compare-item-name">${escapeHtml(item.name)}</div>
+                <div class="compare-outlets">${chips}</div>
+              </td>
+            </tr>
+          `;
+        }).join("")}
+      </table>
+    `;
+  }
+
+  function escapeHtml(s) {
+    return String(s ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function showError(msg) {
+    const subtitle = document.getElementById("subtitle");
+    subtitle.innerHTML = `<div class="error">${escapeHtml(msg)}</div>`;
+    ["today-outlets", "recent-receipts", "top-items", "price-compare"].forEach(id => {
+      document.getElementById(id).innerHTML = '<div class="empty">—</div>';
+    });
+  }
+
+  async function load() {
+    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+      showError("Dashboard not configured: missing Supabase credentials.");
+      return;
+    }
+    try {
+      const receipts = await fetchReceipts();
+      document.getElementById("subtitle").textContent =
+        `${receipts.length} receipt${receipts.length === 1 ? "" : "s"} on file`;
+      renderTodaySpending(receipts);
+      renderRecentReceipts(receipts);
+      renderTopItems(receipts);
+      renderPriceComparison(receipts);
+    } catch (err) {
+      console.error(err);
+      showError(`Could not load receipts: ${err.message}`);
+    }
+  }
+
+  load();
+</script>
+</body>
+</html>
