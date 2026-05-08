@@ -34,7 +34,7 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 ALERT_CHAT_ID = int(os.environ["ALERT_CHAT_ID"])
 HEALTH_PORT = int(os.environ.get("PORT", "10000"))
 
-ZAI_MODEL = "glm-ocr"
+ZAI_MODEL = "glm-4.6v-flash"
 RECEIPTS_TABLE = "receipts"
 
 zai_client = OpenAI(api_key=ZAI_API_KEY, base_url=ZAI_BASE_URL)
