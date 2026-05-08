@@ -223,6 +223,7 @@ HELP_TEXT = (
     "Commands:\n"
     "/start — short greeting\n"
     "/summary — today's spending grouped by merchant\n"
+    "/compare <item> — compare an item's unit price across outlets\n"
     "/help — show this message"
 )
 
@@ -291,11 +292,130 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await message.reply_text("\n".join(lines))
 
 
+def fetch_user_items(user_id: int) -> list[dict]:
+    result = (
+        supabase.table(RECEIPTS_TABLE)
+        .select("merchant, currency, receipt_date, items")
+        .eq("telegram_user_id", user_id)
+        .execute()
+    )
+    return result.data or []
+
+
+def collect_item_matches(rows: list[dict], query: str) -> list[dict]:
+    needle = query.lower()
+    matches: list[dict] = []
+    for row in rows:
+        items = row.get("items")
+        if not isinstance(items, list):
+            continue
+        merchant = row.get("merchant") or "Unknown"
+        currency = row.get("currency") or ""
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            if not isinstance(name, str) or needle not in name.lower():
+                continue
+            price = item.get("price")
+            if not isinstance(price, (int, float)):
+                continue
+            qty_raw = item.get("qty")
+            if qty_raw is None:
+                qty_raw = item.get("quantity")
+            try:
+                qty = float(qty_raw) if qty_raw not in (None, "") else 1.0
+            except (TypeError, ValueError):
+                qty = 1.0
+            if qty <= 0:
+                qty = 1.0
+            matches.append({
+                "merchant": merchant,
+                "currency": currency,
+                "unit_price": float(price) / qty,
+                "raw_name": name,
+            })
+    return matches
+
+
+async def compare_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if not message or not user:
+        return
+
+    if not context.args:
+        await message.reply_text(
+            "Usage: /compare <item>\nExample: /compare ais batu"
+        )
+        return
+
+    query = " ".join(context.args).strip()
+    if not query:
+        await message.reply_text("Usage: /compare <item>")
+        return
+
+    try:
+        rows = await asyncio.to_thread(fetch_user_items, user.id)
+    except Exception:
+        logger.exception("Compare query failed")
+        await message.reply_text("Failed to fetch receipts for compare.")
+        return
+
+    matches = collect_item_matches(rows, query)
+    if not matches:
+        await message.reply_text(f"No item matching \"{query}\" found in your receipts.")
+        return
+
+    by_merchant: dict[str, dict] = {}
+    for m in matches:
+        bucket = by_merchant.setdefault(
+            m["merchant"], {"sum": 0.0, "count": 0, "currency": ""}
+        )
+        bucket["sum"] += m["unit_price"]
+        bucket["count"] += 1
+        if not bucket["currency"] and m["currency"]:
+            bucket["currency"] = m["currency"]
+
+    rankings = sorted(
+        (
+            (merchant, data["sum"] / data["count"], data["currency"], data["count"])
+            for merchant, data in by_merchant.items()
+        ),
+        key=lambda entry: entry[1],
+    )
+
+    def fmt(entry: tuple) -> str:
+        merchant, avg, currency, count = entry
+        cur = f" {currency}" if currency else ""
+        sample_word = "sample" if count == 1 else "samples"
+        return f"{merchant} — {avg:.2f}{cur} per unit ({count} {sample_word})"
+
+    lines = [
+        f"Compare \"{query}\": {len(matches)} line(s) across "
+        f"{len(by_merchant)} outlet(s)",
+        "",
+    ]
+    if len(rankings) == 1:
+        lines.append(f"Only outlet: {fmt(rankings[0])}")
+    else:
+        lines.append(f"Cheapest: {fmt(rankings[0])}")
+        lines.append(f"Most expensive: {fmt(rankings[-1])}")
+        if len(rankings) > 2:
+            lines.append("")
+            lines.append("All outlets (cheapest first):")
+            for entry in rankings:
+                lines.append(f"• {fmt(entry)}")
+
+    await message.reply_text("\n".join(lines))
+
+
 async def run_bot() -> None:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("summary", summary_command))
+    app.add_handler(CommandHandler("compare", compare_command))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
     stop = asyncio.Event()
