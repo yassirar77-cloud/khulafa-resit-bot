@@ -9,10 +9,10 @@ import threading
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, render_template
 from openai import OpenAI
 from supabase import create_client, Client
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -32,8 +32,10 @@ ZAI_API_KEY = os.environ["ZAI_API_KEY"]
 ZAI_BASE_URL = os.environ.get("ZAI_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/")
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 ALERT_CHAT_ID = int(os.environ["ALERT_CHAT_ID"])
 HEALTH_PORT = int(os.environ.get("PORT", "10000"))
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "")
 
 ZAI_MODEL = os.environ.get("ZAI_MODEL", "glm-4.6v-flash")
 RECEIPTS_TABLE = "receipts"
@@ -83,6 +85,16 @@ flask_app = Flask(__name__)
 @flask_app.get("/health")
 def health():
     return jsonify(status="ok", service="khulafa-resit-bot")
+
+
+@flask_app.get("/webapp")
+def webapp():
+    return render_template(
+        "dashboard.html",
+        supabase_url=SUPABASE_URL,
+        supabase_anon_key=SUPABASE_ANON_KEY,
+        receipts_table=RECEIPTS_TABLE,
+    )
 
 
 def run_health_server() -> None:
@@ -260,6 +272,7 @@ HELP_TEXT = (
     "/start — short greeting\n"
     "/summary — today's spending grouped by merchant\n"
     "/compare <item> — compare an item's unit price across outlets\n"
+    "/dashboard — open the Mini App dashboard\n"
     "/help — show this message"
 )
 
@@ -267,6 +280,24 @@ HELP_TEXT = (
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
         "Send a receipt photo and I'll log it. Use /help to see commands."
+    )
+
+
+async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message:
+        return
+    if not WEBAPP_URL:
+        await message.reply_text(
+            "Dashboard URL not configured. Set WEBAPP_URL to the public /webapp endpoint."
+        )
+        return
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Open dashboard", web_app=WebAppInfo(url=WEBAPP_URL))]]
+    )
+    await message.reply_text(
+        "Tap below to open the Khulafa Resit Monitor dashboard.",
+        reply_markup=keyboard,
     )
 
 
@@ -452,6 +483,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("summary", summary_command))
     app.add_handler(CommandHandler("compare", compare_command))
+    app.add_handler(CommandHandler("dashboard", dashboard))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
     stop = asyncio.Event()
