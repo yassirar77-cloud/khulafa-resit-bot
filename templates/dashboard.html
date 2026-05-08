@@ -590,8 +590,15 @@ function receiptDate(r) {
 }
 
 function normaliseMerchant(name) {
-  if (!name) return "Unknown";
-  return String(name).trim();
+  if (!name) return "UNKNOWN";
+  return String(name).trim().toUpperCase();
+}
+
+function outletName(r) {
+  if (r && typeof r.outlet === "string" && r.outlet.trim()) {
+    return r.outlet.trim();
+  }
+  return null;
 }
 
 function normaliseItemName(name) {
@@ -652,16 +659,20 @@ function computeStats() {
 
   const outletWeek = {};
   const outletPrior = {};
+  let outletReceiptCount = 0;
   for (const r of weekList) {
-    const m = normaliseMerchant(r.merchant);
-    outletWeek[m] = (outletWeek[m] || 0) + (Number(r.total) || 0);
+    const o = outletName(r);
+    if (!o) continue;
+    outletReceiptCount += 1;
+    outletWeek[o] = (outletWeek[o] || 0) + (Number(r.total) || 0);
   }
   for (const r of priorWeekList) {
-    const m = normaliseMerchant(r.merchant);
-    outletPrior[m] = (outletPrior[m] || 0) + (Number(r.total) || 0);
+    const o = outletName(r);
+    if (!o) continue;
+    outletPrior[o] = (outletPrior[o] || 0) + (Number(r.total) || 0);
   }
   const outlets = Object.keys(outletWeek)
-    .map(m => ({ name: m, spent: outletWeek[m], avg: outletPrior[m] || 0 }))
+    .map(o => ({ name: o, spent: outletWeek[o], avg: outletPrior[o] || 0 }))
     .sort((a, b) => b.spent - a.spent);
 
   const itemAggWeek = {};
@@ -751,7 +762,9 @@ function computeStats() {
   return {
     today, todayTotal, yesterdayTotal, weekTotal,
     todayCount: todayList.length,
-    days, outlets, topItems, priceTrend, priceTrendItems, alerts,
+    days, outlets, outletReceiptCount,
+    weekReceiptCount: weekList.length,
+    topItems, priceTrend, priceTrendItems, alerts,
   };
 }
 
@@ -946,7 +959,11 @@ function renderDailyChart() {
 function renderOutlets() {
   const el = document.getElementById("outlets");
   if (!stats.outlets.length) {
-    el.innerHTML = '<div class="empty">Tiada perbelanjaan minggu ini.</div>';
+    if (stats.weekReceiptCount > 0) {
+      el.innerHTML = '<div class="empty">Tiada nama outlet pada resit ini.<br><span style="font-size:11px">Jalankan migrations/0001_add_outlet_column.sql dan hantar resit baru.</span></div>';
+    } else {
+      el.innerHTML = '<div class="empty">Tiada perbelanjaan minggu ini.</div>';
+    }
     return;
   }
   const max = stats.outlets[0].spent || 1;

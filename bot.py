@@ -148,8 +148,28 @@ def normalize_date(value) -> str | None:
     return value
 
 
+_outlet_column_available = True
+
+
 def store_receipt(record: dict) -> dict:
-    result = supabase.table(RECEIPTS_TABLE).insert(record).execute()
+    global _outlet_column_available
+    payload = dict(record)
+    if not _outlet_column_available:
+        payload.pop("outlet", None)
+    try:
+        result = supabase.table(RECEIPTS_TABLE).insert(payload).execute()
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "outlet" in payload and "outlet" in msg:
+            logger.warning(
+                "receipts.outlet column missing — apply migrations/0001_add_outlet_column.sql. "
+                "Saving without outlet for now."
+            )
+            _outlet_column_available = False
+            payload.pop("outlet", None)
+            result = supabase.table(RECEIPTS_TABLE).insert(payload).execute()
+        else:
+            raise
     return result.data[0] if result.data else record
 
 
@@ -242,12 +262,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     user = update.effective_user
+    merchant_raw = parsed.get("merchant")
     record = {
         "telegram_user_id": user.id if user else None,
         "telegram_username": user.username if user else None,
         "chat_id": message.chat_id,
         "message_id": message.message_id,
-        "merchant": parsed.get("merchant"),
+        "merchant": merchant_raw.upper().strip() if isinstance(merchant_raw, str) else merchant_raw,
+        "outlet": outlet,
         "receipt_date": parsed.get("date"),
         "total": parsed.get("total"),
         "currency": parsed.get("currency"),
