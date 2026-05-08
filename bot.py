@@ -32,7 +32,7 @@ ALERT_CHAT_ID = int(os.environ["ALERT_CHAT_ID"])
 HEALTH_PORT = int(os.environ.get("PORT", "10000"))
 
 ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"
-ZHIPU_MODEL = "glm-4.6v-flash"
+ZAI_MODEL = os.environ.get("ZAI_MODEL", "glm-4.6v-flash")
 RECEIPTS_TABLE = "receipts"
 
 zhipu_client = OpenAI(api_key=ZHIPU_API_KEY, base_url=ZHIPU_BASE_URL)
@@ -65,7 +65,7 @@ async def extract_receipt(image_bytes: bytes) -> dict:
 
     response = await asyncio.to_thread(
         zhipu_client.chat.completions.create,
-        model=ZHIPU_MODEL,
+        model=ZAI_MODEL,
         messages=[
             {
                 "role": "user",
