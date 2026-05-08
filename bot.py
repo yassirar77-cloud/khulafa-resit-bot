@@ -13,6 +13,7 @@ from flask import Flask, jsonify, render_template
 from openai import OpenAI
 from supabase import create_client, Client
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
+from telegram.error import Conflict, TelegramError
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -492,9 +493,22 @@ async def run_bot() -> None:
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop.set)
 
+    def on_polling_error(error: TelegramError) -> None:
+        if isinstance(error, Conflict):
+            logger.warning(
+                "Polling conflict: another instance is using this bot token. "
+                "Backing off and retrying."
+            )
+        else:
+            logger.error("Polling error: %s", error, exc_info=error)
+
     async with app:
         await app.start()
-        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        await app.updater.start_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+            error_callback=on_polling_error,
+        )
         logger.info("Bot started (health on :%d)", HEALTH_PORT)
         try:
             await stop.wait()
