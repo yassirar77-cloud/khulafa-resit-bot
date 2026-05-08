@@ -1,8 +1,10 @@
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import os
+import signal
 import threading
 from datetime import datetime, timezone
 
@@ -160,14 +162,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-def main() -> None:
-    threading.Thread(target=run_health_server, daemon=True).start()
-
+async def run_bot() -> None:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    logger.info("Bot starting (health on :%d)", HEALTH_PORT)
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(sig, stop.set)
+
+    async with app:
+        await app.start()
+        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        logger.info("Bot started (health on :%d)", HEALTH_PORT)
+        try:
+            await stop.wait()
+        finally:
+            await app.updater.stop()
+            await app.stop()
+
+
+def main() -> None:
+    threading.Thread(target=run_health_server, daemon=True).start()
+    asyncio.run(run_bot())
 
 
 if __name__ == "__main__":
