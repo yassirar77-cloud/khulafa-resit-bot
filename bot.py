@@ -7,6 +7,7 @@ import os
 import signal
 import threading
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from flask import Flask, jsonify
 from openai import OpenAI
@@ -36,6 +37,9 @@ HEALTH_PORT = int(os.environ.get("PORT", "10000"))
 
 ZAI_MODEL = "glm-4.6v-flash"
 RECEIPTS_TABLE = "receipts"
+MALAYSIA_TZ = ZoneInfo("Asia/Kuala_Lumpur")
+MIN_PLAUSIBLE_YEAR = 2024
+FALLBACK_YEAR = 2026
 
 zai_client = OpenAI(api_key=ZAI_API_KEY, base_url=ZAI_BASE_URL)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -47,7 +51,8 @@ OCR_PROMPT = (
     "compact JSON object using these keys: "
     "merchant (string), date (YYYY-MM-DD or null), total (number or null), "
     "currency (string, default \"MYR\" if a Malaysian supplier and not stated), "
-    "items (array of {name, price}), raw_text (full transcription).\n\n"
+    "items (array of {name, qty, price} where qty is a number or null), "
+    "raw_text (full transcription).\n\n"
     "Merchant guidance: many invoices come from local Malaysian suppliers such "
     "as BESTARI FARM, FOOK LEONG, SAIDA, BALAJI, HANEE, JASMINE, and MEWAH. "
     "Match these names even with OCR noise, spacing, or trailing words like "
@@ -59,9 +64,11 @@ OCR_PROMPT = (
     "Total guidance: pick the final amount payable (look for GRAND TOTAL, "
     "TOTAL, JUMLAH, or AMOUNT DUE). Numbers may use commas as thousand "
     "separators; return as a plain number (e.g. 1234.50, not \"1,234.50\").\n\n"
-    "Items: capture each line item with its unit/quantity in the name when "
-    "present (e.g. \"Ayam 5kg\"). If a field is unreadable, use null. "
-    "No markdown, no commentary, JSON only."
+    "Items: extract each line item separately. Put the product name in "
+    "\"name\" and the numeric quantity in \"qty\" (e.g. name=\"Ayam\", qty=5). "
+    "If the unit is non-numeric or part of the name (e.g. \"5kg\"), keep the "
+    "full descriptor in name and set qty to the count of units sold. If a "
+    "field is unreadable, use null. No markdown, no commentary, JSON only."
 )
 
 flask_app = Flask(__name__)
@@ -98,9 +105,23 @@ async def extract_receipt(image_bytes: bytes) -> dict:
     content = response.choices[0].message.content or "{}"
     content = content.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     try:
-        return json.loads(content)
+        parsed = json.loads(content)
     except json.JSONDecodeError:
         return {"raw_text": content}
+    parsed["date"] = normalize_date(parsed.get("date"))
+    return parsed
+
+
+def normalize_date(value) -> str | None:
+    if not isinstance(value, str) or len(value) < 4:
+        return value if isinstance(value, str) else None
+    try:
+        year = int(value[:4])
+    except ValueError:
+        return value
+    if year < MIN_PLAUSIBLE_YEAR:
+        return f"{FALLBACK_YEAR}{value[4:]}"
+    return value
 
 
 def store_receipt(record: dict) -> dict:
@@ -115,13 +136,37 @@ def format_alert(record: dict, parsed: dict) -> str:
     date = parsed.get("date") or "—"
     user = record.get("telegram_username") or record.get("telegram_user_id")
     total_str = f"{total} {currency}".strip() if total is not None else "n/a"
-    return (
-        "New receipt logged\n"
-        f"From: {user}\n"
-        f"Merchant: {merchant}\n"
-        f"Date: {date}\n"
-        f"Total: {total_str}"
-    )
+    lines = [
+        "New receipt logged",
+        f"From: {user}",
+        f"Merchant: {merchant}",
+        f"Date: {date}",
+        f"Total: {total_str}",
+    ]
+    item_lines = format_items(parsed.get("items"))
+    if item_lines:
+        lines.append("")
+        lines.append("Items:")
+        lines.extend(item_lines)
+    return "\n".join(lines)
+
+
+def format_items(items) -> list[str]:
+    if not isinstance(items, list):
+        return []
+    lines = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name") or "?"
+        qty = item.get("qty")
+        if qty is None:
+            qty = item.get("quantity")
+        price = item.get("price")
+        qty_part = f" x{qty}" if qty not in (None, "") else ""
+        price_part = f" — {price}" if price not in (None, "") else ""
+        lines.append(f"• {name}{qty_part}{price_part}")
+    return lines
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -172,15 +217,85 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.exception("Failed to send alert to ALERT_CHAT_ID")
 
 
+HELP_TEXT = (
+    "Send a receipt photo and I'll OCR it, store it, and reply with the "
+    "details.\n\n"
+    "Commands:\n"
+    "/start — short greeting\n"
+    "/summary — today's spending grouped by merchant\n"
+    "/help — show this message"
+)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
-        "Send a receipt photo and I'll log it."
+        "Send a receipt photo and I'll log it. Use /help to see commands."
     )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text(HELP_TEXT)
+
+
+def fetch_today_receipts(user_id: int, today_iso: str) -> list[dict]:
+    result = (
+        supabase.table(RECEIPTS_TABLE)
+        .select("merchant, total, currency")
+        .eq("telegram_user_id", user_id)
+        .eq("receipt_date", today_iso)
+        .execute()
+    )
+    return result.data or []
+
+
+async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if not message or not user:
+        return
+
+    today_iso = datetime.now(MALAYSIA_TZ).date().isoformat()
+    try:
+        rows = await asyncio.to_thread(fetch_today_receipts, user.id, today_iso)
+    except Exception:
+        logger.exception("Summary query failed")
+        await message.reply_text("Failed to fetch today's summary.")
+        return
+
+    if not rows:
+        await message.reply_text(f"No receipts logged for {today_iso}.")
+        return
+
+    by_merchant: dict[str, float] = {}
+    currency = ""
+    for row in rows:
+        merchant = row.get("merchant") or "Unknown"
+        total = row.get("total")
+        if not isinstance(total, (int, float)):
+            continue
+        if not currency and row.get("currency"):
+            currency = row["currency"]
+        by_merchant[merchant] = by_merchant.get(merchant, 0.0) + float(total)
+
+    if not by_merchant:
+        await message.reply_text(
+            f"Receipts found for {today_iso} but none had a numeric total."
+        )
+        return
+
+    suffix = f" {currency}" if currency else ""
+    lines = [f"Summary for {today_iso}:"]
+    for merchant, amount in sorted(by_merchant.items(), key=lambda kv: -kv[1]):
+        lines.append(f"• {merchant}: {amount:.2f}{suffix}")
+    lines.append(f"Total: {sum(by_merchant.values()):.2f}{suffix}")
+    await message.reply_text("\n".join(lines))
 
 
 async def run_bot() -> None:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("summary", summary_command))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
     stop = asyncio.Event()
