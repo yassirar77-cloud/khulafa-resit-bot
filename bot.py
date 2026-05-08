@@ -35,7 +35,7 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 ALERT_CHAT_ID = int(os.environ["ALERT_CHAT_ID"])
 HEALTH_PORT = int(os.environ.get("PORT", "10000"))
 
-ZAI_MODEL = "glm-4.6v-flash"
+ZAI_MODEL = os.environ.get("ZAI_MODEL", "glm-4.6v-flash")
 RECEIPTS_TABLE = "receipts"
 MALAYSIA_TZ = ZoneInfo("Asia/Kuala_Lumpur")
 MIN_PLAUSIBLE_YEAR = 2024
