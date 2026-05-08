@@ -25,17 +25,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-ZHIPU_API_KEY = os.environ["ZHIPU_API_KEY"]
+ZAI_API_KEY = os.environ["ZAI_API_KEY"]
+ZAI_BASE_URL = os.environ.get("ZAI_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/")
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 ALERT_CHAT_ID = int(os.environ["ALERT_CHAT_ID"])
 HEALTH_PORT = int(os.environ.get("PORT", "10000"))
 
-ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"
-ZHIPU_MODEL = "glm-4.6v-flash"
+ZAI_MODEL = "glm-4.6v-flash"
 RECEIPTS_TABLE = "receipts"
 
-zhipu_client = OpenAI(api_key=ZHIPU_API_KEY, base_url=ZHIPU_BASE_URL)
+zai_client = OpenAI(api_key=ZAI_API_KEY, base_url=ZAI_BASE_URL)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 OCR_PROMPT = (
@@ -64,8 +64,8 @@ async def extract_receipt(image_bytes: bytes) -> dict:
     data_url = f"data:image/jpeg;base64,{b64}"
 
     response = await asyncio.to_thread(
-        zhipu_client.chat.completions.create,
-        model=ZHIPU_MODEL,
+        zai_client.chat.completions.create,
+        model=ZAI_MODEL,
         messages=[
             {
                 "role": "user",
