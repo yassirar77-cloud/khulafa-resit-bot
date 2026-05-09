@@ -59,6 +59,18 @@ SUSPICIOUS_PRICE_RATIO = 1.20
 SUSPICIOUS_ITEM_LOOKBACK_DAYS = 7
 DUPLICATE_TOTAL_TOLERANCE = 0.05
 
+NON_PURCHASE_KEYWORDS = [
+    'ADVANCE', 'ADVANS', 'ADVANCE SALARY',
+    'PINJAM', 'PINJAMAN',
+    'GAJI', 'SALARY', 'WAGES',
+    'BONUS', 'KOMISEN', 'COMMISSION',
+    'PETTY CASH', 'CASH OUT', 'WITHDRAW',
+    'TIPS', 'BOCA',
+    'REFUND', 'RETURN',
+    'TRANSFER', 'BANK IN',
+    'KILANG', 'TNB', 'BAYAR ELECTRIC', 'BAYAR AIR', 'BAYAR INTERNET',
+]
+
 # Explicit chat_id -> outlet overrides take precedence over title parsing.
 GROUP_OUTLET_MAP: dict[int, str] = {}
 OUTLET_TITLE_PREFIX = "khulafa"
@@ -371,7 +383,33 @@ def _check_duplicate_receipt(
     return None
 
 
+def should_skip_audit(receipt_data):
+    merchant = (receipt_data.get('merchant') or '').upper()
+    items = receipt_data.get('items') or []
+    items_text = ' '.join(str(i).upper() for i in items)
+    combined = f'{merchant} {items_text}'
+    for keyword in NON_PURCHASE_KEYWORDS:
+        if keyword in combined:
+            return f'non_purchase:{keyword}'
+    if merchant in ('UNKNOWN MERCHANT', 'UNKNOWN', '', 'N/A'):
+        return 'unknown_merchant'
+    total = receipt_data.get('total') or 0
+    if total < 50:
+        return f'small_amount:RM{total}'
+    return None
+
+
 def run_audit_checks(stored: dict, parsed: dict) -> list[tuple[str, str]]:
+    receipt_data = {
+        "merchant": stored.get("merchant"),
+        "items": parsed.get("items"),
+        "total": _to_float(stored.get("total")),
+    }
+    skip_reason = should_skip_audit(receipt_data)
+    if skip_reason:
+        logger.info(f'Skipping audit checks: {skip_reason}')
+        return []
+
     chat_id = stored.get("chat_id")
     total = _to_float(stored.get("total"))
     merchant = stored.get("merchant")
