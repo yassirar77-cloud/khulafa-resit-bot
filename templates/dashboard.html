@@ -1,0 +1,1185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Khulafa Resit Monitor</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #0a0f1a;
+    --card: #111827;
+    --card-hover: #1a2332;
+    --border: #1e293b;
+    --accent: #10b981;
+    --accent-dim: #065f46;
+    --warn: #f59e0b;
+    --danger: #ef4444;
+    --text: #e2e8f0;
+    --text-dim: #64748b;
+    --purple: #8b5cf6;
+    --blue: #3b82f6;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 14px;
+    line-height: 1.4;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .header {
+    background: linear-gradient(135deg, var(--card) 0%, #0f172a 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 20px;
+  }
+
+  .header-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 4px;
+  }
+
+  .header h1 {
+    font-size: 18px;
+    font-weight: 700;
+    margin: 0;
+    background: linear-gradient(90deg, var(--accent), var(--blue));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .header p {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin: 0;
+  }
+
+  .tab-nav {
+    display: flex;
+    gap: 6px;
+    padding: 10px 16px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .tab-nav::-webkit-scrollbar { display: none; }
+
+  .tab-btn {
+    padding: 7px 14px;
+    border-radius: 20px;
+    border: none;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+    transition: all 0.2s;
+    background: var(--card);
+    color: var(--text-dim);
+    font-family: inherit;
+  }
+
+  .tab-btn.active {
+    background: var(--accent);
+    color: #000;
+    box-shadow: 0 2px 8px rgba(16, 185, 129, 0.4);
+  }
+
+  .container {
+    padding: 0 16px 32px;
+    padding-bottom: calc(32px + env(safe-area-inset-bottom));
+    max-width: 720px;
+    margin: 0 auto;
+  }
+
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+
+  @media (min-width: 540px) {
+    .stats-row { grid-template-columns: repeat(4, 1fr); }
+  }
+
+  .stat-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 16px;
+    min-width: 0;
+  }
+
+  .stat-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+  }
+
+  .stat-label {
+    font-size: 10px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 600;
+  }
+
+  .stat-icon { font-size: 18px; }
+
+  .stat-value {
+    font-size: 20px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    word-break: break-word;
+  }
+
+  .stat-sub {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 4px;
+  }
+
+  .section {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+
+  .section-title {
+    font-size: 13px;
+    font-weight: 600;
+    margin: 0 0 12px;
+    color: var(--text-dim);
+  }
+
+  .chart-wrap {
+    position: relative;
+    height: 200px;
+  }
+
+  .chart-wrap.tall { height: 220px; }
+
+  .legend {
+    display: flex;
+    gap: 16px;
+    margin-top: 8px;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+
+  .legend-item {
+    font-size: 11px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+  }
+
+  .outlet-row { margin-bottom: 12px; }
+  .outlet-row:last-child { margin-bottom: 0; }
+
+  .outlet-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12px;
+    margin-bottom: 4px;
+  }
+
+  .outlet-name { font-weight: 500; }
+
+  .outlet-amount {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600;
+  }
+
+  .outlet-amount.warn { color: var(--warn); }
+
+  .bar-track {
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+
+  .bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.6s ease;
+    background: linear-gradient(90deg, var(--accent), var(--blue));
+  }
+
+  .bar-fill.warn {
+    background: linear-gradient(90deg, var(--warn), var(--danger));
+  }
+
+  .alert {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+    margin-bottom: 8px;
+    border-left: 3px solid var(--accent);
+  }
+
+  .alert.high {
+    border-color: rgba(239, 68, 68, 0.25);
+    border-left-color: var(--danger);
+  }
+
+  .alert.medium { border-left-color: var(--warn); }
+
+  .alert-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 6px;
+  }
+
+  .alert-icon { font-size: 18px; }
+
+  .alert-time {
+    font-size: 10px;
+    color: var(--text-dim);
+    background: var(--border);
+    padding: 2px 8px;
+    border-radius: 10px;
+  }
+
+  .alert-msg {
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 4px;
+    line-height: 1.4;
+  }
+
+  .alert-meta {
+    font-size: 11px;
+    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .severity-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+  }
+
+  .severity-dot.high { background: var(--danger); box-shadow: 0 0 6px rgba(239, 68, 68, 0.5); }
+  .severity-dot.medium { background: var(--warn); box-shadow: 0 0 6px rgba(245, 158, 11, 0.5); }
+  .severity-dot.low { background: var(--accent); box-shadow: 0 0 6px rgba(16, 185, 129, 0.5); }
+
+  .top-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .top-item:last-child { border-bottom: none; }
+
+  .top-item-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .rank {
+    width: 22px;
+    height: 22px;
+    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    background: var(--border);
+    color: var(--text-dim);
+    flex-shrink: 0;
+  }
+
+  .rank.medal {
+    background: rgba(16, 185, 129, 0.15);
+    color: var(--accent);
+  }
+
+  .item-name {
+    font-size: 13px;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .item-amount {
+    font-size: 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600;
+  }
+
+  .trend { font-size: 14px; }
+  .trend.up { color: var(--warn); }
+  .trend.down { color: var(--accent); }
+  .trend.flat { color: var(--text-dim); }
+
+  .receipt-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+    margin-bottom: 8px;
+  }
+
+  .receipt-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .receipt-supplier {
+    font-size: 14px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .receipt-meta {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 2px;
+  }
+
+  .receipt-total {
+    font-size: 16px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--accent);
+    white-space: nowrap;
+  }
+
+  .receipt-total.warn { color: var(--warn); }
+
+  .receipt-id {
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-top: 6px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .receipt-items {
+    display: none;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
+
+  .receipt-card.expanded .receipt-items { display: block; }
+  .receipt-card { cursor: pointer; }
+
+  .item-line {
+    display: flex;
+    justify-content: space-between;
+    padding: 3px 0;
+    font-size: 12px;
+  }
+
+  .item-line .name { color: var(--text); flex: 1; margin-right: 8px; }
+  .item-line .price { color: var(--text-dim); font-family: 'JetBrains Mono', monospace; }
+
+  .empty {
+    color: var(--text-dim);
+    text-align: center;
+    padding: 24px 12px;
+    font-size: 13px;
+  }
+
+  .skeleton {
+    height: 14px;
+    background: var(--border);
+    border-radius: 4px;
+    margin: 6px 0;
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .error-banner {
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    color: var(--danger);
+    padding: 12px 16px;
+    border-radius: 10px;
+    font-size: 12px;
+    margin-bottom: 16px;
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-title">
+    <span style="font-size:22px">🧾</span>
+    <h1>Khulafa Resit Monitor</h1>
+  </div>
+  <p id="header-sub">Live monitoring • memuatkan…</p>
+</div>
+
+<div class="tab-nav" id="tab-nav">
+  <button class="tab-btn active" data-tab="overview">📊 Overview</button>
+  <button class="tab-btn" data-tab="alerts">🚨 Alerts</button>
+  <button class="tab-btn" data-tab="prices">📈 Harga</button>
+  <button class="tab-btn" data-tab="receipts">🧾 Resit</button>
+</div>
+
+<div class="container">
+
+  <div id="error" class="error-banner" style="display:none"></div>
+
+  <div class="panel active" data-panel="overview">
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-head"><span class="stat-label">Hari Ini</span><span class="stat-icon">💰</span></div>
+        <div class="stat-value" id="stat-today">—</div>
+        <div class="stat-sub" id="stat-today-sub">&nbsp;</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-head"><span class="stat-label">Minggu Ini</span><span class="stat-icon">📅</span></div>
+        <div class="stat-value" id="stat-week" style="color:var(--blue)">—</div>
+        <div class="stat-sub" id="stat-week-sub">&nbsp;</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-head"><span class="stat-label">Resit Hari Ini</span><span class="stat-icon">🧾</span></div>
+        <div class="stat-value" id="stat-receipts" style="color:var(--purple)">—</div>
+        <div class="stat-sub">processed</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-head"><span class="stat-label">Alerts</span><span class="stat-icon">🚨</span></div>
+        <div class="stat-value" id="stat-alerts">—</div>
+        <div class="stat-sub" id="stat-alerts-sub">&nbsp;</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h3 class="section-title">📊 Perbelanjaan Harian (8 hari)</h3>
+      <div class="chart-wrap"><canvas id="chart-daily"></canvas></div>
+    </div>
+
+    <div class="section">
+      <h3 class="section-title">📍 Perbelanjaan Per Outlet (Minggu Ini)</h3>
+      <div id="outlets">
+        <div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" data-panel="alerts">
+    <div style="font-size:12px;color:var(--text-dim);margin-bottom:12px" id="alerts-sub">Memuatkan alerts…</div>
+    <div id="alerts-list">
+      <div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>
+    </div>
+  </div>
+
+  <div class="panel" data-panel="prices">
+    <div class="section">
+      <h3 class="section-title">📈 Trend Harga (4 minggu) — purata seunit</h3>
+      <div class="chart-wrap tall"><canvas id="chart-prices"></canvas></div>
+      <div class="legend" id="prices-legend"></div>
+    </div>
+
+    <div class="section">
+      <h3 class="section-title">🏆 Top Items Minggu Ini</h3>
+      <div id="top-items">
+        <div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" data-panel="receipts">
+    <div style="font-size:12px;color:var(--text-dim);margin-bottom:12px">Resit terbaru</div>
+    <div id="receipts-list">
+      <div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const SUPABASE_URL = "{{ supabase_url }}";
+const SUPABASE_ANON_KEY = "{{ supabase_anon_key }}";
+const RECEIPTS_TABLE = "{{ receipts_table }}";
+
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg) {
+  tg.ready();
+  tg.expand();
+  try { tg.setHeaderColor("#0a0f1a"); } catch (e) {}
+  try { tg.setBackgroundColor("#0a0f1a"); } catch (e) {}
+}
+
+const DAY_MS = 86400000;
+const charts = {};
+let receipts = [];
+let stats = null;
+
+function escapeHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function fmtRM(n) {
+  if (n == null || isNaN(n)) return "—";
+  const num = Number(n);
+  return "RM" + num.toLocaleString("en-MY", { minimumFractionDigits: num < 100 ? 2 : 0, maximumFractionDigits: 2 });
+}
+
+function fmtTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return d.toLocaleTimeString("ms-MY", { hour: "2-digit", minute: "2-digit" });
+}
+
+function dateLabel(d) {
+  return d.toLocaleDateString("ms-MY", { day: "numeric", month: "short" });
+}
+
+function startOfDay(d) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+function receiptDate(r) {
+  return new Date(r.receipt_date || r.created_at);
+}
+
+function normaliseMerchant(name) {
+  if (!name) return "UNKNOWN";
+  return String(name).trim().toUpperCase();
+}
+
+function outletName(r) {
+  if (r && typeof r.outlet === "string" && r.outlet.trim()) {
+    return r.outlet.trim();
+  }
+  return null;
+}
+
+function normaliseItemName(name) {
+  if (!name) return "";
+  return String(name).trim().toLowerCase();
+}
+
+async function fetchReceipts() {
+  const url = `${SUPABASE_URL}/rest/v1/${RECEIPTS_TABLE}?select=*&order=created_at.desc&limit=500`;
+  const res = await fetch(url, {
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+    },
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Supabase ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+function computeStats() {
+  const today = startOfDay(new Date());
+  const yesterday = new Date(today.getTime() - DAY_MS);
+  const weekAgo = new Date(today.getTime() - 6 * DAY_MS);
+  const twoWeeksAgo = new Date(today.getTime() - 13 * DAY_MS);
+
+  const todayList = [];
+  const yesterdayList = [];
+  const weekList = [];
+  const priorWeekList = [];
+
+  for (const r of receipts) {
+    const d = receiptDate(r);
+    if (d >= today) todayList.push(r);
+    else if (d >= yesterday && d < today) yesterdayList.push(r);
+    if (d >= weekAgo) weekList.push(r);
+    else if (d >= twoWeeksAgo && d < weekAgo) priorWeekList.push(r);
+  }
+
+  const sumTotal = list => list.reduce((s, r) => s + (Number(r.total) || 0), 0);
+
+  const todayTotal = sumTotal(todayList);
+  const yesterdayTotal = sumTotal(yesterdayList);
+  const weekTotal = sumTotal(weekList);
+
+  const days = [];
+  for (let i = 7; i >= 0; i--) {
+    const d = new Date(today.getTime() - i * DAY_MS);
+    const next = new Date(d.getTime() + DAY_MS);
+    const list = receipts.filter(r => {
+      const rd = receiptDate(r);
+      return rd >= d && rd < next;
+    });
+    days.push({ date: d, total: sumTotal(list), count: list.length });
+  }
+
+  const outletWeek = {};
+  const outletPrior = {};
+  let outletReceiptCount = 0;
+  for (const r of weekList) {
+    const o = outletName(r);
+    if (!o) continue;
+    outletReceiptCount += 1;
+    outletWeek[o] = (outletWeek[o] || 0) + (Number(r.total) || 0);
+  }
+  for (const r of priorWeekList) {
+    const o = outletName(r);
+    if (!o) continue;
+    outletPrior[o] = (outletPrior[o] || 0) + (Number(r.total) || 0);
+  }
+  const outlets = Object.keys(outletWeek)
+    .map(o => ({ name: o, spent: outletWeek[o], avg: outletPrior[o] || 0 }))
+    .sort((a, b) => b.spent - a.spent);
+
+  const itemAggWeek = {};
+  const itemAggPrior = {};
+  function addItem(agg, list) {
+    for (const r of list) {
+      if (!Array.isArray(r.items)) continue;
+      for (const it of r.items) {
+        if (!it || !it.name) continue;
+        const key = normaliseItemName(it.name);
+        if (!key) continue;
+        const price = Number(it.price);
+        if (isNaN(price) || price <= 0) continue;
+        let qty = 1;
+        const q = Number(it.qty != null ? it.qty : it.quantity);
+        if (!isNaN(q) && q > 0) qty = q;
+        if (!agg[key]) agg[key] = { name: it.name, count: 0, total: 0, unitPrices: [] };
+        agg[key].count += 1;
+        agg[key].total += price;
+        agg[key].unitPrices.push(price / qty);
+      }
+    }
+  }
+  addItem(itemAggWeek, weekList);
+  addItem(itemAggPrior, priorWeekList);
+
+  const topItems = Object.values(itemAggWeek)
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 10)
+    .map(it => {
+      const key = normaliseItemName(it.name);
+      const prior = itemAggPrior[key];
+      let trend = "flat";
+      if (prior && prior.unitPrices.length) {
+        const avgNow = it.unitPrices.reduce((a, b) => a + b, 0) / it.unitPrices.length;
+        const avgPrior = prior.unitPrices.reduce((a, b) => a + b, 0) / prior.unitPrices.length;
+        if (avgNow > avgPrior * 1.05) trend = "up";
+        else if (avgNow < avgPrior * 0.95) trend = "down";
+      }
+      return { name: it.name, total: it.total, count: it.count, trend };
+    });
+
+  const priceTrendItems = topItems.slice(0, 3).map(t => normaliseItemName(t.name));
+  const weeks = 4;
+  const priceTrend = [];
+  for (let i = weeks - 1; i >= 0; i--) {
+    const start = new Date(today.getTime() - (i + 1) * 7 * DAY_MS);
+    const end = new Date(today.getTime() - i * 7 * DAY_MS);
+    const bucket = { label: dateLabel(start) };
+    for (const key of priceTrendItems) bucket[key] = null;
+    const samples = {};
+    for (const r of receipts) {
+      const rd = receiptDate(r);
+      if (rd < start || rd >= end) continue;
+      if (!Array.isArray(r.items)) continue;
+      for (const it of r.items) {
+        if (!it || !it.name) continue;
+        const key = normaliseItemName(it.name);
+        if (!priceTrendItems.includes(key)) continue;
+        const price = Number(it.price);
+        if (isNaN(price) || price <= 0) continue;
+        let qty = 1;
+        const q = Number(it.qty != null ? it.qty : it.quantity);
+        if (!isNaN(q) && q > 0) qty = q;
+        if (!samples[key]) samples[key] = [];
+        samples[key].push(price / qty);
+      }
+    }
+    for (const key of priceTrendItems) {
+      if (samples[key] && samples[key].length) {
+        bucket[key] = samples[key].reduce((a, b) => a + b, 0) / samples[key].length;
+      }
+    }
+    priceTrend.push(bucket);
+  }
+
+  const alerts = computeAlerts({
+    receipts,
+    today,
+    todayList,
+    weekList,
+    priorWeekList,
+    itemAggWeek,
+    itemAggPrior,
+  });
+
+  return {
+    today, todayTotal, yesterdayTotal, weekTotal,
+    todayCount: todayList.length,
+    days, outlets, outletReceiptCount,
+    weekReceiptCount: weekList.length,
+    topItems, priceTrend, priceTrendItems, alerts,
+  };
+}
+
+function computeAlerts({ receipts, today, todayList, weekList, priorWeekList, itemAggWeek, itemAggPrior }) {
+  const alerts = [];
+  let id = 1;
+
+  for (const key of Object.keys(itemAggWeek)) {
+    const cur = itemAggWeek[key];
+    const prev = itemAggPrior[key];
+    if (!prev || !prev.unitPrices.length || !cur.unitPrices.length) continue;
+    const avgNow = cur.unitPrices.reduce((a, b) => a + b, 0) / cur.unitPrices.length;
+    const avgPrev = prev.unitPrices.reduce((a, b) => a + b, 0) / prev.unitPrices.length;
+    if (avgPrev <= 0) continue;
+    const pct = (avgNow - avgPrev) / avgPrev;
+    if (pct >= 0.20) {
+      alerts.push({
+        id: id++, icon: "📈",
+        msg: `${cur.name} naik +${(pct * 100).toFixed(0)}% vs minggu lepas (${avgPrev.toFixed(2)} → ${avgNow.toFixed(2)})`,
+        outlet: "—", time: "Minggu ini", severity: pct >= 0.30 ? "high" : "medium",
+      });
+    }
+  }
+
+  const dupKey = {};
+  for (const r of weekList) {
+    const t = Number(r.total);
+    if (!t) continue;
+    const m = normaliseMerchant(r.merchant);
+    const day = receiptDate(r).toISOString().slice(0, 10);
+    const key = `${m}|${t.toFixed(2)}|${day}`;
+    (dupKey[key] = dupKey[key] || []).push(r);
+  }
+  for (const key of Object.keys(dupKey)) {
+    const list = dupKey[key];
+    if (list.length >= 2) {
+      const r0 = list[0];
+      alerts.push({
+        id: id++, icon: "⚠️",
+        msg: `${list.length} resit ${normaliseMerchant(r0.merchant)} sama amount ${fmtRM(r0.total)} pada ${receiptDate(r0).toLocaleDateString("ms-MY")}`,
+        outlet: normaliseMerchant(r0.merchant),
+        time: fmtTime(r0.created_at),
+        severity: "high",
+      });
+    }
+  }
+
+  const merchantTotals = {};
+  for (const r of receipts) {
+    const m = normaliseMerchant(r.merchant);
+    if (!merchantTotals[m]) merchantTotals[m] = [];
+    const t = Number(r.total);
+    if (!isNaN(t) && t > 0) merchantTotals[m].push(t);
+  }
+  for (const r of todayList) {
+    const t = Number(r.total);
+    if (!t) continue;
+    const m = normaliseMerchant(r.merchant);
+    const totals = merchantTotals[m] || [];
+    if (totals.length < 3) continue;
+    const avg = totals.reduce((a, b) => a + b, 0) / totals.length;
+    if (t >= avg * 2) {
+      alerts.push({
+        id: id++, icon: "💰",
+        msg: `Belian besar ${fmtRM(t)} dari ${m} (purata ${fmtRM(avg)})`,
+        outlet: m, time: fmtTime(r.created_at), severity: "medium",
+      });
+    }
+  }
+
+  const seenBefore = new Set();
+  const merchantFirstSeen = {};
+  for (const r of receipts) {
+    const m = normaliseMerchant(r.merchant);
+    const d = receiptDate(r).getTime();
+    if (merchantFirstSeen[m] == null || d < merchantFirstSeen[m]) merchantFirstSeen[m] = d;
+  }
+  const yesterdayMs = today.getTime() - DAY_MS;
+  for (const m of Object.keys(merchantFirstSeen)) {
+    if (merchantFirstSeen[m] >= yesterdayMs) {
+      const r = receipts.find(x => normaliseMerchant(x.merchant) === m);
+      if (!r) continue;
+      alerts.push({
+        id: id++, icon: "🆕",
+        msg: `Supplier baru: ${m}${r.total ? " " + fmtRM(r.total) : ""}`,
+        outlet: m, time: fmtTime(r.created_at), severity: "low",
+      });
+    }
+  }
+
+  for (const r of weekList) {
+    const d = receiptDate(r);
+    const day = d.getDay();
+    if (day === 0 || day === 6) {
+      alerts.push({
+        id: id++, icon: "🕐",
+        msg: `Resit masuk hari ${day === 0 ? "Ahad" : "Sabtu"} dari ${normaliseMerchant(r.merchant)}`,
+        outlet: normaliseMerchant(r.merchant),
+        time: d.toLocaleDateString("ms-MY", { weekday: "short" }) + " " + fmtTime(r.created_at),
+        severity: "medium",
+      });
+    }
+  }
+
+  alerts.sort((a, b) => {
+    const order = { high: 0, medium: 1, low: 2 };
+    return (order[a.severity] || 9) - (order[b.severity] || 9);
+  });
+
+  return alerts;
+}
+
+function renderOverview() {
+  const { todayTotal, yesterdayTotal, weekTotal, todayCount, days, outlets, alerts } = stats;
+
+  document.getElementById("stat-today").textContent = fmtRM(todayTotal);
+  const todayCard = document.getElementById("stat-today");
+  const todaySub = document.getElementById("stat-today-sub");
+  if (yesterdayTotal > 0) {
+    const up = todayTotal > yesterdayTotal;
+    todayCard.style.color = up ? "var(--warn)" : "var(--accent)";
+    todaySub.textContent = up ? "↑ vs semalam" : "↓ vs semalam";
+  } else {
+    todayCard.style.color = "var(--accent)";
+    todaySub.textContent = "tiada data semalam";
+  }
+
+  document.getElementById("stat-week").textContent = fmtRM(weekTotal);
+  document.getElementById("stat-week-sub").textContent = `${days.filter(d => d.count > 0).length} hari aktif`;
+
+  document.getElementById("stat-receipts").textContent = todayCount;
+
+  const highCount = alerts.filter(a => a.severity === "high").length;
+  document.getElementById("stat-alerts").textContent = alerts.length;
+  document.getElementById("stat-alerts").style.color = highCount > 0 ? "var(--danger)" : "var(--accent)";
+  document.getElementById("stat-alerts-sub").textContent = highCount > 0 ? `${highCount} perlu perhatian` : "semua ok";
+
+  document.querySelector('[data-tab="alerts"]').textContent = `🚨 Alerts${alerts.length ? ` (${alerts.length})` : ""}`;
+
+  renderDailyChart();
+  renderOutlets();
+}
+
+function renderDailyChart() {
+  const canvas = document.getElementById("chart-daily");
+  if (!canvas) return;
+  if (charts.daily) charts.daily.destroy();
+
+  const labels = stats.days.map(d => dateLabel(d.date));
+  const data = stats.days.map(d => d.total);
+  const colors = stats.days.map((_, i) => i === stats.days.length - 1 ? "#10b981" : "rgba(59, 130, 246, 0.55)");
+
+  charts.daily = new Chart(canvas, {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [{
+        label: "Total",
+        data,
+        backgroundColor: colors,
+        borderRadius: 4,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: "#1a2332",
+          titleColor: "#e2e8f0",
+          bodyColor: "#e2e8f0",
+          borderColor: "#1e293b",
+          borderWidth: 1,
+          callbacks: { label: ctx => " " + fmtRM(ctx.parsed.y) },
+        },
+      },
+      scales: {
+        x: { grid: { color: "rgba(30, 41, 59, 0.4)" }, ticks: { color: "#64748b", font: { size: 10 } } },
+        y: {
+          grid: { color: "rgba(30, 41, 59, 0.4)" },
+          ticks: {
+            color: "#64748b", font: { size: 10 },
+            callback: v => v >= 1000 ? (v / 1000).toFixed(0) + "k" : v,
+          },
+        },
+      },
+    },
+  });
+}
+
+function renderOutlets() {
+  const el = document.getElementById("outlets");
+  if (!stats.outlets.length) {
+    if (stats.weekReceiptCount > 0) {
+      el.innerHTML = '<div class="empty">Tiada nama outlet pada resit ini.<br><span style="font-size:11px">Jalankan migrations/0001_add_outlet_column.sql dan hantar resit baru.</span></div>';
+    } else {
+      el.innerHTML = '<div class="empty">Tiada perbelanjaan minggu ini.</div>';
+    }
+    return;
+  }
+  const max = stats.outlets[0].spent || 1;
+  el.innerHTML = stats.outlets.slice(0, 10).map(o => {
+    const pct = (o.spent / max) * 100;
+    const overTypical = o.avg > 0 && o.spent > o.avg * 1.1;
+    return `
+      <div class="outlet-row">
+        <div class="outlet-head">
+          <span class="outlet-name">${escapeHtml(o.name)}</span>
+          <span class="outlet-amount${overTypical ? " warn" : ""}">${fmtRM(o.spent)}${overTypical ? " ⚠️" : ""}</span>
+        </div>
+        <div class="bar-track">
+          <div class="bar-fill${overTypical ? " warn" : ""}" style="width:${pct.toFixed(1)}%"></div>
+        </div>
+      </div>`;
+  }).join("");
+}
+
+function renderAlerts() {
+  const el = document.getElementById("alerts-list");
+  const sub = document.getElementById("alerts-sub");
+  if (!stats.alerts.length) {
+    sub.textContent = "Tiada alerts pada masa ini";
+    el.innerHTML = '<div class="empty">Semua ok ✅</div>';
+    return;
+  }
+  sub.textContent = `${stats.alerts.length} alert${stats.alerts.length === 1 ? "" : "s"} dikesan`;
+  el.innerHTML = stats.alerts.map(a => `
+    <div class="alert ${escapeHtml(a.severity)}">
+      <div class="alert-head">
+        <span class="alert-icon">${a.icon}</span>
+        <span class="alert-time">${escapeHtml(a.time)}</span>
+      </div>
+      <div class="alert-msg">${escapeHtml(a.msg)}</div>
+      <div class="alert-meta">
+        <span class="severity-dot ${escapeHtml(a.severity)}"></span>
+        ${escapeHtml(a.outlet)} • ${escapeHtml(a.severity.toUpperCase())}
+      </div>
+    </div>
+  `).join("");
+}
+
+function renderPrices() {
+  renderPriceChart();
+  renderTopItems();
+}
+
+function renderPriceChart() {
+  const canvas = document.getElementById("chart-prices");
+  if (!canvas) return;
+  if (charts.prices) charts.prices.destroy();
+
+  const palette = ["#10b981", "#8b5cf6", "#3b82f6"];
+  const itemKeys = stats.priceTrendItems;
+  const itemNames = itemKeys.map(k => stats.topItems.find(t => normaliseItemName(t.name) === k)?.name || k);
+
+  if (!itemKeys.length || !stats.priceTrend.some(p => itemKeys.some(k => p[k] != null))) {
+    canvas.parentElement.innerHTML = '<div class="empty">Tiada data harga untuk dipaparkan.</div>';
+    document.getElementById("prices-legend").innerHTML = "";
+    return;
+  }
+
+  const labels = stats.priceTrend.map(p => p.label);
+  const datasets = itemKeys.map((key, i) => ({
+    label: itemNames[i],
+    data: stats.priceTrend.map(p => p[key]),
+    borderColor: palette[i % palette.length],
+    backgroundColor: palette[i % palette.length] + "33",
+    borderWidth: 2,
+    tension: 0.3,
+    pointRadius: 3,
+    spanGaps: true,
+  }));
+
+  charts.prices = new Chart(canvas, {
+    type: "line",
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: "#1a2332",
+          titleColor: "#e2e8f0",
+          bodyColor: "#e2e8f0",
+          borderColor: "#1e293b",
+          borderWidth: 1,
+          callbacks: { label: ctx => ` ${ctx.dataset.label}: ${fmtRM(ctx.parsed.y)}` },
+        },
+      },
+      scales: {
+        x: { grid: { color: "rgba(30, 41, 59, 0.4)" }, ticks: { color: "#64748b", font: { size: 10 } } },
+        y: { grid: { color: "rgba(30, 41, 59, 0.4)" }, ticks: { color: "#64748b", font: { size: 10 } } },
+      },
+    },
+  });
+
+  document.getElementById("prices-legend").innerHTML = itemNames.map((n, i) => `
+    <span class="legend-item"><span class="legend-dot" style="background:${palette[i % palette.length]}"></span>${escapeHtml(n)}</span>
+  `).join("");
+}
+
+function renderTopItems() {
+  const el = document.getElementById("top-items");
+  if (!stats.topItems.length) {
+    el.innerHTML = '<div class="empty">Tiada item dalam 7 hari lepas.</div>';
+    return;
+  }
+  el.innerHTML = stats.topItems.slice(0, 8).map((it, i) => {
+    const trend = it.trend === "up" ? "↑" : it.trend === "down" ? "↓" : "→";
+    return `
+      <div class="top-item">
+        <div class="top-item-left">
+          <span class="rank ${i < 3 ? "medal" : ""}">${i + 1}</span>
+          <span class="item-name">${escapeHtml(it.name)}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="item-amount">${fmtRM(it.total)}</span>
+          <span class="trend ${it.trend}">${trend}</span>
+        </div>
+      </div>`;
+  }).join("");
+}
+
+function renderReceipts() {
+  const el = document.getElementById("receipts-list");
+  const recent = receipts.slice(0, 20);
+  if (!recent.length) {
+    el.innerHTML = '<div class="empty">Tiada resit lagi.</div>';
+    return;
+  }
+  el.innerHTML = recent.map((r, idx) => {
+    const items = Array.isArray(r.items) ? r.items : [];
+    const conf = r.merchant && r.total != null && r.receipt_date && items.length ? "high"
+      : r.total != null && r.merchant ? "medium" : "low";
+    const confDot = conf === "high" ? "🟢" : conf === "medium" ? "🟡" : "🔴";
+    const total = Number(r.total);
+    const big = !isNaN(total) && total > 1500;
+    const itemsHtml = items.length
+      ? items.map(it => `
+        <div class="item-line">
+          <span class="name">${escapeHtml(it.name || "Item")}${it.qty ? ` ×${escapeHtml(it.qty)}` : ""}</span>
+          <span class="price">${it.price != null ? fmtRM(it.price) : "—"}</span>
+        </div>
+      `).join("")
+      : '<div class="empty" style="padding:8px 0">Tiada item OCR.</div>';
+    const dateStr = r.receipt_date || (r.created_at ? new Date(r.created_at).toLocaleDateString("ms-MY") : "");
+    return `
+      <div class="receipt-card" data-idx="${idx}">
+        <div class="receipt-row">
+          <div style="min-width:0;flex:1">
+            <div class="receipt-supplier">${escapeHtml(normaliseMerchant(r.merchant))} <span style="font-size:12px">${confDot}</span></div>
+            <div class="receipt-meta">📍 ${escapeHtml(dateStr)} • ${items.length} items • ${escapeHtml(fmtTime(r.created_at))}</div>
+          </div>
+          <div class="receipt-total${big ? " warn" : ""}">${fmtRM(r.total)}</div>
+        </div>
+        <div class="receipt-items">${itemsHtml}</div>
+        <div class="receipt-id">#${escapeHtml(r.id || idx + 1)}</div>
+      </div>`;
+  }).join("");
+  el.querySelectorAll(".receipt-card").forEach(card => {
+    card.addEventListener("click", () => card.classList.toggle("expanded"));
+  });
+}
+
+function switchTab(id) {
+  document.querySelectorAll(".tab-btn").forEach(b => {
+    b.classList.toggle("active", b.dataset.tab === id);
+  });
+  document.querySelectorAll(".panel").forEach(p => {
+    p.classList.toggle("active", p.dataset.panel === id);
+  });
+  if (!stats) return;
+  if (id === "overview") {
+    renderDailyChart();
+    renderOutlets();
+  } else if (id === "alerts") renderAlerts();
+  else if (id === "prices") renderPrices();
+  else if (id === "receipts") renderReceipts();
+}
+
+document.getElementById("tab-nav").addEventListener("click", e => {
+  const btn = e.target.closest(".tab-btn");
+  if (btn) switchTab(btn.dataset.tab);
+});
+
+function showError(msg) {
+  const el = document.getElementById("error");
+  el.textContent = msg;
+  el.style.display = "block";
+}
+
+async function init() {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    showError("Dashboard not configured: missing Supabase credentials.");
+    document.getElementById("header-sub").textContent = "Konfigurasi diperlukan";
+    return;
+  }
+  try {
+    receipts = await fetchReceipts();
+    stats = computeStats();
+    document.getElementById("header-sub").textContent =
+      `Live monitoring • ${new Date().toLocaleDateString("ms-MY", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}`;
+    renderOverview();
+    renderAlerts();
+    renderReceipts();
+  } catch (err) {
+    console.error(err);
+    showError("Gagal muat resit: " + err.message);
+    document.getElementById("header-sub").textContent = "Ralat memuatkan data";
+  }
+}
+
+init();
+</script>
+</body>
+</html>
