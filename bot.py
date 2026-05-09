@@ -59,6 +59,53 @@ SUSPICIOUS_PRICE_RATIO = 1.20
 SUSPICIOUS_ITEM_LOOKBACK_DAYS = 7
 DUPLICATE_TOTAL_TOLERANCE = 0.05
 
+KNOWN_SUPPLIERS = [
+    # Spices & dry goods
+    'BABAS', 'SAIDA', 'BALAJI', 'SHREE MAP JAYA',
+    # Rice
+    'JASMINE', 'BERAS',
+    # Dairy
+    'MEWAH', 'F&N', 'DUTCH LADY',
+    # Meat & frozen
+    'HANEE', 'BS FROZEN', 'BESTARI FARM', 'BESTARI',
+    # Tea & coffee
+    'CAMELLIAA', 'CAMELLIA', 'BOH',
+    # Eggs
+    'JY RESOURCES', 'JUTA RIA',
+    # Plastics & packaging
+    'REZA PLASTIC', 'REZA', 'HAMEED PLASTICS', 'HAMEED',
+    # Vegetables
+    'SAYUR', 'PASAR BORONG',
+    # Drinks & wholesale
+    'BESTARI WHOLESALE',
+    # Seafood
+    'FOOK LEONG', 'QUIWAVE OCEANIC', 'QUIWAVE',
+    # Daily consumables
+    'DAILY PAY',
+    # Ice
+    'EVEREST AISVARAM', 'EVEREST',
+    # Catering
+    'CATERERS AT TANJUNG', 'MYMOON',
+    # Convenience
+    'KK SUPERMART', 'KK MART',
+    # Utility/common chains
+    '99 SPEEDMART', '99', 'TESCO', 'LOTUSS', 'GIANT',
+]
+
+LEARNED_SUPPLIER_THRESHOLD = 3
+
+
+def is_known_supplier(merchant) -> bool:
+    """Check if merchant matches any known supplier (substring, case-insensitive)."""
+    if not merchant:
+        return False
+    m = merchant.upper().strip()
+    for known in KNOWN_SUPPLIERS:
+        if known in m or m in known:
+            return True
+    return False
+
+
 NON_PURCHASE_KEYWORDS = [
     'ADVANCE', 'ADVANS', 'ADVANCE SALARY',
     'PINJAM', 'PINJAMAN',
@@ -292,17 +339,21 @@ def _check_big_purchase(chat_id: int, total: float) -> str | None:
 def _check_new_supplier(chat_id: int, merchant: str, total: float, current_id) -> str | None:
     if not merchant or total <= NEW_SUPPLIER_THRESHOLD:
         return None
-    query = (
+    if is_known_supplier(merchant):
+        return None
+    res = (
         supabase.table(RECEIPTS_TABLE)
         .select("id")
         .eq("chat_id", chat_id)
         .eq("merchant", merchant)
-        .limit(2)
+        .limit(LEARNED_SUPPLIER_THRESHOLD + 1)
+        .execute()
     )
-    res = query.execute()
     rows = res.data or []
     if current_id is not None:
         rows = [r for r in rows if r.get("id") != current_id]
+    if len(rows) >= LEARNED_SUPPLIER_THRESHOLD:
+        return None
     if rows:
         return None
     return (
