@@ -46,6 +46,7 @@ HEALTH_PORT = int(os.environ.get("PORT", "10000"))
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "")
 
 ZAI_MODEL = os.environ.get("ZAI_MODEL", "glm-4.6v-flash")
+ZAI_VERIFY_MODEL = os.environ.get("ZAI_VERIFY_MODEL", ZAI_MODEL)
 RECEIPTS_TABLE = "receipts"
 AUDIT_TABLE = "audit_responses"
 MALAYSIA_TZ = ZoneInfo("Asia/Kuala_Lumpur")
@@ -204,6 +205,113 @@ async def extract_receipt(image_bytes: bytes) -> dict:
     return parsed
 
 
+VERIFY_PROMPT_TEMPLATE = (
+    "You are a receipt audit assistant. A first-pass OCR extracted the following "
+    "from this receipt photo:\n\n"
+    "Merchant: {merchant}\n"
+    "Date: {date}\n"
+    "Total: RM{total}\n"
+    "Items: {items_list}\n\n"
+    "Re-examine the photo carefully and respond ONLY in JSON with:\n"
+    "{{\n"
+    "  \"verdict\": \"CONFIRMED\" | \"WRONG\" | \"PARTIAL\",\n"
+    "  \"confidence\": 0-100,\n"
+    "  \"errors\": [list of specific errors found, e.g. 'Total reads RM156.40 not RM165.40'],\n"
+    "  \"corrections\": {{ \"merchant\": \"...\", \"total\": ..., \"items\": [...] }}  // only fields that need correction\n"
+    "}}\n\n"
+    "Be strict. If a total digit is unclear, flag it. If an item price doesn't "
+    "match the item, flag it. If date format is mixed up, flag it. Return WRONG "
+    "if any number is incorrect, PARTIAL if minor issues, CONFIRMED only if 100% "
+    "accurate."
+)
+
+
+_VERDICT_COUNTS: dict[str, int] = {
+    "CONFIRMED": 0,
+    "PARTIAL": 0,
+    "WRONG": 0,
+    "UNCHECKED": 0,
+}
+
+
+def _format_items_for_prompt(items) -> str:
+    if not isinstance(items, list) or not items:
+        return "(none)"
+    parts = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        name = it.get("name") or "?"
+        qty = it.get("qty")
+        if qty is None:
+            qty = it.get("quantity")
+        price = it.get("price")
+        bits = [str(name)]
+        if qty not in (None, ""):
+            bits.append(f"x{qty}")
+        if price not in (None, ""):
+            bits.append(f"RM{price}")
+        parts.append(" ".join(bits))
+    return "; ".join(parts) if parts else "(none)"
+
+
+async def verify_extraction(image_bytes: bytes, extracted: dict) -> dict:
+    """Second-pass audit of the OCR extraction. Returns dict with keys:
+    verdict, confidence, errors, corrections. Raises on API failure."""
+    merchant = extracted.get("merchant") or "(unknown)"
+    date = extracted.get("date") or "(unknown)"
+    total = extracted.get("total")
+    total_str = "(unknown)" if total in (None, "") else str(total)
+    items_list = _format_items_for_prompt(extracted.get("items"))
+
+    prompt = VERIFY_PROMPT_TEMPLATE.format(
+        merchant=merchant, date=date, total=total_str, items_list=items_list
+    )
+
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    data_url = f"data:image/jpeg;base64,{b64}"
+
+    response = await asyncio.to_thread(
+        zai_client.chat.completions.create,
+        model=ZAI_VERIFY_MODEL,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }
+        ],
+        temperature=0.0,
+    )
+    content = response.choices[0].message.content or "{}"
+    content = content.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    parsed = json.loads(content)
+
+    verdict = str(parsed.get("verdict") or "").upper()
+    if verdict not in ("CONFIRMED", "PARTIAL", "WRONG"):
+        verdict = "WRONG"
+    try:
+        confidence = int(parsed.get("confidence") or 0)
+    except (TypeError, ValueError):
+        confidence = 0
+    confidence = max(0, min(100, confidence))
+    errors = parsed.get("errors") or []
+    if not isinstance(errors, list):
+        errors = [str(errors)]
+    corrections = parsed.get("corrections") or {}
+    if not isinstance(corrections, dict):
+        corrections = {}
+
+    return {
+        "verdict": verdict,
+        "confidence": confidence,
+        "errors": errors,
+        "corrections": corrections,
+    }
+
+
 def normalize_date(value) -> str | None:
     if not isinstance(value, str) or len(value) < 4:
         return value if isinstance(value, str) else None
@@ -217,13 +325,18 @@ def normalize_date(value) -> str | None:
 
 
 _outlet_column_available = True
+_verification_columns_available = True
+_VERIFICATION_KEYS = ("verification_status", "verification_notes", "confidence")
 
 
 def store_receipt(record: dict) -> dict:
-    global _outlet_column_available
+    global _outlet_column_available, _verification_columns_available
     payload = dict(record)
     if not _outlet_column_available:
         payload.pop("outlet", None)
+    if not _verification_columns_available:
+        for key in _VERIFICATION_KEYS:
+            payload.pop(key, None)
     try:
         result = supabase.table(RECEIPTS_TABLE).insert(payload).execute()
     except Exception as exc:
@@ -235,6 +348,16 @@ def store_receipt(record: dict) -> dict:
             )
             _outlet_column_available = False
             payload.pop("outlet", None)
+            result = supabase.table(RECEIPTS_TABLE).insert(payload).execute()
+        elif any(k in payload for k in _VERIFICATION_KEYS) and any(k in msg for k in _VERIFICATION_KEYS):
+            logger.warning(
+                "receipts verification columns missing — apply "
+                "migrations/0002_add_verification_columns.sql. Saving without "
+                "verification fields for now."
+            )
+            _verification_columns_available = False
+            for key in _VERIFICATION_KEYS:
+                payload.pop(key, None)
             result = supabase.table(RECEIPTS_TABLE).insert(payload).execute()
         else:
             raise
@@ -564,6 +687,93 @@ async def ask_audit_questions(
             logger.exception("Failed to record audit question")
 
 
+def _apply_corrections(parsed: dict, corrections: dict) -> list[str]:
+    """Mutate parsed in place with whitelisted correction fields. Returns
+    a short list of human-readable change descriptions."""
+    changes: list[str] = []
+    if not isinstance(corrections, dict):
+        return changes
+    for key in ("merchant", "date", "total", "currency", "items"):
+        if key not in corrections:
+            continue
+        new_val = corrections[key]
+        old_val = parsed.get(key)
+        if new_val == old_val:
+            continue
+        parsed[key] = new_val
+        if key == "items":
+            changes.append("items updated")
+        elif key == "total":
+            changes.append(f"total {old_val}→{new_val}")
+        else:
+            changes.append(f"{key} {old_val}→{new_val}")
+    return changes
+
+
+def _bump_verdict(verdict: str) -> None:
+    _VERDICT_COUNTS[verdict] = _VERDICT_COUNTS.get(verdict, 0) + 1
+    total = sum(_VERDICT_COUNTS.values())
+    logger.info(
+        "OCR verification stats — total=%d CONFIRMED=%d PARTIAL=%d WRONG=%d UNCHECKED=%d",
+        total,
+        _VERDICT_COUNTS.get("CONFIRMED", 0),
+        _VERDICT_COUNTS.get("PARTIAL", 0),
+        _VERDICT_COUNTS.get("WRONG", 0),
+        _VERDICT_COUNTS.get("UNCHECKED", 0),
+    )
+
+
+async def run_verification(image_bytes: bytes, parsed: dict) -> tuple[dict, str]:
+    """Run the second-pass verification, mutating `parsed` if corrections
+    apply. Returns ({status, notes, confidence}, user_reply_prefix)."""
+    try:
+        result = await verify_extraction(image_bytes, parsed)
+    except Exception as exc:
+        logger.exception("Verification failed: %s", exc)
+        _bump_verdict("UNCHECKED")
+        return (
+            {"status": "UNCHECKED", "notes": f"verifier error: {exc}", "confidence": None},
+            "",
+        )
+
+    verdict = result["verdict"]
+    confidence = result["confidence"]
+    errors = result["errors"]
+    corrections = result["corrections"]
+    notes = "; ".join(str(e) for e in errors) if errors else None
+
+    if verdict == "CONFIRMED":
+        _bump_verdict("CONFIRMED")
+        return (
+            {"status": "CONFIRMED", "notes": notes, "confidence": confidence},
+            f"✅ Verified ({confidence}%)",
+        )
+
+    if verdict == "PARTIAL":
+        changes = _apply_corrections(parsed, corrections)
+        _bump_verdict("PARTIAL")
+        change_text = ", ".join(changes) if changes else (notes or "minor issues")
+        return (
+            {"status": "PARTIAL", "notes": notes, "confidence": confidence},
+            f"⚠️ Verified with corrections ({confidence}%): {change_text}",
+        )
+
+    # verdict == "WRONG"
+    _bump_verdict("WRONG")
+    if confidence < 50:
+        total = parsed.get("total")
+        return (
+            {"status": "WRONG", "notes": notes, "confidence": confidence},
+            f"❓ OCR uncertain ({confidence}%) — please verify total RM{total} and items",
+        )
+    changes = _apply_corrections(parsed, corrections)
+    summary = ", ".join(changes) if changes else (notes or "see verifier notes")
+    return (
+        {"status": "WRONG", "notes": notes, "confidence": confidence},
+        f"✅ Auto-corrected ({confidence}%): {summary}",
+    )
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message or not message.photo:
@@ -592,6 +802,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await message.reply_text("Failed to read receipt. Try a clearer photo.")
         return
 
+    verification, verify_prefix = await run_verification(image_bytes, parsed)
+
     user = update.effective_user
     merchant_raw = parsed.get("merchant")
     record = {
@@ -606,6 +818,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "currency": parsed.get("currency"),
         "items": parsed.get("items"),
         "raw_text": parsed.get("raw_text"),
+        "verification_status": verification["status"],
+        "verification_notes": verification["notes"],
+        "confidence": verification["confidence"],
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -617,6 +832,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         stored = record
 
     user_alert = format_alert(stored, parsed)
+    if verify_prefix:
+        user_alert = f"{verify_prefix}\n\n{user_alert}"
     ops_alert = format_alert(stored, parsed, outlet=outlet)
     await message.reply_text(user_alert)
     try:

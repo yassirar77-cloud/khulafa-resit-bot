@@ -1099,9 +1099,24 @@ function renderReceipts() {
   }
   el.innerHTML = recent.map((r, idx) => {
     const items = Array.isArray(r.items) ? r.items : [];
-    const conf = r.merchant && r.total != null && r.receipt_date && items.length ? "high"
-      : r.total != null && r.merchant ? "medium" : "low";
+    const verStatus = typeof r.verification_status === "string" ? r.verification_status.toUpperCase() : null;
+    const verScore = Number(r.confidence);
+    const hasScore = !isNaN(verScore);
+    let conf;
+    if (verStatus === "CONFIRMED" || (hasScore && verScore >= 90)) {
+      conf = "high";
+    } else if (verStatus === "PARTIAL" || (hasScore && verScore >= 50)) {
+      conf = "medium";
+    } else if (verStatus === "WRONG" || verStatus === "UNCHECKED" || hasScore) {
+      conf = "low";
+    } else {
+      conf = r.merchant && r.total != null && r.receipt_date && items.length ? "high"
+        : r.total != null && r.merchant ? "medium" : "low";
+    }
     const confDot = conf === "high" ? "🟢" : conf === "medium" ? "🟡" : "🔴";
+    const confTitle = verStatus
+      ? `${verStatus}${hasScore ? ` ${verScore}%` : ""}${r.verification_notes ? ` — ${r.verification_notes}` : ""}`
+      : "Heuristic confidence";
     const total = Number(r.total);
     const big = !isNaN(total) && total > 1500;
     const itemsHtml = items.length
@@ -1117,7 +1132,7 @@ function renderReceipts() {
       <div class="receipt-card" data-idx="${idx}">
         <div class="receipt-row">
           <div style="min-width:0;flex:1">
-            <div class="receipt-supplier">${escapeHtml(normaliseMerchant(r.merchant))} <span style="font-size:12px">${confDot}</span></div>
+            <div class="receipt-supplier">${escapeHtml(normaliseMerchant(r.merchant))} <span style="font-size:12px" title="${escapeHtml(confTitle)}">${confDot}</span></div>
             <div class="receipt-meta">📍 ${escapeHtml(dateStr)} • ${items.length} items • ${escapeHtml(fmtTime(r.created_at))}</div>
           </div>
           <div class="receipt-total${big ? " warn" : ""}">${fmtRM(r.total)}</div>
