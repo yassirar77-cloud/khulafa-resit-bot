@@ -31,6 +31,7 @@ from telegram.ext import (
 )
 
 from date_utils import normalize_date
+from items_utils import normalize_items
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -138,7 +139,9 @@ OCR_PROMPT = (
     "compact JSON object using these keys: "
     "merchant (string), date (YYYY-MM-DD or null), total (number or null), "
     "currency (string, default \"MYR\" if a Malaysian supplier and not stated), "
-    "items (array of {name, qty, price} where qty is a number or null), "
+    "items (array of objects, each an object with keys name (string, "
+    "REQUIRED), qty (number or null), price (number or null) — never "
+    "return plain strings; always wrap each item in a JSON object), "
     "raw_text (full transcription).\n\n"
     "Merchant guidance: many invoices come from local Malaysian suppliers such "
     "as BESTARI FARM, FOOK LEONG, SAIDA, BALAJI, HANEE, JASMINE, and MEWAH. "
@@ -155,7 +158,9 @@ OCR_PROMPT = (
     "\"name\" and the numeric quantity in \"qty\" (e.g. name=\"Ayam\", qty=5). "
     "If the unit is non-numeric or part of the name (e.g. \"5kg\"), keep the "
     "full descriptor in name and set qty to the count of units sold. If a "
-    "field is unreadable, use null. No markdown, no commentary, JSON only."
+    "field is unreadable, use null. Even single-line and ice/water-only "
+    "receipts must use the dict shape — never collapse items to a list of "
+    "bare strings. No markdown, no commentary, JSON only."
 )
 
 flask_app = Flask(__name__)
@@ -220,6 +225,7 @@ async def extract_with_glm_chat(image_bytes: bytes) -> dict:
         logger.warning("glm-chat OCR returned non-JSON content (%d chars)", len(content))
         return {"raw_text": content, "_latency_s": round(latency, 3), "_total_tokens": total_tokens}
     parsed["date"] = normalize_date(parsed.get("date"))
+    parsed["items"] = normalize_items(parsed.get("items"))
     parsed["_latency_s"] = round(latency, 3)
     parsed["_total_tokens"] = total_tokens
     return parsed
@@ -531,14 +537,16 @@ def _check_suspicious_items(chat_id: int, merchant: str, items: list) -> str | N
 
     history: dict[str, list[float]] = {}
     for row in res.data or []:
-        for prev in row.get("items") or []:
+        # Receipts saved before the items-schema fix may have stored bare
+        # strings; normalize defensively so .get() never hits a non-dict.
+        for prev in normalize_items(row.get("items")):
             name = (prev.get("name") or "").strip().lower()
             price = _to_float(prev.get("price"))
             if name and price is not None:
                 history.setdefault(name, []).append(price)
 
     flagged = []
-    for it in items:
+    for it in normalize_items(items):
         name = (it.get("name") or "").strip()
         price = _to_float(it.get("price"))
         if not name or price is None:
@@ -730,6 +738,10 @@ def _apply_corrections(parsed: dict, corrections: dict) -> list[str]:
             # Verifier returns dates in human formats (e.g. "25/4/26"); coerce
             # to ISO so OCR and verifier outputs share one shape downstream.
             new_val = normalize_date(new_val)
+        elif key == "items":
+            # Verifier may return items as bare strings just like the OCR
+            # pass; normalize so downstream .get() calls don't blow up.
+            new_val = normalize_items(new_val)
         old_val = parsed.get(key)
         if new_val == old_val:
             continue
@@ -850,6 +862,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # "receipt_date". Use receipt_date as canonical going forward.
     if parsed.get("receipt_date") is None and parsed.get("date") is not None:
         parsed["receipt_date"] = parsed.get("date")
+
+    # Single safety net for both OCR providers: ensure items is always a list
+    # of dicts before anything (verifier, alerts, audit, Supabase) reads it.
+    parsed["items"] = normalize_items(parsed.get("items"))
 
     verification, verify_prefix = await run_verification(image_bytes, parsed)
 
