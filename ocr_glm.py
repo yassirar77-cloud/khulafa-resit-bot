@@ -95,6 +95,14 @@ async def extract_with_glm_ocr(
         parsed["bill_to"],
         parsed["confidence"],
     )
+    if not parse_ok:
+        # Dump the full md_results so we can inspect what glm-ocr actually
+        # returned for failing receipts. Capped at 2000 chars to keep log
+        # lines readable; raw_text stays in the DB for full audit.
+        logger.warning(
+            "glm-ocr parse failed — md_results (truncated to 2000 chars):\n%s",
+            md[:2000],
+        )
     parsed["_latency_s"] = round(latency, 3)
     parsed["_total_tokens"] = usage.get("total_tokens")
     parsed["_md_chars"] = len(md)
@@ -143,6 +151,14 @@ def _normalize_date(year: str, month: str, day: str) -> str | None:
 
 
 def _find_date(md: str) -> str | None:
+    # FIXME(ambiguous-date): the YMD branch runs first, so if glm-ocr emits a
+    # date in YYYY-MM-DD form it wins even when the underlying receipt was
+    # written DD/MM/YY. Live failure: a "10/05/2026" (10-May-2026) receipt
+    # came back as "2026-10-05", suggesting glm-ocr re-rendered the date and
+    # transposed day/month — or another YMD-shaped number elsewhere in the
+    # markdown matched first. Next iteration: anchor on a "Date:"/"Tarikh:"
+    # label, prefer the receipt-locale interpretation, and log which branch
+    # matched so we can diagnose. Intentionally not fixed in this PR.
     for line in md.splitlines():
         m = re.search(r"\b(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})\b", line)
         if m:
@@ -328,7 +344,12 @@ def _heuristic_confidence(merchant, total, date, items) -> int:
 
 
 def parse_markdown_receipt(md: str) -> dict:
-    """Parse the ``md_results`` Markdown into the canonical schema."""
+    """Parse the ``md_results`` Markdown into the canonical schema.
+
+    Per-field misses log a WARNING with a 200-char head of the markdown so
+    real failure modes show up in production logs without changing parser
+    behaviour.
+    """
     if not md:
         return {
             "merchant": None,
@@ -341,11 +362,32 @@ def parse_markdown_receipt(md: str) -> dict:
             "confidence": 0,
         }
 
+    md_head = md[:200]
+
     merchant = _find_merchant(md)
+    if merchant is None:
+        logger.warning(
+            "glm-ocr parse: no merchant heading/bold found; md head=%r", md_head
+        )
+
     total = _find_total(md)
+    if total is None:
+        logger.warning(
+            "glm-ocr parse: no GRAND TOTAL/TOTAL/JUMLAH match; md head=%r", md_head
+        )
+
     receipt_date = _find_date(md)
+    if receipt_date is None:
+        logger.warning("glm-ocr parse: date regex failed; md head=%r", md_head)
+
     bill_to = _find_bill_to(md)
+
     items = _parse_table_items(md) or _parse_line_items(md)
+    if not items:
+        logger.warning(
+            "glm-ocr parse: no items section found; md head=%r", md_head
+        )
+
     confidence = _heuristic_confidence(merchant, total, receipt_date, items)
 
     return {
