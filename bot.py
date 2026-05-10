@@ -31,6 +31,7 @@ from telegram.ext import (
 )
 
 from date_utils import normalize_date
+from image_utils import resize_for_ocr
 from items_utils import normalize_items
 
 logging.basicConfig(
@@ -54,6 +55,8 @@ ZAI_VERIFY_MODEL = os.environ.get("ZAI_VERIFY_MODEL", ZAI_MODEL)
 # OCR provider for the first pass. Default keeps the proven chat-completions
 # path; set ZAI_OCR_PROVIDER=glm-ocr to use the cheaper layout_parsing endpoint.
 ZAI_OCR_PROVIDER = os.environ.get("ZAI_OCR_PROVIDER", "glm-4.6v-flash")
+IMAGE_RESIZE_ENABLED = os.environ.get("IMAGE_RESIZE_ENABLED", "true").lower() == "true"
+IMAGE_MAX_DIM = int(os.environ.get("IMAGE_MAX_DIM", "1600"))
 RECEIPTS_TABLE = "receipts"
 AUDIT_TABLE = "audit_responses"
 MALAYSIA_TZ = ZoneInfo("Asia/Kuala_Lumpur")
@@ -840,6 +843,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     photo = message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
     image_bytes = bytes(await file.download_as_bytearray())
+
+    if IMAGE_RESIZE_ENABLED:
+        image_bytes = await asyncio.to_thread(
+            resize_for_ocr, image_bytes, IMAGE_MAX_DIM
+        )
 
     ocr_start = time.monotonic()
     try:
