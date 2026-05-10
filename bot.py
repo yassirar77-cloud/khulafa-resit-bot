@@ -33,6 +33,7 @@ from telegram.ext import (
 from date_utils import normalize_date
 from image_utils import resize_for_ocr
 from items_utils import normalize_items
+from money_utils import normalize_total
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -357,6 +358,10 @@ def store_receipt(record: dict) -> dict:
     # Postgres' date column rejects human formats like "25/4/26"; coerce to ISO
     # before insert. None passes through (column is nullable).
     payload["receipt_date"] = normalize_date(payload.get("receipt_date"))
+    # Postgres' numeric column rejects "RM13.00"; strip currency/separators
+    # before insert. None passes through (column is nullable).
+    if "total" in payload:
+        payload["total"] = normalize_total(payload.get("total"))
     if not _outlet_column_available:
         payload.pop("outlet", None)
     if not _verification_columns_available:
@@ -741,6 +746,10 @@ def _apply_corrections(parsed: dict, corrections: dict) -> list[str]:
             # Verifier returns dates in human formats (e.g. "25/4/26"); coerce
             # to ISO so OCR and verifier outputs share one shape downstream.
             new_val = normalize_date(new_val)
+        elif key == "total":
+            # Verifier returns totals in human formats (e.g. "RM13.00"); strip
+            # currency/separators so downstream insert sees a plain number.
+            new_val = normalize_total(new_val)
         elif key == "items":
             # Verifier may return items as bare strings just like the OCR
             # pass; normalize so downstream .get() calls don't blow up.
