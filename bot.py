@@ -30,6 +30,8 @@ from telegram.ext import (
     filters,
 )
 
+from date_utils import normalize_date
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -54,8 +56,6 @@ ZAI_OCR_PROVIDER = os.environ.get("ZAI_OCR_PROVIDER", "glm-4.6v-flash")
 RECEIPTS_TABLE = "receipts"
 AUDIT_TABLE = "audit_responses"
 MALAYSIA_TZ = ZoneInfo("Asia/Kuala_Lumpur")
-MIN_PLAUSIBLE_YEAR = 2024
-FALLBACK_YEAR = 2026
 
 BIG_PURCHASE_MULTIPLIER = 2.0
 BIG_PURCHASE_LOOKBACK_DAYS = 14
@@ -336,18 +336,6 @@ async def verify_extraction(image_bytes: bytes, extracted: dict) -> dict:
     }
 
 
-def normalize_date(value) -> str | None:
-    if not isinstance(value, str) or len(value) < 4:
-        return value if isinstance(value, str) else None
-    try:
-        year = int(value[:4])
-    except ValueError:
-        return value
-    if year < MIN_PLAUSIBLE_YEAR:
-        return f"{FALLBACK_YEAR}{value[4:]}"
-    return value
-
-
 _outlet_column_available = True
 _verification_columns_available = True
 _bill_to_column_available = True
@@ -357,6 +345,9 @@ _VERIFICATION_KEYS = ("verification_status", "verification_notes", "confidence")
 def store_receipt(record: dict) -> dict:
     global _outlet_column_available, _verification_columns_available, _bill_to_column_available
     payload = dict(record)
+    # Postgres' date column rejects human formats like "25/4/26"; coerce to ISO
+    # before insert. None passes through (column is nullable).
+    payload["receipt_date"] = normalize_date(payload.get("receipt_date"))
     if not _outlet_column_available:
         payload.pop("outlet", None)
     if not _verification_columns_available:
@@ -735,6 +726,10 @@ def _apply_corrections(parsed: dict, corrections: dict) -> list[str]:
         if key not in corrections:
             continue
         new_val = corrections[key]
+        if key == "date":
+            # Verifier returns dates in human formats (e.g. "25/4/26"); coerce
+            # to ISO so OCR and verifier outputs share one shape downstream.
+            new_val = normalize_date(new_val)
         old_val = parsed.get(key)
         if new_val == old_val:
             continue
