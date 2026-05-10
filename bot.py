@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -47,6 +48,9 @@ WEBAPP_URL = os.environ.get("WEBAPP_URL", "")
 
 ZAI_MODEL = os.environ.get("ZAI_MODEL", "glm-4.6v-flash")
 ZAI_VERIFY_MODEL = os.environ.get("ZAI_VERIFY_MODEL", ZAI_MODEL)
+# OCR provider for the first pass. Default keeps the proven chat-completions
+# path; set ZAI_OCR_PROVIDER=glm-ocr to use the cheaper layout_parsing endpoint.
+ZAI_OCR_PROVIDER = os.environ.get("ZAI_OCR_PROVIDER", "glm-4.6v-flash")
 RECEIPTS_TABLE = "receipts"
 AUDIT_TABLE = "audit_responses"
 MALAYSIA_TZ = ZoneInfo("Asia/Kuala_Lumpur")
@@ -177,7 +181,13 @@ def run_health_server() -> None:
     flask_app.run(host="0.0.0.0", port=HEALTH_PORT, use_reloader=False)
 
 
-async def extract_receipt(image_bytes: bytes) -> dict:
+async def extract_with_glm_chat(image_bytes: bytes) -> dict:
+    """First-pass OCR via the glm-4.6v-flash chat completions endpoint.
+
+    Returns a dict with the legacy schema {merchant, date, total, currency,
+    items, raw_text}. ``bill_to`` is not extracted by this prompt.
+    """
+    start = time.monotonic()
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     data_url = f"data:image/jpeg;base64,{b64}"
 
@@ -195,14 +205,28 @@ async def extract_receipt(image_bytes: bytes) -> dict:
         ],
         temperature=0.1,
     )
+    latency = time.monotonic() - start
     content = response.choices[0].message.content or "{}"
     content = content.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    usage = getattr(response, "usage", None)
+    total_tokens = getattr(usage, "total_tokens", None) if usage else None
+    logger.info(
+        "glm-chat OCR response: latency=%.2fs image_bytes=%d resp_chars=%d total_tokens=%s",
+        latency, len(image_bytes), len(content), total_tokens,
+    )
     try:
         parsed = json.loads(content)
     except json.JSONDecodeError:
-        return {"raw_text": content}
+        logger.warning("glm-chat OCR returned non-JSON content (%d chars)", len(content))
+        return {"raw_text": content, "_latency_s": round(latency, 3), "_total_tokens": total_tokens}
     parsed["date"] = normalize_date(parsed.get("date"))
+    parsed["_latency_s"] = round(latency, 3)
+    parsed["_total_tokens"] = total_tokens
     return parsed
+
+
+# Backwards-compatible alias so existing callers keep working.
+extract_receipt = extract_with_glm_chat
 
 
 VERIFY_PROMPT_TEMPLATE = (
@@ -259,7 +283,7 @@ async def verify_extraction(image_bytes: bytes, extracted: dict) -> dict:
     """Second-pass audit of the OCR extraction. Returns dict with keys:
     verdict, confidence, errors, corrections. Raises on API failure."""
     merchant = extracted.get("merchant") or "(unknown)"
-    date = extracted.get("date") or "(unknown)"
+    date = extracted.get("receipt_date") or extracted.get("date") or "(unknown)"
     total = extracted.get("total")
     total_str = "(unknown)" if total in (None, "") else str(total)
     items_list = _format_items_for_prompt(extracted.get("items"))
@@ -326,17 +350,20 @@ def normalize_date(value) -> str | None:
 
 _outlet_column_available = True
 _verification_columns_available = True
+_bill_to_column_available = True
 _VERIFICATION_KEYS = ("verification_status", "verification_notes", "confidence")
 
 
 def store_receipt(record: dict) -> dict:
-    global _outlet_column_available, _verification_columns_available
+    global _outlet_column_available, _verification_columns_available, _bill_to_column_available
     payload = dict(record)
     if not _outlet_column_available:
         payload.pop("outlet", None)
     if not _verification_columns_available:
         for key in _VERIFICATION_KEYS:
             payload.pop(key, None)
+    if not _bill_to_column_available:
+        payload.pop("bill_to", None)
     try:
         result = supabase.table(RECEIPTS_TABLE).insert(payload).execute()
     except Exception as exc:
@@ -358,6 +385,14 @@ def store_receipt(record: dict) -> dict:
             _verification_columns_available = False
             for key in _VERIFICATION_KEYS:
                 payload.pop(key, None)
+            result = supabase.table(RECEIPTS_TABLE).insert(payload).execute()
+        elif "bill_to" in payload and "bill_to" in msg:
+            logger.warning(
+                "receipts.bill_to column missing — apply migrations/add_bill_to_column.sql. "
+                "Saving without bill_to for now."
+            )
+            _bill_to_column_available = False
+            payload.pop("bill_to", None)
             result = supabase.table(RECEIPTS_TABLE).insert(payload).execute()
         else:
             raise
@@ -387,7 +422,8 @@ def format_alert(record: dict, parsed: dict, outlet: str | None = None) -> str:
     merchant = parsed.get("merchant") or "Unknown merchant"
     total = parsed.get("total")
     currency = parsed.get("currency") or ""
-    date = parsed.get("date") or "—"
+    date = parsed.get("receipt_date") or parsed.get("date") or "—"
+    bill_to = parsed.get("bill_to") or record.get("bill_to")
     user = record.get("telegram_username") or record.get("telegram_user_id")
     total_str = f"{total} {currency}".strip() if total is not None else "n/a"
     lines = ["New receipt logged", f"From: {user}"]
@@ -398,6 +434,8 @@ def format_alert(record: dict, parsed: dict, outlet: str | None = None) -> str:
         f"Date: {date}",
         f"Total: {total_str}",
     ])
+    if bill_to:
+        lines.append(f"Bill To: {bill_to}")
     item_lines = format_items(parsed.get("items"))
     if item_lines:
         lines.append("")
@@ -783,10 +821,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chat_title = chat.title if chat else None
     outlet = derive_outlet(message.chat_id, chat_title)
     logger.info(
-        "Receipt photo received: chat_id=%s chat_title=%r outlet=%s",
+        "Receipt photo received: chat_id=%s chat_title=%r outlet=%s ocr_provider=%s",
         message.chat_id,
         chat_title,
         outlet,
+        ZAI_OCR_PROVIDER,
     )
 
     await message.reply_text("Processing receipt…")
@@ -795,12 +834,27 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     file = await context.bot.get_file(photo.file_id)
     image_bytes = bytes(await file.download_as_bytearray())
 
+    ocr_start = time.monotonic()
     try:
-        parsed = await extract_receipt(image_bytes)
+        if ZAI_OCR_PROVIDER == "glm-ocr":
+            from ocr_glm import extract_with_glm_ocr
+            parsed = await extract_with_glm_ocr(image_bytes)
+        else:
+            parsed = await extract_with_glm_chat(image_bytes)
     except Exception:
-        logger.exception("OCR failed")
+        logger.exception("OCR failed (provider=%s)", ZAI_OCR_PROVIDER)
         await message.reply_text("Failed to read receipt. Try a clearer photo.")
         return
+    ocr_latency = time.monotonic() - ocr_start
+    logger.info(
+        "OCR pipeline complete: provider=%s total_latency=%.2fs merchant=%r total=%s",
+        ZAI_OCR_PROVIDER, ocr_latency, parsed.get("merchant"), parsed.get("total"),
+    )
+
+    # Normalise to a single internal shape: chat returns "date", glm-ocr returns
+    # "receipt_date". Use receipt_date as canonical going forward.
+    if parsed.get("receipt_date") is None and parsed.get("date") is not None:
+        parsed["receipt_date"] = parsed.get("date")
 
     verification, verify_prefix = await run_verification(image_bytes, parsed)
 
@@ -813,10 +867,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "message_id": message.message_id,
         "merchant": merchant_raw.upper().strip() if isinstance(merchant_raw, str) else merchant_raw,
         "outlet": outlet,
-        "receipt_date": parsed.get("date"),
+        "receipt_date": parsed.get("receipt_date") or parsed.get("date"),
         "total": parsed.get("total"),
         "currency": parsed.get("currency"),
         "items": parsed.get("items"),
+        "bill_to": parsed.get("bill_to"),
         "raw_text": parsed.get("raw_text"),
         "verification_status": verification["status"],
         "verification_notes": verification["notes"],
