@@ -924,6 +924,41 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception:
         logger.exception("Failed to send alert to ALERT_CHAT_ID")
 
+    # === Intelligence layer: anomaly detection ===
+    try:
+        from item_canonicalization import canonicalize_supplier
+        from historical_context import detect_anomaly
+        from outlet_mapping import outlet_from_chat_title
+
+        outlet_code = outlet_from_chat_title(chat_title)
+        merchant_for_canon = stored.get("merchant") or parsed.get("merchant")
+        canon_result = canonicalize_supplier(merchant_for_canon)
+        canonical_category = canon_result.get("canonical")
+        total_for_anomaly = _to_float(stored.get("total"))
+
+        if outlet_code and canonical_category and total_for_anomaly:
+            anomaly = detect_anomaly(
+                outlet_code, canonical_category, total_for_anomaly
+            )
+            if anomaly.get("is_anomaly"):
+                anomaly_text = (
+                    anomaly["message_short"] + "\n\n" + anomaly["message_detail"]
+                )
+                await message.reply_text(anomaly_text)
+                logger.info(
+                    "Anomaly detected: outlet=%s category=%s amount=%s severity=%s",
+                    outlet_code, canonical_category, total_for_anomaly,
+                    anomaly["severity"],
+                )
+            else:
+                logger.info(
+                    "No anomaly: outlet=%s category=%s amount=%s",
+                    outlet_code, canonical_category, total_for_anomaly,
+                )
+    except Exception as e:
+        logger.warning("Anomaly detection failed (non-critical): %s", e)
+    # === End intelligence layer ===
+
     try:
         findings = await asyncio.to_thread(run_audit_checks, stored, parsed)
     except Exception:
