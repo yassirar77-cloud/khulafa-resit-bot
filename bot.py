@@ -30,6 +30,7 @@ from telegram.ext import (
     filters,
 )
 
+from audit_messages import build_big_purchase_message
 from date_utils import normalize_date
 from image_utils import resize_for_ocr
 from items_utils import normalize_items
@@ -494,11 +495,7 @@ def _check_big_purchase(chat_id: int, total: float) -> str | None:
         return None
     avg = sum(totals) / len(totals)
     if avg > 0 and total > BIG_PURCHASE_MULTIPLIER * avg:
-        return (
-            "வாங்கினது அதிகம்! ஏன் இவ்வளவு வாங்கினீங்க? / "
-            "Belian banyak hari ni! Kenapa beli lebih dari biasa? "
-            f"(purata 14 hari RM{avg:.2f}, hari ni RM{total:.2f})"
-        )
+        return build_big_purchase_message(total, avg, len(totals))
     return None
 
 
