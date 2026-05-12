@@ -12,7 +12,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from items_utils import normalize_items  # noqa: E402
+from items_utils import normalize_items, parse_embedded_format  # noqa: E402
 
 
 class NormalizeItemsStringList(unittest.TestCase):
@@ -123,6 +123,165 @@ class NormalizeItemsSkipsBadEntries(unittest.TestCase):
         finally:
             logger.removeHandler(handler)
         self.assertEqual([r for r in records if r.levelno >= logging.WARNING], [])
+
+
+class ParseEmbeddedFormat(unittest.TestCase):
+    """Direct unit coverage of ``parse_embedded_format``.
+
+    PR #23a: roughly half of receipts come back with qty and price trapped
+    inside the name string. The parser pulls them out so the downstream
+    price-history layer sees real numbers.
+    """
+
+    # 1.
+    def test_basic_ayam(self):
+        self.assertEqual(
+            parse_embedded_format("Ayam x30 RM19.80"),
+            {"clean_name": "Ayam", "qty": 30.0, "price": 19.80},
+        )
+
+    # 2.
+    def test_multi_word_name_with_code(self):
+        self.assertEqual(
+            parse_embedded_format("super CH P8 x20 RM9.90"),
+            {"clean_name": "super CH P8", "qty": 20.0, "price": 9.90},
+        )
+
+    # 3.
+    def test_integer_qty_decimal_price(self):
+        self.assertEqual(
+            parse_embedded_format("Tembikai x7 RM3.0"),
+            {"clean_name": "Tembikai", "qty": 7.0, "price": 3.0},
+        )
+
+    # 4.
+    def test_decimal_qty(self):
+        result = parse_embedded_format("Madu x7.2 RM5.78")
+        self.assertEqual(result["clean_name"], "Madu")
+        self.assertAlmostEqual(result["qty"], 7.2)
+        self.assertAlmostEqual(result["price"], 5.78)
+
+    # 5.
+    def test_rightmost_wins_on_multiple_x_markers(self):
+        self.assertEqual(
+            parse_embedded_format("Box x2 Burger x3 RM10"),
+            {"clean_name": "Box x2 Burger", "qty": 3.0, "price": 10.0},
+        )
+
+    # 6.
+    def test_no_x_marker_returns_none(self):
+        # "5 kg" is a unit descriptor, not a qty marker -> must not match.
+        self.assertIsNone(parse_embedded_format("Mutton mysure 5 kg RM27.50"))
+
+    # 9.
+    def test_none_input_returns_none(self):
+        self.assertIsNone(parse_embedded_format(None))
+
+    # 10.
+    def test_empty_string_returns_none(self):
+        self.assertIsNone(parse_embedded_format(""))
+        self.assertIsNone(parse_embedded_format("   "))
+
+    # 11.
+    def test_multiple_whitespace_between_tokens(self):
+        result = parse_embedded_format("Ayam  x30  RM19.80")
+        self.assertEqual(result["clean_name"], "Ayam")
+        self.assertAlmostEqual(result["qty"], 30.0)
+        self.assertAlmostEqual(result["price"], 19.80)
+
+    # 12.
+    def test_case_insensitive_rm(self):
+        result = parse_embedded_format("ayam x30 rm19.80")
+        self.assertEqual(result["clean_name"], "ayam")
+        self.assertAlmostEqual(result["qty"], 30.0)
+        self.assertAlmostEqual(result["price"], 19.80)
+
+    # 15.
+    def test_price_without_decimal(self):
+        self.assertEqual(
+            parse_embedded_format("Item x5 RM10"),
+            {"clean_name": "Item", "qty": 5.0, "price": 10.0},
+        )
+
+    # 16.
+    def test_padded_whitespace_is_stripped(self):
+        result = parse_embedded_format("  Padded Name  x5 RM10  ")
+        self.assertEqual(result["clean_name"], "Padded Name")
+        self.assertAlmostEqual(result["qty"], 5.0)
+        self.assertAlmostEqual(result["price"], 10.0)
+
+    # 18.
+    def test_no_whitespace_before_x_is_rejected(self):
+        # "Ayamx30" has no space before x, so the qty marker is ambiguous
+        # with a product-code "x". We reject it rather than parse it.
+        self.assertIsNone(parse_embedded_format("Ayamx30 RM19.80"))
+
+
+class NormalizeItemsEmbeddedRescue(unittest.TestCase):
+    """Integration: ``normalize_items`` rescues embedded-format dicts."""
+
+    # 7.
+    def test_clean_item_passes_through_unchanged(self):
+        items = [{"name": "Jintan", "qty": 3, "price": 35}]
+        self.assertEqual(normalize_items(items), items)
+
+    # 8.
+    def test_partial_data_passes_through_unchanged(self):
+        # qty present but price null -> trust the partial data, don't rescue.
+        items = [{"name": "X", "qty": 5, "price": None}]
+        self.assertEqual(normalize_items(items), items)
+
+    # 8b. mirror of (8) with price set and qty null.
+    def test_partial_data_price_only_passes_through(self):
+        items = [{"name": "Ayam x30 RM19.80", "qty": None, "price": 19.80}]
+        self.assertEqual(normalize_items(items), items)
+
+    # 13.
+    def test_mixed_clean_and_embedded_both_handled(self):
+        items = [
+            {"name": "S Jintan Putih", "qty": 3, "price": 35},
+            {"name": "Ayam x30 RM19.80", "qty": None, "price": None},
+            {"name": "super CH P8 x20 RM9.90", "qty": None, "price": None},
+        ]
+        result = normalize_items(items)
+        self.assertEqual(result[0], {"name": "S Jintan Putih", "qty": 3, "price": 35})
+        self.assertEqual(result[1]["name"], "Ayam")
+        self.assertAlmostEqual(result[1]["qty"], 30.0)
+        self.assertAlmostEqual(result[1]["price"], 19.80)
+        self.assertEqual(result[2]["name"], "super CH P8")
+        self.assertAlmostEqual(result[2]["qty"], 20.0)
+        self.assertAlmostEqual(result[2]["price"], 9.90)
+
+    # 14.
+    def test_all_clean_list_is_identical(self):
+        items = [
+            {"name": "Roti", "qty": 5, "price": 1.20},
+            {"name": "Tea", "qty": 2, "price": 4.00},
+            {"name": "Jintan", "qty": 3, "price": 35},
+        ]
+        self.assertEqual(normalize_items(items), items)
+
+    # 17.
+    def test_preserves_extra_keys_on_rescue(self):
+        items = [
+            {
+                "qty": None,
+                "name": "Ayam x30 RM19.80",
+                "price": None,
+                "category": "meat",
+            }
+        ]
+        result = normalize_items(items)
+        self.assertEqual(result[0]["name"], "Ayam")
+        self.assertAlmostEqual(result[0]["qty"], 30.0)
+        self.assertAlmostEqual(result[0]["price"], 19.80)
+        self.assertEqual(result[0]["category"], "meat")
+
+    def test_unparseable_dict_passes_through_no_raise(self):
+        # Dict with no qty/price and a name that doesn't match embedded
+        # pattern -> kept as-is, no exception raised.
+        items = [{"name": "Mutton mysure 5 kg RM27.50", "qty": None, "price": None}]
+        self.assertEqual(normalize_items(items), items)
 
 
 if __name__ == "__main__":
