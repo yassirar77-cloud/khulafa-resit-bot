@@ -226,15 +226,36 @@ class NormalizeItemsEmbeddedRescue(unittest.TestCase):
         self.assertEqual(normalize_items(items), items)
 
     # 8.
-    def test_partial_data_passes_through_unchanged(self):
-        # qty present but price null -> trust the partial data, don't rescue.
+    def test_partial_data_with_no_embedded_pattern_passes_through(self):
+        # qty present, price null, name has no xN RMX.XX pattern -> nothing
+        # to rescue, keep the partial entry as-is.
         items = [{"name": "X", "qty": 5, "price": None}]
         self.assertEqual(normalize_items(items), items)
 
-    # 8b. mirror of (8) with price set and qty null.
-    def test_partial_data_price_only_passes_through(self):
-        items = [{"name": "Ayam x30 RM19.80", "qty": None, "price": 19.80}]
-        self.assertEqual(normalize_items(items), items)
+    # 8b. PR #23b bugfix: partial data + embedded pattern -> full rescue.
+    # A successful embedded parse is more reliable than half-filled OCR data,
+    # so the parsed values override the partial qty/price.
+    def test_partial_data_qty_only_rescued_by_embedded_pattern(self):
+        items = [{"name": "SOS CILI x7 RM6.30", "qty": 7, "price": None}]
+        result = normalize_items(items)
+        self.assertEqual(result[0]["name"], "SOS CILI")
+        self.assertAlmostEqual(result[0]["qty"], 7.0)
+        self.assertAlmostEqual(result[0]["price"], 6.30)
+
+    def test_partial_data_price_only_rescued_by_embedded_pattern(self):
+        items = [{"name": "SOS CILI x7 RM6.30", "qty": None, "price": 6.30}]
+        result = normalize_items(items)
+        self.assertEqual(result[0]["name"], "SOS CILI")
+        self.assertAlmostEqual(result[0]["qty"], 7.0)
+        self.assertAlmostEqual(result[0]["price"], 6.30)
+
+    def test_partial_data_wrong_values_overridden_by_embedded_parse(self):
+        # Embedded parse wins even if the partial value contradicts it.
+        items = [{"name": "Ayam x30 RM19.80", "qty": 99, "price": None}]
+        result = normalize_items(items)
+        self.assertEqual(result[0]["name"], "Ayam")
+        self.assertAlmostEqual(result[0]["qty"], 30.0)
+        self.assertAlmostEqual(result[0]["price"], 19.80)
 
     # 13.
     def test_mixed_clean_and_embedded_both_handled(self):
@@ -282,6 +303,65 @@ class NormalizeItemsEmbeddedRescue(unittest.TestCase):
         # pattern -> kept as-is, no exception raised.
         items = [{"name": "Mutton mysure 5 kg RM27.50", "qty": None, "price": None}]
         self.assertEqual(normalize_items(items), items)
+
+
+class ParseEmbeddedFormatTrailingParenthetical(unittest.TestCase):
+    """PR #23b: strip a single trailing parenthetical before the regex.
+
+    Zhipu OCR sometimes appends commentary after the price (e.g.
+    ``"... RM9.90 (amount should be RM297.00)"``); without the strip the
+    embedded-qty regex refuses to match. Parentheticals in the MIDDLE of
+    the name (e.g. ``"DISH WSH (HIJAU) x6 RM11.2"``) must be preserved.
+    """
+
+    def test_trailing_paren_amount_commentary_is_stripped(self):
+        result = parse_embedded_format("SuperCH x30 RM9.90 (amount should be RM297.00)")
+        self.assertEqual(result["clean_name"], "SuperCH")
+        self.assertAlmostEqual(result["qty"], 30.0)
+        self.assertAlmostEqual(result["price"], 9.90)
+
+    def test_trailing_paren_short_form_is_stripped(self):
+        result = parse_embedded_format("Super H x20 RM9.90 (amount: RM290.07)")
+        self.assertEqual(result["clean_name"], "Super H")
+        self.assertAlmostEqual(result["qty"], 20.0)
+        self.assertAlmostEqual(result["price"], 9.90)
+
+    def test_mid_name_parenthetical_is_preserved(self):
+        # "(HIJAU)" sits between the name and the qty marker -> not
+        # trailing -> must stay inside the clean_name.
+        result = parse_embedded_format("DISH WSH (HIJAU) x6 RM11.2")
+        self.assertEqual(result["clean_name"], "DISH WSH (HIJAU)")
+        self.assertAlmostEqual(result["qty"], 6.0)
+        self.assertAlmostEqual(result["price"], 11.2)
+
+    def test_no_parenthetical_unchanged(self):
+        # Sanity check: strings without any parens still parse the same.
+        result = parse_embedded_format("Ayam x30 RM19.80")
+        self.assertEqual(result["clean_name"], "Ayam")
+        self.assertAlmostEqual(result["qty"], 30.0)
+        self.assertAlmostEqual(result["price"], 19.80)
+
+    def test_trailing_paren_with_trailing_whitespace(self):
+        # Whitespace between price and paren, and after the paren.
+        result = parse_embedded_format("Roti x2 RM3.50   (note)   ")
+        self.assertEqual(result["clean_name"], "Roti")
+        self.assertAlmostEqual(result["qty"], 2.0)
+        self.assertAlmostEqual(result["price"], 3.50)
+
+    def test_rescue_via_normalize_items_with_trailing_paren(self):
+        # End-to-end: a dict with embedded format AND trailing OCR
+        # commentary still gets rescued cleanly.
+        items = [
+            {
+                "name": "SuperCH x30 RM9.90 (amount should be RM297.00)",
+                "qty": None,
+                "price": None,
+            }
+        ]
+        result = normalize_items(items)
+        self.assertEqual(result[0]["name"], "SuperCH")
+        self.assertAlmostEqual(result[0]["qty"], 30.0)
+        self.assertAlmostEqual(result[0]["price"], 9.90)
 
 
 if __name__ == "__main__":
