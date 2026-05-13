@@ -921,6 +921,34 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception:
         logger.exception("Failed to send alert to ALERT_CHAT_ID")
 
+    # === Price aggregation: per-item rows into item_prices ===
+    # Passive data collection for PR #24 (price-spike detection). Failure
+    # here MUST NOT crash the receipt pipeline — broad except + lazy import.
+    try:
+        from price_aggregation import classify_and_extract_items, save_item_prices
+        from outlet_mapping import outlet_from_chat_title
+
+        receipt_id = stored.get("id")
+        if receipt_id is not None:
+            price_records = classify_and_extract_items(parsed.get("items"))
+            inserted = await asyncio.to_thread(
+                save_item_prices,
+                supabase,
+                receipt_id,
+                stored.get("receipt_date"),
+                outlet_from_chat_title(chat_title),
+                stored.get("chat_id"),
+                stored.get("merchant"),
+                price_records,
+            )
+            if inserted:
+                logger.info(
+                    "Saved %d item prices for receipt %s", inserted, receipt_id
+                )
+    except Exception as e:
+        logger.warning("Price aggregation failed (non-critical): %s", e)
+    # === End price aggregation ===
+
     # === Intelligence layer: anomaly detection ===
     try:
         from item_canonicalization import canonicalize_supplier
