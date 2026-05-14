@@ -949,6 +949,47 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.warning("Price aggregation failed (non-critical): %s", e)
     # === End price aggregation ===
 
+    # === Price spike detection (PR #25) ===
+    # Compare each just-saved item against historical averages (merchant
+    # scoped first, global fallback). Send Style A alert per spike to
+    # ALERT_CHAT_ID. Failure MUST NOT crash the receipt pipeline —
+    # broad except + lazy import, same pattern as PR #23b.
+    try:
+        from price_aggregation import classify_and_extract_items
+        from price_spike_detection import detect_spikes, format_spike_message
+
+        receipt_id = stored.get("id")
+        if receipt_id is not None:
+            price_records = classify_and_extract_items(parsed.get("items"))
+            spikes = await asyncio.to_thread(
+                detect_spikes,
+                supabase,
+                price_records,
+                receipt_id,
+                stored.get("merchant"),
+            )
+            for spike in spikes:
+                msg = format_spike_message(spike)
+                if not msg:
+                    continue
+                try:
+                    await context.bot.send_message(
+                        chat_id=ALERT_CHAT_ID, text=msg
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to send spike alert to ALERT_CHAT_ID"
+                    )
+            if spikes:
+                logger.info(
+                    "Price spikes alerted: %d for receipt %s",
+                    len(spikes),
+                    receipt_id,
+                )
+    except Exception as e:
+        logger.warning("Price spike detection failed (non-critical): %s", e)
+    # === End price spike detection ===
+
     # === Intelligence layer: anomaly detection ===
     try:
         from item_canonicalization import canonicalize_supplier
