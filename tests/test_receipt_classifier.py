@@ -586,7 +586,7 @@ class MerchantWhitelistOverrideTests(unittest.TestCase):
     def test_empty_merchant_with_whitelist_in_body_still_supplier(self):
         # The PR #28 sparse-OCR scenario must still work: merchant
         # arrives None but the supplier name is in raw_text. Combined-
-        # haystack fallback at priority 6 catches this.
+        # haystack fallback at priority 8 catches this.
         result = classify_receipt(
             ocr_text="EVEREST AISVARAM SDN BHD\nTotal: 100",
             parsed_items=[],
@@ -595,6 +595,114 @@ class MerchantWhitelistOverrideTests(unittest.TestCase):
         )
         self.assertEqual(result.receipt_type, ReceiptType.SUPPLIER_PURCHASE)
         self.assertEqual(result.extracted_vendor, "EVEREST")
+
+
+class UtilityRentMerchantFieldTests(unittest.TestCase):
+    """PR #28b extension: UTILITY and RENT_LICENSE checks also honour
+    the merchant field at priority 3/4, mirroring SUPPLIER_PURCHASE at
+    priority 2.
+
+    Production trigger: receipt 1548 (TENAGA NASIONAL, RM4,894.75)
+    classified as UNKNOWN. The most likely cause was Render still
+    serving pre-PR-28 code (no merchant kwarg passed), so the body
+    "Akaun No / Bayar sebelum / Jumlah" had no UTILITY keyword and
+    fell through to UNKNOWN. With the merchant kwarg now passed AND
+    an explicit merchant-field UTILITY check, the priority-3 rule
+    fires deterministically off the merchant header alone.
+    """
+
+    def test_tenaga_nasional_merchant_with_empty_body_is_utility(self):
+        # The user's worked example: TNB merchant, body has zero
+        # UTILITY keywords — must still classify as UTILITY.
+        result = classify_receipt(
+            ocr_text="Akaun No: 220000123\nBayar sebelum: 30/05/2026\nJumlah: RM 4,894.75",
+            parsed_items=[],
+            total=4894.75,
+            merchant="TENAGA NASIONAL BERHAD",
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.UTILITY)
+        self.assertEqual(result.extracted_vendor, "TENAGA NASIONAL")
+
+    def test_tnb_short_merchant_classifies_as_utility(self):
+        result = classify_receipt(
+            ocr_text="Account 220\nDue 30/05/2026\nTotal RM 500",
+            parsed_items=[],
+            total=500.0,
+            merchant="TNB",
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.UTILITY)
+        self.assertEqual(result.extracted_vendor, "TNB")
+
+    def test_kwsp_merchant_with_empty_body_is_rent_license(self):
+        # KWSP statement with no body keywords — must classify on
+        # merchant header alone.
+        result = classify_receipt(
+            ocr_text="Caruman bulan: Mei 2026\nJumlah: RM 1,200",
+            parsed_items=[],
+            total=1200.0,
+            merchant="KWSP",
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.RENT_LICENSE)
+        self.assertEqual(result.extracted_vendor, "KWSP")
+
+    def test_mbsa_merchant_with_empty_body_is_rent_license(self):
+        # Council licence renewal receipt with no body keywords.
+        result = classify_receipt(
+            ocr_text="No. Resit: 12345\nTarikh: 23/05/2026\nJumlah: RM 350",
+            parsed_items=[],
+            total=350.0,
+            merchant="MAJLIS BANDARAYA SHAH ALAM",
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.RENT_LICENSE)
+        self.assertIn(
+            result.extracted_vendor,
+            ("MAJLIS", "MBSA"),
+            "merchant header should match MAJLIS or MBSA substring",
+        )
+
+    def test_utility_merchant_field_case_insensitive(self):
+        result = classify_receipt(
+            ocr_text="Bil bulan ini\nTotal: 800",
+            parsed_items=[],
+            total=800.0,
+            merchant="Tenaga Nasional Berhad",
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.UTILITY)
+
+    def test_supplier_merchant_beats_utility_keyword_in_body(self):
+        # Defensive: even if body says "TNB ... bil elektrik", a real
+        # supplier merchant must win (priority 2 > priority 5 haystack).
+        result = classify_receipt(
+            ocr_text="Customer ref TNB BIL ELEKTRIK paid by us\nTotal 100",
+            parsed_items=[{"name": "Spice", "qty": 1, "price": 100.0}],
+            total=100.0,
+            merchant="BABAS MASALA SDN BHD",
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.SUPPLIER_PURCHASE)
+        self.assertEqual(result.extracted_vendor, "BABAS")
+
+    def test_empty_merchant_with_utility_in_body_still_utility(self):
+        # Sparse-OCR scenario for UTILITY: merchant arrives None but
+        # the body has the keyword. Haystack fallback at priority 5
+        # catches it.
+        result = classify_receipt(
+            ocr_text="TNB BIL ELEKTRIK\nTotal: 500",
+            parsed_items=[],
+            total=500.0,
+            merchant=None,
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.UTILITY)
+
+    def test_unknown_merchant_unknown_body_is_unknown(self):
+        # Sanity: a merchant with no keyword match and a body with
+        # no keyword match must still fall through to UNKNOWN.
+        result = classify_receipt(
+            ocr_text="Total: 100",
+            parsed_items=[],
+            total=100.0,
+            merchant="RANDOM TRADING SDN BHD",
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.UNKNOWN)
 
 
 class BotGatingTests(unittest.TestCase):
