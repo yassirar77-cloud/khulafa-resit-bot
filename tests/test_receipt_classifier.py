@@ -469,6 +469,134 @@ class MerchantArgGatingTests(unittest.TestCase):
         self.assertEqual(result.receipt_type, ReceiptType.UNKNOWN)
 
 
+class MerchantWhitelistOverrideTests(unittest.TestCase):
+    """PR #28b hotfix: a whitelisted merchant header must win over any
+    UTILITY / RENT_LICENSE / PETTY_CASH keyword that incidentally
+    appears in the receipt body.
+
+    Production bug that prompted this: receipts 1525 and 1532 from
+    EVEREST AISVARAM SDN. BHD. classified as UNKNOWN and UTILITY
+    respectively on the same day. The "TIME" entry in
+    UTILITY_KEYWORDS substring-matches the `Time: HH:MM` stamp on
+    most receipts, so any whitelisted supplier whose body contains
+    a timestamp was being routed away from SUPPLIER_PURCHASE.
+    """
+
+    def test_everest_with_time_in_body_classifies_as_supplier(self):
+        # The exact production failure mode: EVEREST merchant header,
+        # raw_text contains a "Time:" stamp that matches UTILITY's
+        # "TIME" keyword. Whitelist on merchant must win.
+        result = classify_receipt(
+            ocr_text="Date: 23/05/2026\nTime: 09:59\nTotal: RM 650.00",
+            parsed_items=[{"name": "Ice", "qty": 5, "price": 130.0}],
+            total=650.0,
+            merchant="EVEREST AISVARAM SDN. BHD.",
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.SUPPLIER_PURCHASE)
+        self.assertEqual(result.extracted_vendor, "EVEREST")
+
+    def test_everest_with_invoice_keyword_classifies_as_supplier(self):
+        # The user's worked example (a) — merchant whitelisted, body
+        # contains a generic header word.
+        result = classify_receipt(
+            ocr_text="INVOICE No: 1532\nBIL untuk: ...\nTotal: RM 65",
+            parsed_items=[{"name": "Tube Ice", "qty": 1, "price": 65.0}],
+            total=65.0,
+            merchant="EVEREST AISVARAM SDN. BHD.",
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.SUPPLIER_PURCHASE)
+        self.assertEqual(result.extracted_vendor, "EVEREST")
+
+    def test_babas_with_time_in_body_classifies_as_supplier(self):
+        # Generalise: every whitelisted supplier should survive a
+        # timestamp in the body.
+        result = classify_receipt(
+            ocr_text="Date: 23/05/2026\nTime: 14:30\nGRAND TOTAL: RM 250",
+            parsed_items=[{"name": "Masala", "qty": 1, "price": 250.0}],
+            total=250.0,
+            merchant="BABAS MASALA SDN BHD",
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.SUPPLIER_PURCHASE)
+        self.assertEqual(result.extracted_vendor, "BABAS")
+
+    def test_tnb_merchant_without_whitelist_match_still_utility(self):
+        # The user's worked example (b) — merchant is TNB (not on
+        # whitelist), body contains UTILITY keyword. Should still
+        # classify as UTILITY because the merchant-field whitelist
+        # check returns None.
+        result = classify_receipt(
+            ocr_text="TNB TENAGA NASIONAL BIL ELEKTRIK\nJumlah: RM 1,200",
+            parsed_items=[],
+            total=1200.0,
+            merchant="TNB",
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.UTILITY)
+        self.assertEqual(result.extracted_vendor, "TNB")
+
+    def test_utility_merchant_with_whitelist_substring_in_body_still_utility(self):
+        # Defensive: a real TNB bill whose address footer happens to
+        # mention a whitelist token (e.g. "JALAN MOON") must NOT be
+        # reclassified as SUPPLIER_PURCHASE — the merchant field is
+        # TNB, not a whitelisted supplier, so the merchant-only check
+        # falls through to UTILITY.
+        result = classify_receipt(
+            ocr_text="TNB BIL\nAlamat: Lot 42, Jalan Moon, Selangor\nTotal: 800",
+            parsed_items=[],
+            total=800.0,
+            merchant="TENAGA NASIONAL BERHAD",
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.UTILITY)
+
+    def test_staff_advance_still_beats_whitelisted_merchant(self):
+        # Priority of STAFF_ADVANCE over SUPPLIER_PURCHASE is preserved:
+        # the POS prints PAYOUT lines on supplier-merchant receipts
+        # when staff borrows against the day's takings.
+        result = classify_receipt(
+            ocr_text="PAYOUT TO PINJAM TO DINA BY CASH 500",
+            parsed_items=[{"name": "Payout", "qty": 1, "price": 500.0}],
+            total=500.0,
+            merchant="BABAS MASALA SDN BHD",
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.STAFF_ADVANCE)
+        self.assertEqual(result.extracted_staff_name, "Dina")
+
+    def test_merchant_field_case_insensitive(self):
+        # Merchant arrives as mixed-case from some OCR providers.
+        result = classify_receipt(
+            ocr_text="Time: 10:00\nTotal: 100",
+            parsed_items=[],
+            total=100.0,
+            merchant="Everest Aisvaram Sdn Bhd",
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.SUPPLIER_PURCHASE)
+        self.assertEqual(result.extracted_vendor, "EVEREST")
+
+    def test_empty_merchant_falls_through_to_utility(self):
+        # When merchant is None or empty and the body matches UTILITY,
+        # we want UTILITY (not the combined-haystack fallback firing
+        # accidentally on body content).
+        result = classify_receipt(
+            ocr_text="TNB BIL ELEKTRIK\nTotal: 500",
+            parsed_items=[],
+            total=500.0,
+            merchant=None,
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.UTILITY)
+
+    def test_empty_merchant_with_whitelist_in_body_still_supplier(self):
+        # The PR #28 sparse-OCR scenario must still work: merchant
+        # arrives None but the supplier name is in raw_text. Combined-
+        # haystack fallback at priority 6 catches this.
+        result = classify_receipt(
+            ocr_text="EVEREST AISVARAM SDN BHD\nTotal: 100",
+            parsed_items=[],
+            total=100.0,
+            merchant=None,
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.SUPPLIER_PURCHASE)
+        self.assertEqual(result.extracted_vendor, "EVEREST")
+
+
 class BotGatingTests(unittest.TestCase):
     """Source-level checks that bot.py's handle_photo passes merchant
     to the classifier and gates downstream side-effects on
