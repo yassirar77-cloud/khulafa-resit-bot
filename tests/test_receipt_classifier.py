@@ -386,6 +386,175 @@ class OwnOutletAndProductionMerchantTests(unittest.TestCase):
         self.assertEqual(r.receipt_type, ReceiptType.UNKNOWN)
 
 
+class MerchantArgGatingTests(unittest.TestCase):
+    """PR #28: classify_receipt MUST accept and use the `merchant` kwarg.
+
+    Production bug: some OCR providers return the merchant header in a
+    separate field and leave `raw_text` sparse. Without folding `merchant`
+    into the matching haystack, EVEREST/MYMOON/BABAS receipts were
+    silently classifying as UNKNOWN.
+    """
+
+    def test_classify_with_merchant_kwarg_works(self):
+        # The user's exact reproduction from the bug report.
+        result = classify_receipt(
+            ocr_text="Total: 65",
+            parsed_items=[],
+            total=65.0,
+            merchant="EVEREST AISVARAM SDN. BHD.",
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.SUPPLIER_PURCHASE)
+        self.assertEqual(result.extracted_vendor, "EVEREST")
+
+    def test_classify_without_merchant_returns_unknown_safely(self):
+        # Empty haystack -> UNKNOWN, no crash. The merchant kwarg is
+        # optional; the function must not blow up when it's None.
+        result = classify_receipt(
+            ocr_text="Total: 65",
+            parsed_items=[],
+            total=65.0,
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.UNKNOWN)
+
+    def test_merchant_arg_is_optional_and_defaults_to_none(self):
+        # Belt-and-braces: positional-only invocation must still work
+        # (no TypeError) so the kwarg can be rolled out incrementally.
+        result = classify_receipt("Total: 10", [], 10.0)
+        self.assertEqual(result.receipt_type, ReceiptType.UNKNOWN)
+
+    def test_merchant_in_raw_text_already_classifies(self):
+        # Regression guard: if a caller passes merchant in raw_text
+        # (legacy behavior), classification must still work. The
+        # merchant kwarg is additive, never required.
+        result = classify_receipt(
+            ocr_text="BABAS ENTERPRISE\nJintan 1KG\nTotal: 22.00",
+            parsed_items=[],
+            total=22.0,
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.SUPPLIER_PURCHASE)
+        self.assertEqual(result.extracted_vendor, "BABAS")
+
+    def test_merchant_only_match_for_each_whitelist_entry(self):
+        # Smoke test: merchant kwarg ALONE (with empty ocr_text and no
+        # items) is enough to classify as SUPPLIER_PURCHASE for every
+        # whitelist substring. This is the worst-case "sparse OCR" path
+        # that the bug exposed.
+        for supplier in [
+            "BABAS", "SAIDA", "JASMINE", "MEWAH", "HANEE",
+            "CAMELLIAA", "BS FROZEN", "BALAJI", "BESTARI",
+            "FOOK LEONG", "DAILY PAY", "EVEREST", "MOON", "MYMOO",
+        ]:
+            with self.subTest(supplier=supplier):
+                result = classify_receipt(
+                    ocr_text="",
+                    parsed_items=[],
+                    total=100.0,
+                    merchant=f"{supplier} SDN BHD",
+                )
+                self.assertEqual(
+                    result.receipt_type,
+                    ReceiptType.SUPPLIER_PURCHASE,
+                    f"{supplier!r} merchant-only failed: {result}",
+                )
+
+    def test_diamond_ball_unknown_merchant_stays_unknown(self):
+        # Production case the user cited (DIAMOND BALL): not on the
+        # whitelist -> UNKNOWN even with merchant kwarg supplied.
+        result = classify_receipt(
+            ocr_text="Diamond Ball outlet\nTotal: 50",
+            parsed_items=[{"name": "Item", "qty": 1, "price": 50.0}],
+            total=50.0,
+            merchant="DIAMOND BALL SDN BHD",
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.UNKNOWN)
+
+
+class BotGatingTests(unittest.TestCase):
+    """Source-level checks that bot.py's handle_photo passes merchant
+    to the classifier and gates downstream side-effects on
+    SUPPLIER_PURCHASE. These read bot.py as text rather than importing
+    it (bot.py has runtime deps like apscheduler that aren't installed
+    in CI/dev environments)."""
+
+    @classmethod
+    def setUpClass(cls):
+        bot_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "bot.py",
+        )
+        with open(bot_path) as f:
+            cls.bot_source = f.read()
+
+    def test_bot_handle_photo_passes_merchant_to_classifier(self):
+        # The exact pattern the user's diagnosis demanded.
+        self.assertIn("merchant=parsed.get(\"merchant\")", self.bot_source)
+        self.assertIn("classify_receipt(", self.bot_source)
+
+    def _block_for_receipt_type(self, type_name: str) -> str:
+        """Return the source-text segment that handles a given type."""
+        marker = f"if receipt_type == ReceiptType.{type_name}"
+        # Look for either `== ReceiptType.X` or `in (..., ReceiptType.X, ...)`.
+        if marker in self.bot_source:
+            idx = self.bot_source.index(marker)
+        else:
+            in_marker = f"ReceiptType.{type_name}"
+            idx = self.bot_source.index(in_marker)
+        return self.bot_source[idx:idx + 1200]
+
+    def test_price_aggregation_skipped_on_non_supplier_purchase(self):
+        # Each non-supplier branch must return before reaching the
+        # price_aggregation/save_item_prices block. The simplest
+        # invariant: each branch contains an early `return`.
+        for type_name in (
+            "STAFF_ADVANCE", "UTILITY", "RENT_LICENSE",
+            "PETTY_CASH", "UNKNOWN",
+        ):
+            with self.subTest(type=type_name):
+                block = self._block_for_receipt_type(type_name)
+                self.assertIn(
+                    "return",
+                    block,
+                    f"{type_name} branch missing early return — "
+                    f"price_aggregation could run on non-supplier receipts",
+                )
+
+    def test_audit_skipped_on_non_supplier_purchase(self):
+        # The audit-checks CALL SITE (not the function definition) lives
+        # after all the non-supplier early returns. Anchoring on the
+        # distinctive `asyncio.to_thread(run_audit_checks` invocation
+        # avoids matching the `def run_audit_checks` definition that
+        # appears earlier in the file.
+        audit_marker = "asyncio.to_thread(run_audit_checks"
+        self.assertIn(
+            audit_marker, self.bot_source,
+            "Audit call site marker not found — test needs updating "
+            "if bot.py was refactored.",
+        )
+        audit_idx = self.bot_source.index(audit_marker)
+        # The non-supplier routing branches live inside handle_photo,
+        # which appears after the run_audit_checks function definition
+        # but BEFORE the call site. Anchor on the routing-block comment
+        # to avoid matching the import line at the top of bot.py.
+        routing_marker = "PR #24: route non-purchase receipts"
+        self.assertIn(routing_marker, self.bot_source)
+        routing_idx = self.bot_source.index(routing_marker)
+        for type_name in (
+            "STAFF_ADVANCE", "UTILITY", "RENT_LICENSE",
+            "PETTY_CASH", "UNKNOWN",
+        ):
+            with self.subTest(type=type_name):
+                ref = f"ReceiptType.{type_name}"
+                self.assertIn(ref, self.bot_source)
+                # Find the FIRST reference at-or-after the routing block
+                # (skipping the `from receipt_classifier import` line).
+                ref_idx = self.bot_source.index(ref, routing_idx)
+                self.assertLess(
+                    ref_idx, audit_idx,
+                    f"{type_name} routing happens AFTER audit-checks call — "
+                    f"non-supplier receipts will trigger audit/price logic",
+                )
+
+
 class StaffAdvanceNameMissingTests(unittest.TestCase):
     def test_payout_without_name_still_classifies(self):
         # PAYOUT receipt where we can't extract a name should still be

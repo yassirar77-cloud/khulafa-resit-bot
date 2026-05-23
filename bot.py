@@ -949,10 +949,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # and anomaly checks. STAFF_ADVANCE/UTILITY/RENT_LICENSE/PETTY_CASH
     # are routed to their own side tables; UNKNOWN gets a manual review
     # prompt.
+    # PR #28: pass merchant explicitly. Some OCR responses return a clean
+    # `merchant` field but a sparse `raw_text` that omits the header,
+    # which caused 132+ EVEREST/MYMOON/BABAS receipts to be mis-classified
+    # as UNKNOWN because the whitelist never saw the merchant name.
     classification = classify_receipt(
-        parsed.get("raw_text") or "",
-        parsed.get("items"),
-        _to_float(parsed.get("total")),
+        ocr_text=parsed.get("raw_text") or "",
+        parsed_items=parsed.get("items"),
+        total=_to_float(parsed.get("total")),
+        merchant=parsed.get("merchant"),
     )
 
     user = update.effective_user
