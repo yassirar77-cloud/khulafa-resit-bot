@@ -105,9 +105,20 @@ PETTY_CASH_KEYWORDS = [
 ]
 PETTY_CASH_MAX_TOTAL = 200.0
 
-# 16-supplier whitelist for SUPPLIER_PURCHASE — case-insensitive substring
-# match on the merchant header or combined OCR text. Edit in place to add
-# new suppliers without redeploying classification logic.
+# Strict whitelist for SUPPLIER_PURCHASE — case-insensitive substring
+# match on the merchant header or combined OCR text. This is the ONLY
+# way a receipt becomes SUPPLIER_PURCHASE; there is no itemised-SKU
+# fallback (the previous fallback misclassified MYMOON'S KITCHEN-style
+# dine-in receipts as supplier invoices).
+#
+# Substrings are intentionally short to survive OCR noise, e.g. "MOON"
+# catches all observed misreads of MYMOON'S KITCHEN (MYMOOH'S, MTMOON'S,
+# MYMOOK'S, MYROOK'S, MTMOOK'S, MYNOOK'S, MYMCON'S, MIMOON'S, MY MOON'S).
+# "BESTARI" covers both BESTARI FARM and BESTARI WHOLESALE.
+#
+# New suppliers always start as UNKNOWN until added to this list — that
+# is by design. Better to drop a receipt than crash the pipeline or
+# bill the wrong category.
 SUPPLIER_WHITELIST = [
     "BABAS",
     "SAIDA",
@@ -117,32 +128,22 @@ SUPPLIER_WHITELIST = [
     "CAMELLIAA",
     "JY RESOURCES",
     "JUTA RIA",
-    "BS FROZEN FOOD",
-    "REZA PLASTIC",
+    "BS FROZEN",
+    "REZA",
     "BALAJI",
-    "BESTARI FARM",
-    "BESTARI WHOLESALE",
+    "BESTARI",
     "FOOK LEONG",
     "DAILY PAY",
-    "SHREE MAP JAYA",
-    "QUIWAVE OCEANIC",
+    "SHREE MAP",
+    "QUIWAVE",
+    "EVEREST",
+    # MYMOON'S KITCHEN OCR variants. Both substrings are kept (MOON
+    # listed first so the canonical "MYMOON'S" matches the shorter, more
+    # generic token). Coverage: 6 of 10 observed variants — the four
+    # MYROOK / MTMOOK / MYNOOK / MYMCON misreads need fuzzy matching.
+    "MOON",
+    "MYMOO",
 ]
-
-# Itemised SKU heuristic for SUPPLIER_PURCHASE fallback when no whitelist
-# match: presence of any of these unit tokens in a line item + total > RM50.
-ITEMISED_UNIT_TOKENS = [
-    "KG",
-    "PCS",
-    "PCE",
-    "CTN",
-    "BTL",
-    "PKT",
-    "PACK",
-    "G",
-    "ML",
-    "L",
-]
-ITEMISED_MIN_TOTAL = 50.0
 
 
 # --- Helpers --------------------------------------------------------------
@@ -237,26 +238,6 @@ def _match_supplier_whitelist(text: str) -> Optional[str]:
     return None
 
 
-def _looks_itemised(parsed_items: Iterable[Any]) -> bool:
-    """True if any parsed item name contains a unit token (kg/pcs/ctn/etc)."""
-    if not parsed_items:
-        return False
-    for it in parsed_items:
-        name = ""
-        if isinstance(it, dict):
-            name = str(it.get("name") or "")
-        elif it:
-            name = str(it)
-        name_up = name.upper()
-        # Token-bounded check so "G" in "GULA" doesn't fire. Allow leading
-        # digits (e.g. "1KG", "500G") which is the common Malaysian POS
-        # format.
-        for tok in ITEMISED_UNIT_TOKENS:
-            if re.search(rf"(?:^|\s|\d)({re.escape(tok)})(?:\s|$|\b)", name_up):
-                return True
-    return False
-
-
 def _match_utility_vendor(text: str) -> Optional[str]:
     for kw in UTILITY_KEYWORDS:
         if kw in text:
@@ -282,10 +263,15 @@ def classify_receipt(
 
     Priority order — first match wins:
         STAFF_ADVANCE -> UTILITY -> RENT_LICENSE -> PETTY_CASH
-        -> SUPPLIER_PURCHASE -> UNKNOWN
+        -> SUPPLIER_PURCHASE (strict whitelist only) -> UNKNOWN
 
     STAFF_ADVANCE runs first because the Khulafa POS prints "PAYOUT" as a
     line item, which would otherwise be misclassified as a purchase SKU.
+
+    SUPPLIER_PURCHASE requires a whitelist substring match — there is no
+    itemised-SKU fallback. New merchants always start as UNKNOWN. This is
+    conservative by design: better to skip than to crash price_aggregation
+    or bill a customer venue as a supplier.
     """
     parsed_items = parsed_items or []
     text = _build_combined_text(ocr_text or "", parsed_items)
@@ -344,7 +330,7 @@ def classify_receipt(
         logger.info("classify_receipt -> PETTY_CASH keywords=%s total=%s", matched, total)
         return result
 
-    # --- 5. SUPPLIER_PURCHASE ---
+    # --- 5. SUPPLIER_PURCHASE (strict whitelist only) ---
     supplier = _match_supplier_whitelist(text)
     if supplier:
         result = ClassificationResult(
@@ -354,15 +340,6 @@ def classify_receipt(
             extracted_vendor=supplier,
         )
         logger.info("classify_receipt -> SUPPLIER_PURCHASE supplier=%s", supplier)
-        return result
-
-    if _looks_itemised(parsed_items) and total is not None and total > ITEMISED_MIN_TOTAL:
-        result = ClassificationResult(
-            receipt_type=ReceiptType.SUPPLIER_PURCHASE,
-            confidence=0.70,
-            matched_keywords=["itemised_skus"],
-        )
-        logger.info("classify_receipt -> SUPPLIER_PURCHASE itemised total=%s", total)
         return result
 
     # --- 6. UNKNOWN ---
