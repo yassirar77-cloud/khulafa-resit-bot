@@ -148,14 +148,24 @@ SUPPLIER_WHITELIST = [
 
 # --- Helpers --------------------------------------------------------------
 
-def _build_combined_text(ocr_text: str, parsed_items: Iterable[Any]) -> str:
+def _build_combined_text(
+    ocr_text: str,
+    parsed_items: Iterable[Any],
+    merchant: str = "",
+) -> str:
     """Build the upper-cased haystack used for keyword matching.
 
-    Includes both the raw OCR text and a flattened view of parsed item
-    names — POS receipts often put the meaningful tokens (e.g. PAYOUT) in
-    the line items rather than the header.
+    Includes the merchant header (when available), the raw OCR text, AND
+    a flattened view of parsed item names. The merchant must be folded
+    in explicitly: some OCR providers return a clean `merchant` field
+    but a sparse `raw_text` that omits the header, which would otherwise
+    cause whitelist matches to silently fail.
     """
-    parts: list[str] = [ocr_text or ""]
+    parts: list[str] = []
+    if merchant:
+        parts.append(str(merchant))
+    if ocr_text:
+        parts.append(ocr_text)
     if parsed_items:
         for it in parsed_items:
             if isinstance(it, dict):
@@ -258,6 +268,7 @@ def classify_receipt(
     ocr_text: str,
     parsed_items: Optional[list[dict]] = None,
     total: Optional[float] = None,
+    merchant: Optional[str] = None,
 ) -> ClassificationResult:
     """Classify a receipt into one of the ReceiptType buckets.
 
@@ -272,9 +283,16 @@ def classify_receipt(
     itemised-SKU fallback. New merchants always start as UNKNOWN. This is
     conservative by design: better to skip than to crash price_aggregation
     or bill a customer venue as a supplier.
+
+    The `merchant` kwarg is folded into the matching haystack alongside
+    `ocr_text`. Pass it when the OCR provider returns the merchant header
+    in a separate field — without it, sparse raw_text payloads cause
+    whitelist matches to silently fail (the bug that produced 132+
+    EVEREST receipts mis-classified as UNKNOWN).
     """
     parsed_items = parsed_items or []
-    text = _build_combined_text(ocr_text or "", parsed_items)
+    text = _build_combined_text(ocr_text or "", parsed_items, merchant or "")
+    result: ClassificationResult
 
     # --- 1. STAFF_ADVANCE ---
     matched = _find_keywords(text, STAFF_ADVANCE_KEYWORDS)
@@ -288,64 +306,67 @@ def classify_receipt(
             extracted_staff_name=staff_name,
             extracted_vendor=issued_by,
         )
-        logger.info(
-            "classify_receipt -> STAFF_ADVANCE keywords=%s staff=%s issued_by=%s",
-            matched, staff_name, issued_by,
-        )
-        return result
 
     # --- 2. UTILITY ---
-    matched = _find_keywords(text, UTILITY_KEYWORDS)
-    if matched:
+    elif (matched := _find_keywords(text, UTILITY_KEYWORDS)):
         result = ClassificationResult(
             receipt_type=ReceiptType.UTILITY,
             confidence=0.95,
             matched_keywords=matched,
             extracted_vendor=matched[0],
         )
-        logger.info("classify_receipt -> UTILITY keywords=%s", matched)
-        return result
 
     # --- 3. RENT_LICENSE ---
-    matched = _find_keywords(text, RENT_LICENSE_KEYWORDS)
-    if matched:
+    elif (matched := _find_keywords(text, RENT_LICENSE_KEYWORDS)):
         result = ClassificationResult(
             receipt_type=ReceiptType.RENT_LICENSE,
             confidence=0.95,
             matched_keywords=matched,
             extracted_vendor=matched[0],
         )
-        logger.info("classify_receipt -> RENT_LICENSE keywords=%s", matched)
-        return result
 
     # --- 4. PETTY_CASH ---
-    matched = _find_keywords(text, PETTY_CASH_KEYWORDS)
-    if matched and (total is None or total < PETTY_CASH_MAX_TOTAL):
+    elif (
+        (matched := _find_keywords(text, PETTY_CASH_KEYWORDS))
+        and (total is None or total < PETTY_CASH_MAX_TOTAL)
+    ):
         result = ClassificationResult(
             receipt_type=ReceiptType.PETTY_CASH,
             confidence=0.90,
             matched_keywords=matched,
             extracted_vendor=matched[0],
         )
-        logger.info("classify_receipt -> PETTY_CASH keywords=%s total=%s", matched, total)
-        return result
 
     # --- 5. SUPPLIER_PURCHASE (strict whitelist only) ---
-    supplier = _match_supplier_whitelist(text)
-    if supplier:
+    elif (supplier := _match_supplier_whitelist(text)):
         result = ClassificationResult(
             receipt_type=ReceiptType.SUPPLIER_PURCHASE,
             confidence=0.95,
             matched_keywords=[supplier],
             extracted_vendor=supplier,
         )
-        logger.info("classify_receipt -> SUPPLIER_PURCHASE supplier=%s", supplier)
-        return result
 
     # --- 6. UNKNOWN ---
-    logger.info("classify_receipt -> UNKNOWN total=%s items=%d", total, len(parsed_items))
-    return ClassificationResult(
-        receipt_type=ReceiptType.UNKNOWN,
-        confidence=0.0,
-        matched_keywords=[],
+    else:
+        result = ClassificationResult(
+            receipt_type=ReceiptType.UNKNOWN,
+            confidence=0.0,
+            matched_keywords=[],
+        )
+
+    # Single decision-summary log line for every classification so Render
+    # logs show merchant + type + vendor consistently. The presence of
+    # merchant here is the canary for the production gating bug — if it
+    # logs as None or empty, the caller forgot to pass it.
+    logger.info(
+        "classify_receipt: merchant=%r type=%s vendor=%r staff=%r "
+        "total=%s items=%d matched=%s",
+        merchant,
+        result.receipt_type.value,
+        result.extracted_vendor,
+        result.extracted_staff_name,
+        total,
+        len(parsed_items),
+        result.matched_keywords,
     )
+    return result
