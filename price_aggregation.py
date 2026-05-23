@@ -98,6 +98,30 @@ def save_item_prices(
         )
         return 0
 
+    # Hotfix: drop records with no canonical_item — they can't be compared
+    # against historical averages and previously crashed the insert when
+    # the item_prices table had canonical_item NOT NULL. Log the dropped
+    # raw names so we can tune item_canonicalization_v2 over time.
+    usable: list[dict] = []
+    skipped: list[str] = []
+    for rec in price_records:
+        if rec.get("canonical_item") is None:
+            skipped.append(str(rec.get("raw_item_name") or "?"))
+            continue
+        usable.append(rec)
+
+    if skipped:
+        logger.warning(
+            "save_item_prices: skipping %d row(s) with null canonical_item "
+            "(receipt_id=%s, raw_names=%s)",
+            len(skipped),
+            receipt_id,
+            skipped[:10],
+        )
+
+    if not usable:
+        return 0
+
     rows = [
         {
             "receipt_id": receipt_id,
@@ -111,7 +135,7 @@ def save_item_prices(
             "unit_price": rec.get("unit_price"),
             "line_total": rec.get("line_total"),
         }
-        for rec in price_records
+        for rec in usable
     ]
 
     try:
