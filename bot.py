@@ -4,6 +4,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import signal
 import threading
 import time
@@ -35,6 +36,7 @@ from date_utils import normalize_date
 from image_utils import resize_for_ocr
 from items_utils import normalize_items
 from money_utils import normalize_total
+from receipt_classifier import ReceiptType, classify_receipt
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -61,6 +63,9 @@ IMAGE_RESIZE_ENABLED = os.environ.get("IMAGE_RESIZE_ENABLED", "true").lower() ==
 IMAGE_MAX_DIM = int(os.environ.get("IMAGE_MAX_DIM", "1600"))
 RECEIPTS_TABLE = "receipts"
 AUDIT_TABLE = "audit_responses"
+STAFF_ADVANCES_TABLE = "staff_advances"
+FIXED_COSTS_TABLE = "fixed_costs"
+PETTY_CASH_TABLE = "petty_cash"
 MALAYSIA_TZ = ZoneInfo("Asia/Kuala_Lumpur")
 
 BIG_PURCHASE_MULTIPLIER = 2.0
@@ -350,11 +355,12 @@ async def verify_extraction(image_bytes: bytes, extracted: dict) -> dict:
 _outlet_column_available = True
 _verification_columns_available = True
 _bill_to_column_available = True
+_receipt_type_column_available = True
 _VERIFICATION_KEYS = ("verification_status", "verification_notes", "confidence")
 
 
 def store_receipt(record: dict) -> dict:
-    global _outlet_column_available, _verification_columns_available, _bill_to_column_available
+    global _outlet_column_available, _verification_columns_available, _bill_to_column_available, _receipt_type_column_available
     payload = dict(record)
     # Postgres' date column rejects human formats like "25/4/26"; coerce to ISO
     # before insert. None passes through (column is nullable).
@@ -370,6 +376,8 @@ def store_receipt(record: dict) -> dict:
             payload.pop(key, None)
     if not _bill_to_column_available:
         payload.pop("bill_to", None)
+    if not _receipt_type_column_available:
+        payload.pop("receipt_type", None)
     try:
         result = supabase.table(RECEIPTS_TABLE).insert(payload).execute()
     except Exception as exc:
@@ -400,9 +408,62 @@ def store_receipt(record: dict) -> dict:
             _bill_to_column_available = False
             payload.pop("bill_to", None)
             result = supabase.table(RECEIPTS_TABLE).insert(payload).execute()
+        elif "receipt_type" in payload and "receipt_type" in msg:
+            logger.warning(
+                "receipts.receipt_type column missing — apply "
+                "migrations/0004_receipt_classifier.sql. Saving without "
+                "receipt_type for now."
+            )
+            _receipt_type_column_available = False
+            payload.pop("receipt_type", None)
+            result = supabase.table(RECEIPTS_TABLE).insert(payload).execute()
         else:
             raise
     return result.data[0] if result.data else record
+
+
+def store_staff_advance(
+    receipt_id, outlet: str | None, staff_name: str | None,
+    amount: float | None, advance_date: str | None, issued_by: str | None,
+) -> None:
+    payload = {
+        "receipt_id": receipt_id,
+        "outlet": outlet or "UNKNOWN",
+        "staff_name": staff_name,
+        "amount": normalize_total(amount) or 0,
+        "advance_date": normalize_date(advance_date) or _today_my(),
+        "issued_by": issued_by,
+    }
+    supabase.table(STAFF_ADVANCES_TABLE).insert(payload).execute()
+
+
+def store_fixed_cost(
+    receipt_id, outlet: str | None, category: str, vendor: str | None,
+    amount: float | None, cost_date: str | None,
+) -> None:
+    payload = {
+        "receipt_id": receipt_id,
+        "outlet": outlet or "UNKNOWN",
+        "category": category,
+        "vendor": vendor,
+        "amount": normalize_total(amount) or 0,
+        "cost_date": normalize_date(cost_date) or _today_my(),
+    }
+    supabase.table(FIXED_COSTS_TABLE).insert(payload).execute()
+
+
+def store_petty_cash(
+    receipt_id, outlet: str | None, description: str | None,
+    amount: float | None, cost_date: str | None,
+) -> None:
+    payload = {
+        "receipt_id": receipt_id,
+        "outlet": outlet or "UNKNOWN",
+        "description": description,
+        "amount": normalize_total(amount) or 0,
+        "cost_date": normalize_date(cost_date) or _today_my(),
+    }
+    supabase.table(PETTY_CASH_TABLE).insert(payload).execute()
 
 
 def derive_outlet(chat_id: int | None, chat_title: str | None) -> str | None:
@@ -883,6 +944,22 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     verification, verify_prefix = await run_verification(image_bytes, parsed)
 
+    # PR #24: classify receipt type before any downstream logic. Only
+    # SUPPLIER_PURCHASE receipts trigger price aggregation, spike alerts,
+    # and anomaly checks. STAFF_ADVANCE/UTILITY/RENT_LICENSE/PETTY_CASH
+    # are routed to their own side tables; UNKNOWN gets a manual review
+    # prompt.
+    # PR #28: pass merchant explicitly. Some OCR responses return a clean
+    # `merchant` field but a sparse `raw_text` that omits the header,
+    # which caused 132+ EVEREST/MYMOON/BABAS receipts to be mis-classified
+    # as UNKNOWN because the whitelist never saw the merchant name.
+    classification = classify_receipt(
+        ocr_text=parsed.get("raw_text") or "",
+        parsed_items=parsed.get("items"),
+        total=_to_float(parsed.get("total")),
+        merchant=parsed.get("merchant"),
+    )
+
     user = update.effective_user
     merchant_raw = parsed.get("merchant")
     record = {
@@ -901,6 +978,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "verification_status": verification["status"],
         "verification_notes": verification["notes"],
         "confidence": verification["confidence"],
+        "receipt_type": classification.receipt_type.value,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -921,6 +999,91 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception:
         logger.exception("Failed to send alert to ALERT_CHAT_ID")
 
+    # PR #24: route non-purchase receipts to their side tables and skip
+    # everything below. Only SUPPLIER_PURCHASE flows through price
+    # aggregation, spike detection, anomaly detection, and audit checks.
+    receipt_id = stored.get("id")
+    receipt_type = classification.receipt_type
+
+    if receipt_type == ReceiptType.STAFF_ADVANCE:
+        try:
+            await asyncio.to_thread(
+                store_staff_advance,
+                receipt_id,
+                outlet,
+                classification.extracted_staff_name,
+                _to_float(stored.get("total")),
+                stored.get("receipt_date"),
+                classification.extracted_vendor,
+            )
+            logger.info(
+                "Staff advance logged: receipt=%s staff=%s amount=%s",
+                receipt_id, classification.extracted_staff_name, stored.get("total"),
+            )
+            if not classification.extracted_staff_name:
+                await message.reply_text(
+                    "💰 Advance dicatat tapi nama staff tak dapat extract. "
+                    "Reply /advances untuk update nama."
+                )
+        except Exception:
+            logger.exception("Failed to store staff advance")
+        return
+
+    if receipt_type in (ReceiptType.UTILITY, ReceiptType.RENT_LICENSE):
+        category = "utility" if receipt_type == ReceiptType.UTILITY else "rent_license"
+        try:
+            await asyncio.to_thread(
+                store_fixed_cost,
+                receipt_id,
+                outlet,
+                category,
+                classification.extracted_vendor,
+                _to_float(stored.get("total")),
+                stored.get("receipt_date"),
+            )
+            logger.info(
+                "Fixed cost logged: receipt=%s category=%s vendor=%s amount=%s",
+                receipt_id, category, classification.extracted_vendor, stored.get("total"),
+            )
+        except Exception:
+            logger.exception("Failed to store fixed cost")
+        return
+
+    if receipt_type == ReceiptType.PETTY_CASH:
+        try:
+            description = classification.extracted_vendor or stored.get("merchant")
+            await asyncio.to_thread(
+                store_petty_cash,
+                receipt_id,
+                outlet,
+                description,
+                _to_float(stored.get("total")),
+                stored.get("receipt_date"),
+            )
+            logger.info(
+                "Petty cash logged: receipt=%s desc=%s amount=%s",
+                receipt_id, description, stored.get("total"),
+            )
+        except Exception:
+            logger.exception("Failed to store petty cash")
+        return
+
+    if receipt_type == ReceiptType.UNKNOWN:
+        try:
+            await context.bot.send_message(
+                chat_id=ALERT_CHAT_ID,
+                text=(
+                    "⚠️ Manual review needed — resit tak dapat classify.\n"
+                    f"Outlet: {outlet or '—'}  Merchant: {stored.get('merchant') or '—'}  "
+                    f"Total: RM{stored.get('total') or '—'}\n"
+                    "Tolong check dan tag jenis resit secara manual."
+                ),
+            )
+        except Exception:
+            logger.exception("Failed to send manual review alert")
+        return
+
+    # Fall-through: SUPPLIER_PURCHASE only.
     # === Price aggregation: per-item rows into item_prices ===
     # Passive data collection for PR #24 (price-spike detection). Failure
     # here MUST NOT crash the receipt pipeline — broad except + lazy import.
@@ -928,7 +1091,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         from price_aggregation import classify_and_extract_items, save_item_prices
         from outlet_mapping import outlet_from_chat_title
 
-        receipt_id = stored.get("id")
         if receipt_id is not None:
             price_records = classify_and_extract_items(parsed.get("items"))
             inserted = await asyncio.to_thread(
@@ -1045,6 +1207,10 @@ async def handle_audit_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     bot_id = context.bot.id
     if not reply_to.from_user or reply_to.from_user.id != bot_id:
         return
+    # /advances repayment confirmations are also bot-replied messages; route
+    # them first so a "Y" doesn't get saved as an audit answer.
+    if await handle_advances_confirmation(update, context):
+        return
     try:
         saved = await asyncio.to_thread(
             save_audit_reply, message.chat_id, reply_to.message_id, message.text
@@ -1066,6 +1232,10 @@ HELP_TEXT = (
     "/start — short greeting\n"
     "/summary — today's spending grouped by merchant\n"
     "/compare <item> — compare an item's unit price across outlets\n"
+    "/advances — list outstanding staff advances (PAYOUT / PINJAM)\n"
+    "/advances <staff> — history for one staff member\n"
+    "/advances <outlet> — open advances at one outlet\n"
+    "/advances <staff> repaid [amount] — mark repaid (Y/N confirm)\n"
     "/dashboard — open the Mini App dashboard\n"
     "/help — show this message"
 )
@@ -1295,6 +1465,291 @@ async def compare_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await message.reply_text("\n".join(lines))
 
 
+# === /advances commands (PR #24) ===========================================
+
+# Known outlet codes — kept loose; pattern is "SEK-N" or alphanumeric chunks.
+# Anything matching this regex is treated as an outlet filter rather than a
+# staff name.
+_OUTLET_TOKEN_RE = re.compile(r"^[A-Z]{2,5}[-_]?\d{0,3}$")
+
+
+def _fetch_open_advances(
+    staff_name: str | None = None, outlet: str | None = None
+) -> list[dict]:
+    q = (
+        supabase.table(STAFF_ADVANCES_TABLE)
+        .select("id, outlet, staff_name, amount, advance_date, issued_by, repaid")
+        .eq("repaid", False)
+    )
+    if staff_name:
+        q = q.ilike("staff_name", staff_name)
+    if outlet:
+        q = q.ilike("outlet", outlet)
+    return q.order("advance_date", desc=True).execute().data or []
+
+
+def _fetch_staff_history(staff_name: str) -> list[dict]:
+    return (
+        supabase.table(STAFF_ADVANCES_TABLE)
+        .select("id, outlet, amount, advance_date, repaid, repaid_date, repaid_method")
+        .ilike("staff_name", staff_name)
+        .order("advance_date", desc=True)
+        .execute()
+        .data or []
+    )
+
+
+def _mark_advances_repaid(
+    staff_name: str, partial_amount: float | None = None
+) -> tuple[int, float]:
+    """Mark open advances for `staff_name` repaid. If `partial_amount` is
+    set, apply it FIFO across oldest-first open advances until exhausted.
+    Returns (rows_updated, amount_applied).
+    """
+    open_rows = (
+        supabase.table(STAFF_ADVANCES_TABLE)
+        .select("id, amount")
+        .ilike("staff_name", staff_name)
+        .eq("repaid", False)
+        .order("advance_date", desc=False)
+        .execute()
+        .data or []
+    )
+    if not open_rows:
+        return 0, 0.0
+
+    today = _today_my()
+    if partial_amount is None:
+        ids = [r["id"] for r in open_rows]
+        total = sum(_to_float(r.get("amount")) or 0.0 for r in open_rows)
+        supabase.table(STAFF_ADVANCES_TABLE).update(
+            {"repaid": True, "repaid_date": today, "repaid_method": "salary_deduction"}
+        ).in_("id", ids).execute()
+        return len(ids), total
+
+    remaining = float(partial_amount)
+    applied = 0.0
+    updated = 0
+    for r in open_rows:
+        amt = _to_float(r.get("amount")) or 0.0
+        if remaining <= 0:
+            break
+        if remaining + 0.01 >= amt:
+            supabase.table(STAFF_ADVANCES_TABLE).update(
+                {"repaid": True, "repaid_date": today, "repaid_method": "cash_return"}
+            ).eq("id", r["id"]).execute()
+            remaining -= amt
+            applied += amt
+            updated += 1
+        else:
+            # Partial — reduce the advance amount, leave it open.
+            supabase.table(STAFF_ADVANCES_TABLE).update(
+                {"amount": round(amt - remaining, 2)}
+            ).eq("id", r["id"]).execute()
+            applied += remaining
+            updated += 1
+            remaining = 0
+            break
+    return updated, applied
+
+
+def _format_advances_by_outlet(rows: list[dict]) -> str:
+    if not rows:
+        return "✅ Tiada advance outstanding."
+    by_outlet: dict[str, list[dict]] = {}
+    for r in rows:
+        by_outlet.setdefault(r.get("outlet") or "UNKNOWN", []).append(r)
+    lines: list[str] = []
+    grand_total = 0.0
+    for outlet in sorted(by_outlet.keys()):
+        outlet_rows = by_outlet[outlet]
+        lines.append(f"💰 Advances belum bayar — {outlet}")
+        outlet_total = 0.0
+        for r in outlet_rows:
+            amt = _to_float(r.get("amount")) or 0.0
+            outlet_total += amt
+            name = r.get("staff_name") or "(unknown)"
+            date = r.get("advance_date") or "—"
+            lines.append(f"  • {name:<12s} RM{amt:>8.2f}   ({date})")
+        lines.append("  " + "─" * 21)
+        lines.append(f"  Total outstanding: RM{outlet_total:.2f}")
+        lines.append("")
+        grand_total += outlet_total
+    if len(by_outlet) > 1:
+        lines.append(f"Grand total: RM{grand_total:.2f}")
+    lines.append("/advances <nama>  → tengok history")
+    return "\n".join(lines).rstrip()
+
+
+def _format_staff_history(staff_name: str, rows: list[dict]) -> str:
+    if not rows:
+        return f"Tiada advance dijumpai untuk {staff_name}."
+    lines = [f"📒 History advances — {staff_name.title()}", ""]
+    open_total = 0.0
+    repaid_total = 0.0
+    for r in rows:
+        amt = _to_float(r.get("amount")) or 0.0
+        date = r.get("advance_date") or "—"
+        outlet = r.get("outlet") or "—"
+        if r.get("repaid"):
+            repaid_total += amt
+            rdate = r.get("repaid_date") or "?"
+            lines.append(f"  ✅ {date}  {outlet:<8s} RM{amt:>8.2f}  (paid {rdate})")
+        else:
+            open_total += amt
+            lines.append(f"  ⏳ {date}  {outlet:<8s} RM{amt:>8.2f}  (outstanding)")
+    lines.append("")
+    lines.append(f"Outstanding: RM{open_total:.2f}")
+    lines.append(f"Repaid:      RM{repaid_total:.2f}")
+    if open_total > 0:
+        lines.append("")
+        lines.append(f"/advances {staff_name} repaid          → mark all paid")
+        lines.append(f"/advances {staff_name} repaid <amount> → partial repayment")
+    return "\n".join(lines)
+
+
+async def advances_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message:
+        return
+
+    args = context.args or []
+
+    # /advances  → all open advances across all outlets, grouped by outlet
+    if not args:
+        try:
+            rows = await asyncio.to_thread(_fetch_open_advances)
+        except Exception:
+            logger.exception("Failed to fetch advances")
+            await message.reply_text("Gagal ambil data advances.")
+            return
+        await message.reply_text(_format_advances_by_outlet(rows))
+        return
+
+    first = args[0]
+    rest = args[1:]
+
+    # /advances <staff_name> repaid [amount]  → confirmation prompt
+    if rest and rest[0].lower() == "repaid":
+        staff_name = first
+        partial: float | None = None
+        if len(rest) >= 2:
+            try:
+                partial = float(rest[1].replace("RM", "").replace(",", ""))
+            except ValueError:
+                await message.reply_text(
+                    f"Amount tak valid: {rest[1]}\n"
+                    f"Usage: /advances {staff_name} repaid <amount>"
+                )
+                return
+
+        try:
+            open_rows = await asyncio.to_thread(_fetch_open_advances, staff_name)
+        except Exception:
+            logger.exception("Failed to look up open advances")
+            await message.reply_text("Gagal check advances.")
+            return
+        if not open_rows:
+            await message.reply_text(f"Tiada advance outstanding untuk {staff_name}.")
+            return
+
+        total_open = sum(_to_float(r.get("amount")) or 0.0 for r in open_rows)
+        if partial is None:
+            prompt = (
+                f"⚠️ Confirm: mark SEMUA advance untuk {staff_name.title()} as repaid?\n"
+                f"  {len(open_rows)} advance(s), total RM{total_open:.2f}\n"
+                f"Reply Y untuk confirm, N untuk batal."
+            )
+        else:
+            prompt = (
+                f"⚠️ Confirm: partial repayment RM{partial:.2f} untuk {staff_name.title()}?\n"
+                f"  Current outstanding: RM{total_open:.2f} across {len(open_rows)} advance(s)\n"
+                f"Reply Y untuk confirm, N untuk batal."
+            )
+
+        sent = await message.reply_text(prompt)
+        # Store the pending action keyed by the prompt message_id so the Y/N
+        # reply can find it. chat_data is per-chat persisted state.
+        pending = context.chat_data.setdefault("pending_advance_repayments", {})
+        pending[sent.message_id] = {
+            "staff_name": staff_name,
+            "partial": partial,
+            "asked_at": datetime.now(timezone.utc).isoformat(),
+        }
+        return
+
+    # /advances <outlet>  vs  /advances <staff_name>
+    token = first.upper()
+    if _OUTLET_TOKEN_RE.match(token):
+        try:
+            rows = await asyncio.to_thread(_fetch_open_advances, None, token)
+        except Exception:
+            logger.exception("Failed to fetch advances by outlet")
+            await message.reply_text("Gagal ambil data advances.")
+            return
+        await message.reply_text(_format_advances_by_outlet(rows))
+        return
+
+    # /advances <staff_name>  → full history
+    try:
+        rows = await asyncio.to_thread(_fetch_staff_history, first)
+    except Exception:
+        logger.exception("Failed to fetch staff history")
+        await message.reply_text("Gagal ambil history.")
+        return
+    await message.reply_text(_format_staff_history(first, rows))
+
+
+async def handle_advances_confirmation(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """If the message is a Y/N reply to a pending repayment prompt, execute
+    (or cancel) it. Returns True if handled, False otherwise so the audit
+    reply handler can still process unrelated replies.
+    """
+    message = update.effective_message
+    if not message or not message.text:
+        return False
+    reply_to = message.reply_to_message
+    if not reply_to:
+        return False
+    pending = context.chat_data.get("pending_advance_repayments") or {}
+    action = pending.get(reply_to.message_id)
+    if not action:
+        return False
+
+    answer = message.text.strip().lower()
+    if answer in ("y", "yes", "ya"):
+        try:
+            updated, applied = await asyncio.to_thread(
+                _mark_advances_repaid, action["staff_name"], action.get("partial")
+            )
+        except Exception:
+            logger.exception("Failed to mark advances repaid")
+            await message.reply_text("Gagal update database.")
+            pending.pop(reply_to.message_id, None)
+            return True
+        if updated == 0:
+            await message.reply_text("Tiada advance outstanding untuk update.")
+        else:
+            await message.reply_text(
+                f"✅ Done. {updated} advance(s) updated, RM{applied:.2f} repaid."
+            )
+        pending.pop(reply_to.message_id, None)
+        return True
+
+    if answer in ("n", "no", "tidak", "batal"):
+        await message.reply_text("Batal. Tiada perubahan dibuat.")
+        pending.pop(reply_to.message_id, None)
+        return True
+
+    # Anything else — leave it alone and let the audit handler try it.
+    return False
+
+
+# === End /advances commands ================================================
+
+
 def _fetch_today_receipts() -> list[dict]:
     now_my = datetime.now(MALAYSIA_TZ)
     start_local = datetime.combine(now_my.date(), datetime.min.time(), tzinfo=MALAYSIA_TZ)
@@ -1382,6 +1837,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("summary", summary_command))
     app.add_handler(CommandHandler("compare", compare_command))
+    app.add_handler(CommandHandler("advances", advances_command))
     app.add_handler(CommandHandler("dashboard", dashboard))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(
@@ -1421,6 +1877,7 @@ async def run_bot() -> None:
                 BotCommand("start", "Greeting"),
                 BotCommand("summary", "Today's spending grouped by merchant"),
                 BotCommand("compare", "Compare an item's unit price across outlets"),
+                BotCommand("advances", "Staff cash advances (PAYOUT/PINJAM) tracker"),
                 BotCommand("dashboard", "Open the Mini App dashboard"),
                 BotCommand("help", "Show command list"),
             ])
