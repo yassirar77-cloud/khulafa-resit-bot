@@ -96,7 +96,7 @@ def notify_owner(text: str) -> None:
         logger.warning("Could not DM reparse report to owner", exc_info=True)
 
 
-def run(client, dry_run: bool = False, limit=None) -> dict:
+def run(client, dry_run: bool = False, limit=None, date_only: bool = False) -> dict:
     candidates = fetch_candidates(client)
     if limit is not None:
         candidates = candidates[:limit]
@@ -105,7 +105,7 @@ def run(client, dry_run: bool = False, limit=None) -> dict:
 
     stats = {
         "evaluated": 0, "created": 0, "skipped_empty": 0,
-        "already": 0, "no_change": 0,
+        "already": 0, "no_change": 0, "skipped_total": 0,
         "total_only": 0, "date_only": 0, "both": 0,
     }
     created_rows = []
@@ -122,6 +122,12 @@ def run(client, dry_run: bool = False, limit=None) -> dict:
             continue
         if not proposal["has_change"]:
             stats["no_change"] += 1
+            continue
+        # --date-only: historical total corrections are too risky (a stray
+        # qty parsed into the item name makes a correct total look 100x off),
+        # so only write rows whose sole change is the date.
+        if date_only and proposal["correction_type"] in ("total", "total+date"):
+            stats["skipped_total"] += 1
             continue
         if not dry_run:
             try:
@@ -149,7 +155,7 @@ def run(client, dry_run: bool = False, limit=None) -> dict:
         key=lambda r: abs((r.get("old_total") or 0) - (r.get("new_total") or 0)),
         reverse=True,
     )[:top_n]
-    report = format_report(stats, top_rows, dry_run=dry_run)
+    report = format_report(stats, top_rows, dry_run=dry_run, date_only=date_only)
     print(report)
     # Dry runs stay local: no audit writes, no owner DM.
     if not dry_run:
@@ -171,9 +177,14 @@ def main() -> None:
         "--limit", type=int, default=None, metavar="N",
         help="process only the first N candidates from the query",
     )
+    parser.add_argument(
+        "--date-only", action="store_true",
+        help="only queue date corrections; skip total and total+date "
+        "corrections entirely (historical total fixes are deferred to PR #29d)",
+    )
     args = parser.parse_args()
     client = _build_client()
-    run(client, dry_run=args.dry_run, limit=args.limit)
+    run(client, dry_run=args.dry_run, limit=args.limit, date_only=args.date_only)
 
 
 if __name__ == "__main__":
