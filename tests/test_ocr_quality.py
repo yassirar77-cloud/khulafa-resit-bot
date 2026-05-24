@@ -220,10 +220,12 @@ class ValidateDateOutOfWindow(unittest.TestCase):
         self.assertEqual(result, "2028-01-15")
         self.assertTrue(flagged)
 
-    def test_far_past_flagged(self):
+    def test_far_past_reinferred_to_recent_year(self):
+        # 2020 is >5 years past -> implausible. Month (Jan) has already passed
+        # this year, so it re-infers the current year, not 2020.
         text = "Date: 2020-01-15"
         result, flagged = validate_date(text, today=self.TODAY)
-        self.assertEqual(result, "2020-01-15")
+        self.assertEqual(result, "2026-01-15")
         self.assertTrue(flagged)
 
     def test_seven_days_future_still_in_window(self):
@@ -236,6 +238,70 @@ class ValidateDateOutOfWindow(unittest.TestCase):
         text = "Date: 2026-05-31"
         result, flagged = validate_date(text, today=self.TODAY)
         self.assertTrue(flagged)
+
+
+class ValidateDateFarOutSanity(unittest.TestCase):
+    """PR #41 hotfix: out-of-window dates must resolve to a sensible recent
+    year, never 25-years-off nonsense like 2001 (receipts 424/1145/952/111)."""
+
+    TODAY = date(2026, 5, 24)
+
+    def test_two_digit_old_year_future_month_uses_last_year(self):
+        # "01" parsed as 2001 is implausible; Nov is ahead of May, so the
+        # receipt is most likely last November -> 2025, NOT 2001.
+        result, flagged = validate_date("Tarikh: 21/11/01", today=self.TODAY)
+        self.assertEqual(result, "2025-11-21")
+        self.assertTrue(flagged)
+
+    def test_four_digit_far_past_reinferred(self):
+        # Reproduces the audit nonsense: a 2001-Nov value -> 2025-11-21.
+        result, flagged = validate_date("Date: 2001-11-21", today=self.TODAY)
+        self.assertEqual(result, "2025-11-21")
+        self.assertTrue(flagged)
+
+    def test_far_past_month_already_passed_uses_current_year(self):
+        # March has already passed by May -> current year.
+        result, flagged = validate_date("Tarikh: 15/03/01", today=self.TODAY)
+        self.assertEqual(result, "2026-03-15")
+        self.assertTrue(flagged)
+
+    def test_current_year_future_month_kept(self):
+        # "21/11/26" -> Nov 2026: a plausible (current-year) date is kept as-is,
+        # not "corrected" just because it's later this year.
+        result, _ = validate_date("Tarikh: 21/11/26", today=self.TODAY)
+        self.assertEqual(result, "2026-11-21")
+
+    def test_current_year_iso_future_month_kept(self):
+        result, _ = validate_date("Date: 2026-11-21", today=self.TODAY)
+        self.assertEqual(result, "2026-11-21")
+
+    def test_within_five_years_future_kept(self):
+        # 2028 is within the +/-5y plausible band -> kept (only flagged).
+        result, flagged = validate_date("Date: 2028-01-15", today=self.TODAY)
+        self.assertEqual(result, "2028-01-15")
+        self.assertTrue(flagged)
+
+    def test_never_proposes_year_more_than_five_off(self):
+        for text in ("Date: 2001-11-21", "Tarikh: 21/11/01", "Date: 1999-06-30"):
+            with self.subTest(text=text):
+                result, _ = validate_date(text, today=self.TODAY)
+                year = int(result[:4])
+                self.assertLessEqual(abs(year - self.TODAY.year), 5)
+
+    def test_in_window_pick_unaffected(self):
+        # ID 1251 style: a real in-window date in raw_text is still chosen
+        # over the (out-of-window) stored value — no sanitisation needed.
+        result, flagged = validate_date(
+            "stored 2026-05-26\nTarikh: 20/05/2026", today=self.TODAY
+        )
+        self.assertEqual(result, "2026-05-20")
+        self.assertFalse(flagged)
+
+    def test_parse_explicit_four_digit_year_preserved(self):
+        # Parse level: an explicit 4-digit 2001 parses to 2001 (the sanitiser
+        # is a validate_date policy layer, not a parser change).
+        from ocr_quality import _parse_date_candidate
+        self.assertEqual(_parse_date_candidate("21/11/2001"), date(2001, 11, 21))
 
 
 class ValidateDateAmbiguous(unittest.TestCase):
