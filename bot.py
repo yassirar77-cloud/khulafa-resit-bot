@@ -46,6 +46,12 @@ from pending_review import (
     serialize_parsed_for_review,
     should_queue,
 )
+from reparse import (
+    apply_audit_row,
+    format_preview,
+    format_status,
+    summarize_audit_rows,
+)
 from receipt_classifier import ReceiptType, classify_receipt
 
 logging.basicConfig(
@@ -77,9 +83,14 @@ STAFF_ADVANCES_TABLE = "staff_advances"
 FIXED_COSTS_TABLE = "fixed_costs"
 PETTY_CASH_TABLE = "petty_cash"
 PENDING_REVIEW_TABLE = "pending_review"
+REPARSE_AUDIT_TABLE = "reparse_audit"
 
 # Edit-flow conversation states (PR #29b manual review).
 REVIEW_EDIT_TOTAL, REVIEW_EDIT_MERCHANT, REVIEW_EDIT_DATE = range(3)
+
+# /reparse_preview and /reparse_apply batch sizes.
+REPARSE_DEFAULT_N = 10
+REPARSE_MAX_N = 50
 MALAYSIA_TZ = ZoneInfo("Asia/Kuala_Lumpur")
 
 BIG_PURCHASE_MULTIPLIER = 2.0
@@ -2171,6 +2182,159 @@ async def post_daily_summary(application: Application) -> None:
         logger.exception("Daily summary: send failed")
 
 
+# === PR #29c: historical OCR re-parse review commands ========================
+
+def _command_owner_id(update: Update):
+    user = update.effective_user
+    return user.id if user else None
+
+
+def _parse_reparse_n(args, default: int, maximum: int) -> int:
+    if not args:
+        return default
+    try:
+        n = int(args[0])
+    except (ValueError, TypeError):
+        return default
+    return max(1, min(maximum, n))
+
+
+def _fetch_audit_rows_for_status() -> list:
+    result = (
+        supabase.table(REPARSE_AUDIT_TABLE)
+        .select("applied, old_total, new_total, old_date, new_date")
+        .execute()
+    )
+    return result.data or []
+
+
+def _fetch_pending_audit_rows(limit: int) -> list:
+    result = (
+        supabase.table(REPARSE_AUDIT_TABLE)
+        .select("*")
+        .eq("applied", False)
+        .order("id", desc=False)
+        .limit(limit)
+        .execute()
+    )
+    return result.data or []
+
+
+def _count_pending_audit() -> int:
+    result = (
+        supabase.table(REPARSE_AUDIT_TABLE).select("id").eq("applied", False).execute()
+    )
+    return len(result.data or [])
+
+
+def _apply_pending_audit_rows(rows: list, applied_by_chat_id) -> int:
+    applied = 0
+    for row in rows:
+        try:
+            if apply_audit_row(supabase, row, applied_by_chat_id):
+                applied += 1
+        except Exception:
+            logger.exception("Failed to apply reparse audit row %s", row.get("id"))
+    return applied
+
+
+async def reparse_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    try:
+        rows = await asyncio.to_thread(_fetch_audit_rows_for_status)
+    except Exception:
+        logger.exception("reparse_status failed")
+        await message.reply_text("Failed to read reparse audit.")
+        return
+    await message.reply_text(format_status(summarize_audit_rows(rows)))
+
+
+async def reparse_preview_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    n = _parse_reparse_n(context.args, REPARSE_DEFAULT_N, REPARSE_MAX_N)
+    try:
+        rows = await asyncio.to_thread(_fetch_pending_audit_rows, n)
+    except Exception:
+        logger.exception("reparse_preview failed")
+        await message.reply_text("Failed to read pending changes.")
+        return
+    await message.reply_text(format_preview(rows))
+
+
+async def reparse_apply_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    n = _parse_reparse_n(context.args, REPARSE_DEFAULT_N, REPARSE_MAX_N)
+    chat_id = _command_owner_id(update)
+    try:
+        rows = await asyncio.to_thread(_fetch_pending_audit_rows, n)
+        applied = await asyncio.to_thread(_apply_pending_audit_rows, rows, chat_id)
+    except Exception:
+        logger.exception("reparse_apply failed")
+        await message.reply_text("Failed to apply changes.")
+        return
+    await message.reply_text(
+        f"✅ Applied {applied} correction(s). Check /reparse_status for what's left."
+    )
+
+
+async def reparse_apply_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    try:
+        pending = await asyncio.to_thread(_count_pending_audit)
+    except Exception:
+        logger.exception("reparse_apply_all count failed")
+        await message.reply_text("Failed to read pending changes.")
+        return
+    if pending == 0:
+        await message.reply_text("No pending reparse changes to apply.")
+        return
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Yes, apply all", callback_data="reparse_applyall:yes"),
+        InlineKeyboardButton("❌ Cancel", callback_data="reparse_applyall:no"),
+    ]])
+    await message.reply_text(
+        f"⚠️ DANGER: apply ALL {pending} pending correction(s) to live receipts? "
+        "This updates real rows and cannot be auto-undone. Confirm:",
+        reply_markup=keyboard,
+    )
+
+
+async def reparse_apply_all_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+    chat_id = query.from_user.id if query.from_user else None
+    if not is_reviewer(chat_id):
+        logger.info("Ignoring reparse apply-all callback from non-reviewer %s", chat_id)
+        return
+    try:
+        _, choice = (query.data or "").split(":", 1)
+    except ValueError:
+        return
+    with contextlib.suppress(Exception):
+        await query.edit_message_reply_markup(reply_markup=None)
+    if choice != "yes":
+        await query.message.reply_text("Cancelled — no changes applied.")
+        return
+    try:
+        rows = await asyncio.to_thread(_fetch_pending_audit_rows, 1_000_000)
+        applied = await asyncio.to_thread(_apply_pending_audit_rows, rows, chat_id)
+    except Exception:
+        logger.exception("reparse_apply_all failed")
+        await query.message.reply_text("Failed to apply changes.")
+        return
+    await query.message.reply_text(f"✅ Applied ALL {applied} pending correction(s).")
+
+
 async def run_bot() -> None:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -2179,6 +2343,13 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("compare", compare_command))
     app.add_handler(CommandHandler("advances", advances_command))
     app.add_handler(CommandHandler("dashboard", dashboard))
+    app.add_handler(CommandHandler("reparse_status", reparse_status_command))
+    app.add_handler(CommandHandler("reparse_preview", reparse_preview_command))
+    app.add_handler(CommandHandler("reparse_apply", reparse_apply_command))
+    app.add_handler(CommandHandler("reparse_apply_all", reparse_apply_all_command))
+    app.add_handler(
+        CallbackQueryHandler(reparse_apply_all_callback, pattern=r"^reparse_applyall:(yes|no)$")
+    )
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     # PR #29b manual review: the edit conversation must be registered before
     # the audit-reply handler so a reviewer's in-flow text replies are routed
