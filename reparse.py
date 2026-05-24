@@ -228,11 +228,16 @@ def format_preview(rows) -> str:
     return "\n".join(["Pending reparse changes:"] + [format_preview_line(r) for r in rows])
 
 
-def format_report(stats: dict, top_rows: list) -> str:
-    lines = [
+def format_report(stats: dict, top_rows: list, dry_run: bool = False) -> str:
+    created_label = "Audit rows to create:      " if dry_run else "Audit rows created:        "
+    lines = []
+    if dry_run:
+        lines.append("DRY RUN — no rows inserted")
+        lines.append("")
+    lines += [
         "Reparse pass complete:",
         f"  Receipts evaluated:        {stats.get('evaluated', 0)}",
-        f"  Audit rows created:        {stats.get('created', 0)}",
+        f"  {created_label}{stats.get('created', 0)}",
         f"  Skipped (empty raw_text):  {stats.get('skipped_empty', 0)}",
         f"  Already queued/applied:    {stats.get('already', 0)}",
         f"  Reviewed, no change:       {stats.get('no_change', 0)}",
@@ -251,5 +256,8 @@ def format_report(stats: dict, top_rows: list) -> str:
                 f"-> RM{_fmt_money(r.get('new_total'))} ({r.get('old_merchant') or '—'})"
             )
     lines.append("")
-    lines.append("  Next: /reparse_preview 10")
+    if dry_run:
+        lines.append("  Next: re-run without --dry-run to queue these, then /reparse_preview 10")
+    else:
+        lines.append("  Next: /reparse_preview 10")
     return "\n".join(lines)

@@ -5,6 +5,7 @@ wiring is checked source-level (bot.py can't be imported in CI — runtime deps
 + required env vars), mirroring ``BotGatingTests`` / ``BotReviewFlow``.
 """
 
+import importlib.util
 import os
 import sys
 import types
@@ -268,6 +269,110 @@ class BotCommandSourceChecks(unittest.TestCase):
         # The actual application happens only in the callback after 'yes'.
         cb_body = self.src[cb_idx:cb_idx + 1500]
         self.assertIn("_apply_pending_audit_rows", cb_body)
+
+
+def _load_script_module():
+    path = os.path.join(REPO_ROOT, "scripts", "reparse_ocr_historical.py")
+    spec = importlib.util.spec_from_file_location("reparse_ocr_historical", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class _ScriptFakeQuery:
+    """Minimal stand-in for the supabase query builder used by the script."""
+
+    def __init__(self, parent, table):
+        self.parent = parent
+        self.table = table
+        self._op = "select"
+        self._eq = {}
+        self._payload = None
+
+    def select(self, *a, **k):
+        self._op = "select"
+        return self
+
+    def or_(self, *a, **k):
+        return self
+
+    def order(self, *a, **k):
+        return self
+
+    def limit(self, *a, **k):
+        return self
+
+    def eq(self, col, val):
+        self._eq[col] = val
+        return self
+
+    def insert(self, payload):
+        self._op = "insert"
+        self._payload = payload
+        return self
+
+    def execute(self):
+        if self.table == "receipts" and self._op == "select":
+            return types.SimpleNamespace(data=list(self.parent.candidates))
+        if self.table == "reparse_audit" and self._op == "select":
+            ids = self.parent.applied_ids if self._eq.get("applied") else self.parent.pending_ids
+            return types.SimpleNamespace(data=[{"receipt_id": i} for i in ids])
+        if self.table == "reparse_audit" and self._op == "insert":
+            self.parent.inserted.append(self._payload)
+            return types.SimpleNamespace(data=[self._payload])
+        return types.SimpleNamespace(data=[])
+
+
+class ScriptFakeClient:
+    def __init__(self, candidates, applied_ids=(), pending_ids=()):
+        self.candidates = candidates
+        self.applied_ids = set(applied_ids)
+        self.pending_ids = set(pending_ids)
+        self.inserted = []
+
+    def table(self, name):
+        return _ScriptFakeQuery(self, name)
+
+
+def _changing_candidate(rid):
+    # 18000 -> 180 is a clean decimal flip, so every such row is a change.
+    return {
+        "id": rid, "merchant": "M", "total": 18000.0, "receipt_date": "2024-05-22",
+        "confidence": 50, "items": [{"price": 180.0}], "raw_text": "M\nTotal RM18,000\n",
+    }
+
+
+class ScriptRunFlags(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.script = _load_script_module()
+
+    def test_dry_run_inserts_nothing(self):
+        client = ScriptFakeClient([_changing_candidate(i) for i in range(1, 4)])
+        stats = self.script.run(client, dry_run=True)
+        self.assertEqual(client.inserted, [])          # nothing written
+        self.assertEqual(stats["created"], 3)          # but reports would-create count
+        self.assertEqual(stats["evaluated"], 3)
+
+    def test_limit_processes_only_n_candidates(self):
+        client = ScriptFakeClient([_changing_candidate(i) for i in range(1, 6)])
+        stats = self.script.run(client, limit=2)
+        self.assertEqual(stats["evaluated"], 2)
+        self.assertEqual(len(client.inserted), 2)      # only first 2 queued
+
+    def test_dry_run_with_limit_combines_correctly(self):
+        client = ScriptFakeClient([_changing_candidate(i) for i in range(1, 6)])
+        stats = self.script.run(client, dry_run=True, limit=2)
+        self.assertEqual(stats["evaluated"], 2)
+        self.assertEqual(stats["created"], 2)
+        self.assertEqual(client.inserted, [])          # limit AND no writes
+
+    def test_default_behaviour_unchanged(self):
+        client = ScriptFakeClient([_changing_candidate(i) for i in range(1, 4)])
+        stats = self.script.run(client)
+        self.assertEqual(stats["evaluated"], 3)
+        self.assertEqual(len(client.inserted), 3)      # all changes queued
+        self.assertEqual(stats["created"], 3)
 
 
 class MigrationFile(unittest.TestCase):
