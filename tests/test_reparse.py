@@ -375,6 +375,81 @@ class ScriptRunFlags(unittest.TestCase):
         self.assertEqual(stats["created"], 3)
 
 
+def _total_only_candidate(rid):
+    # 18000 -> 180 total fix; raw_text date matches stored date (no date change).
+    return {
+        "id": rid, "merchant": "PVS", "total": 18000.0, "receipt_date": "2024-05-22",
+        "confidence": 50, "items": [{"qty": 1, "price": 180.0}],
+        "raw_text": "PVS\nGRAND TOTAL RM18,000\nTarikh: 22/05/2024\n",
+    }
+
+
+def _date_only_candidate(rid):
+    # Total reconciles (no change); stored date 2028 differs from raw_text date.
+    return {
+        "id": rid, "merchant": "KEDAI", "total": 50.0, "receipt_date": "2028-01-01",
+        "confidence": 60, "items": [{"qty": 1, "price": 50.0}],
+        "raw_text": "KEDAI\nTotal RM50\nTarikh: 20/05/2026\n",
+    }
+
+
+def _total_and_date_candidate(rid):
+    return {
+        "id": rid, "merchant": "X", "total": 18000.0, "receipt_date": "2028-01-01",
+        "confidence": 50, "items": [{"qty": 1, "price": 180.0}],
+        "raw_text": "X\nGRAND TOTAL RM18,000\nTarikh: 20/05/2026\n",
+    }
+
+
+class CorrectionType(unittest.TestCase):
+    def test_total_only(self):
+        self.assertEqual(propose_corrections(_total_only_candidate(1))["correction_type"], "total")
+
+    def test_date_only(self):
+        self.assertEqual(propose_corrections(_date_only_candidate(2))["correction_type"], "date")
+
+    def test_total_and_date(self):
+        self.assertEqual(propose_corrections(_total_and_date_candidate(3))["correction_type"], "total+date")
+
+    def test_correction_type_stripped_before_insert(self):
+        payload = audit_insert_payload(propose_corrections(_date_only_candidate(2)))
+        self.assertNotIn("correction_type", payload)
+        self.assertNotIn("has_change", payload)
+
+
+class DateOnlyFlag(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.script = _load_script_module()
+
+    def test_date_only_skips_total_corrections(self):
+        client = ScriptFakeClient([
+            _total_only_candidate(1),
+            _date_only_candidate(2),
+            _total_and_date_candidate(3),
+        ])
+        stats = self.script.run(client, date_only=True)
+        # Only the date-only row (#2) is written.
+        self.assertEqual(len(client.inserted), 1)
+        self.assertEqual(client.inserted[0]["receipt_id"], 2)
+        self.assertEqual(stats["created"], 1)
+        self.assertEqual(stats["skipped_total"], 2)   # #1 (total) and #3 (total+date)
+
+    def test_date_only_dry_run_writes_nothing(self):
+        client = ScriptFakeClient([_date_only_candidate(2)])
+        stats = self.script.run(client, date_only=True, dry_run=True)
+        self.assertEqual(client.inserted, [])
+        self.assertEqual(stats["created"], 1)         # would-create the date row
+        self.assertEqual(stats["skipped_total"], 0)
+
+    def test_default_still_writes_total_corrections(self):
+        # Regression: without --date-only, total corrections are still queued.
+        client = ScriptFakeClient([_total_only_candidate(1), _date_only_candidate(2)])
+        stats = self.script.run(client)
+        self.assertEqual(len(client.inserted), 2)
+        self.assertEqual(stats["skipped_total"], 0)
+
+
 class MigrationFile(unittest.TestCase):
     def test_reparse_audit_migration_exists_and_shaped(self):
         path = os.path.join(REPO_ROOT, "migrations", "0006_reparse_audit.sql")

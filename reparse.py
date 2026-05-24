@@ -129,13 +129,29 @@ def propose_corrections(receipt_row) -> dict | None:
         "confidence_new": confidence_new,
         "notes": _build_notes(total_changed, date_changed),
         "has_change": total_changed or date_changed,
+        "correction_type": classify_correction(total_changed, date_changed),
     }
 
 
+def classify_correction(total_changed: bool, date_changed: bool) -> str:
+    """One of 'total+date', 'total', 'date', 'none'."""
+    if total_changed and date_changed:
+        return "total+date"
+    if total_changed:
+        return "total"
+    if date_changed:
+        return "date"
+    return "none"
+
+
+# Helper-only fields that are not columns in the reparse_audit table.
+_NON_COLUMN_KEYS = ("has_change", "correction_type")
+
+
 def audit_insert_payload(proposal: dict) -> dict:
-    """Strip the helper-only ``has_change`` flag before inserting into the
-    ``reparse_audit`` table (which has no such column)."""
-    return {k: v for k, v in proposal.items() if k != "has_change"}
+    """Strip helper-only fields before inserting into the ``reparse_audit``
+    table (which has no such columns)."""
+    return {k: v for k, v in proposal.items() if k not in _NON_COLUMN_KEYS}
 
 
 def should_reprocess(receipt_id, applied_ids, pending_ids) -> bool:
@@ -228,17 +244,21 @@ def format_preview(rows) -> str:
     return "\n".join(["Pending reparse changes:"] + [format_preview_line(r) for r in rows])
 
 
-def format_report(stats: dict, top_rows: list, dry_run: bool = False) -> str:
+def format_report(stats: dict, top_rows: list, dry_run: bool = False, date_only: bool = False) -> str:
     created_label = "Audit rows to create:      " if dry_run else "Audit rows created:        "
     lines = []
     if dry_run:
         lines.append("DRY RUN — no rows inserted")
+    if date_only:
+        lines.append("DATE-ONLY MODE — total corrections skipped")
+    if lines:
         lines.append("")
     lines += [
         "Reparse pass complete:",
         f"  Receipts evaluated:        {stats.get('evaluated', 0)}",
         f"  {created_label}{stats.get('created', 0)}",
         f"  Skipped (empty raw_text):  {stats.get('skipped_empty', 0)}",
+        f"  Skipped (total change):    {stats.get('skipped_total', 0)}",
         f"  Already queued/applied:    {stats.get('already', 0)}",
         f"  Reviewed, no change:       {stats.get('no_change', 0)}",
         "",
