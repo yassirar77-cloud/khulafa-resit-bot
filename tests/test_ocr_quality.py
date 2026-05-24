@@ -627,5 +627,116 @@ class ConservativeCorrectionIntegration(unittest.TestCase):
         self.assertEqual(result["confidence"], 100)
 
 
+class QtyAwareItemSum(unittest.TestCase):
+    """Receipt #407 regression: a multi-unit line (qty × unit_price = total)
+    must reconcile via qty×price, not be mistaken for a decimal flip. Plus the
+    RM5 floor backstop for legacy rows that stored no qty."""
+
+    # --- the bug class: qty×price already equals the total -> no correction ---
+
+    def test_407_qty100_unit150_no_correction(self):
+        corrected, fixed = correct_total_with_items(
+            150.0, [{"name": "tacang", "qty": 100, "price": 1.50}],
+        )
+        self.assertEqual(corrected, 150.0)
+        self.assertFalse(fixed)
+
+    def test_qty10_unit_priced_no_correction(self):
+        corrected, fixed = correct_total_with_items(
+            50.0, [{"name": "x", "qty": 10, "price": 5.00}],
+        )
+        self.assertEqual(corrected, 50.0)
+        self.assertFalse(fixed)
+
+    # --- Fix B floor: no qty stored, unit price would flip below RM5 ----------
+
+    def test_qty_none_with_rm5_floor(self):
+        corrected, fixed = correct_total_with_items(
+            150.0, [{"name": "tacang", "qty": None, "price": 1.50}],
+        )
+        self.assertEqual(corrected, 150.0)  # 1.50 < RM5 -> suppressed
+        self.assertFalse(fixed)
+
+    def test_qty_none_high_value_still_works(self):
+        # No qty, but the flip lands at RM18 (>= floor) -> genuine fix applies.
+        corrected, fixed = correct_total_with_items(
+            1800.0, [{"name": "x", "qty": None, "price": 18.00}],
+        )
+        self.assertEqual(corrected, 18.0)
+        self.assertTrue(fixed)
+
+    # --- regression: genuine single-unit decimal losses still correct ---------
+
+    def test_pvs_santan_single_item_still_corrects(self):
+        corrected, fixed = correct_total_with_items(
+            18000.0, [{"name": "santan", "qty": 1, "price": 180.0}],
+        )
+        self.assertEqual(corrected, 180.0)
+        self.assertTrue(fixed)
+
+    def test_nasi_lemak_still_corrects(self):
+        corrected, fixed = correct_total_with_items(
+            8250.0, [{"name": "nasi lemak", "qty": 1, "price": 82.50}],
+        )
+        self.assertEqual(corrected, 82.50)
+        self.assertTrue(fixed)
+
+    def test_everest_still_corrects(self):
+        corrected, fixed = correct_total_with_items(
+            9900.0, [{"name": "tube ice", "qty": 1, "price": 99.0}],
+        )
+        self.assertEqual(corrected, 99.0)
+        self.assertTrue(fixed)
+
+    # --- qty coercion edge cases (all treated as 1) ---------------------------
+
+    def test_qty_zero_treated_as_one(self):
+        # qty=0 -> 1, so 1x180 vs 18000 is still a clean 100x flip -> 180.
+        corrected, fixed = correct_total_with_items(
+            18000.0, [{"name": "x", "qty": 0, "price": 180.0}],
+        )
+        self.assertEqual(corrected, 180.0)
+        self.assertTrue(fixed)
+
+    def test_qty_negative_treated_as_one(self):
+        corrected, fixed = correct_total_with_items(
+            18000.0, [{"name": "x", "qty": -5, "price": 180.0}],
+        )
+        self.assertEqual(corrected, 180.0)
+        self.assertTrue(fixed)
+
+    def test_qty_string_invalid_treated_as_one(self):
+        corrected, fixed = correct_total_with_items(
+            18000.0, [{"name": "x", "qty": "abc", "price": 180.0}],
+        )
+        self.assertEqual(corrected, 180.0)
+        self.assertTrue(fixed)
+
+
+class QtyAwareLivePipeline(unittest.TestCase):
+    """The fix lives in the shared _sum_line_item_prices, so it must protect
+    the LIVE parse_markdown_receipt path too — not just PR #29c reparse."""
+
+    def test_live_100x_unit_priced_line_not_corrupted(self):
+        from ocr_glm import parse_markdown_receipt
+
+        # "100 tacang @ RM1.50 = RM150" arriving via the OCR pipeline.
+        result = parse_markdown_receipt(
+            "# KEDAI RUNCIT\n"
+            "| Item | Qty | Price |\n"
+            "|---|---|---|\n"
+            "| Tacang | 100 | 1.50 |\n"
+            "TOTAL RM 150.00\n"
+            "Date: 20/05/2026\n"
+        )
+        self.assertEqual(len(result["items"]), 1)
+        self.assertEqual(result["items"][0]["qty"], 100.0)
+        self.assertEqual(result["items"][0]["price"], 1.50)
+        # The bug would have saved 1.50; the fix keeps the real 150.
+        self.assertEqual(result["total"], 150.0)
+        # qty×price reconciles exactly -> no conflict penalty.
+        self.assertEqual(result["confidence"], 100)
+
+
 if __name__ == "__main__":
     unittest.main()

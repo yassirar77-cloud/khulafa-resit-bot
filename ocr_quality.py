@@ -42,6 +42,12 @@ DATE_FUTURE_LIMIT_DAYS = 7
 DECIMAL_FLIP_RATIOS = (0.01, 0.1, 10.0, 100.0)
 DECIMAL_FLIP_TOLERANCE = 0.02   # ratio must be within 2% of a flip target
 
+# Sanity floor: never "correct" a total down to an implausibly small value.
+# Guards the residual case where qty isn't stored (legacy line-item parser
+# leaves qty=None), so a single unit price like RM1.50 can't masquerade as a
+# 100x-too-large total and divide a real RM150 down to RM1.50 (receipt #407).
+DECIMAL_CORRECTION_FLOOR = 5.0
+
 # Confidence penalties (consumed by ocr_glm.parse_markdown_receipt).
 CONF_PENALTY_DECIMAL_FIX = 20
 CONF_PENALTY_DATE_OUT_OF_WINDOW = 15
@@ -142,7 +148,35 @@ def _is_foc_item(item: dict) -> bool:
     return isinstance(name, str) and bool(_FOC_NAME_RE.search(name))
 
 
+def _coerce_qty(value) -> float:
+    """Quantity multiplier for a line item. Defaults to 1 when qty is missing,
+    None, non-numeric, a bool, or <= 0 — so a stored unit price is multiplied
+    up to its line total whenever a usable qty exists, and otherwise treated
+    as a single unit."""
+    if isinstance(value, bool):
+        return 1.0
+    if isinstance(value, (int, float)) and value > 0:
+        return float(value)
+    return 1.0
+
+
+def _coerce_price(value) -> float:
+    """Unit price for a line item. Defaults to 0 when None, non-numeric, or a
+    bool (bool is an int subclass and must never be summed as a price)."""
+    if isinstance(value, bool):
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    return 0.0
+
+
 def _sum_line_item_prices(items: list[dict] | None) -> float:
+    """Sum of line totals = Σ(qty × unit_price).
+
+    Using qty×price (not bare price) is what keeps a multi-unit line like
+    "100 × RM1.50 = RM150" reconciling to RM150 instead of RM1.50, so the
+    decimal-flip corrector doesn't mistake the unit price for a 100x error.
+    """
     if not items:
         return 0.0
     total = 0.0
@@ -151,11 +185,7 @@ def _sum_line_item_prices(items: list[dict] | None) -> float:
             continue
         if _is_foc_item(item):
             continue
-        price = item.get("price")
-        if isinstance(price, bool):
-            continue
-        if isinstance(price, (int, float)):
-            total += float(price)
+        total += _coerce_qty(item.get("qty")) * _coerce_price(item.get("price"))
     return total
 
 
@@ -208,10 +238,13 @@ def correct_total_with_items(
 
     * item parsing does not look incomplete (see ``line_items_incomplete``;
       requires ``raw_text`` to assess — without it the check is skipped),
-    * we have at least one line item with a usable price (FOC / free-of-
-      charge lines and null prices contribute nothing), AND
+    * we have at least one usable line item, where each line contributes
+      ``qty × price`` (FOC / free-of-charge lines and null prices contribute
+      nothing), AND
     * ``sum_items / total`` is within 2% of a clean power-of-ten flip
-      (0.01, 0.1, 10, 100) — i.e. a dropped or spurious decimal point.
+      (0.01, 0.1, 10, 100) — i.e. a dropped or spurious decimal point, AND
+    * the proposed corrected total is not below ``DECIMAL_CORRECTION_FLOOR``
+      (RM5) — a backstop for legacy rows with no stored qty.
 
     A vague mismatch (e.g. sum 42 vs total 40, ratio 1.05) is left alone:
     that is almost always an OCR digit misread we cannot reconstruct, and
@@ -244,6 +277,13 @@ def correct_total_with_items(
         return total, False
 
     corrected = round(total * flip, 2)
+    if corrected < DECIMAL_CORRECTION_FLOOR:
+        logger.warning(
+            "ocr_quality.correct_total_with_items: decimal-flip suppressed by RM5 "
+            "floor: proposed new_total=%.2f from old_total=%.2f",
+            corrected, total,
+        )
+        return total, False
     logger.warning(
         "ocr_quality.correct_total_with_items: total=%.2f vs sum_items=%.2f is a "
         "clean %gx decimal flip; corrected to %.2f",
