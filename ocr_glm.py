@@ -24,9 +24,11 @@ import time
 from ocr_quality import (
     CONF_PENALTY_DATE_OUT_OF_WINDOW,
     CONF_PENALTY_DECIMAL_FIX,
+    CONF_PENALTY_INCOMPLETE_ITEMS,
     CONF_PENALTY_SPLIT_COLUMN,
     correct_total_with_items,
     has_rm_sen_split_column,
+    line_items_incomplete,
     normalize_amount_locale_aware,
     validate_date,
 )
@@ -354,12 +356,20 @@ def parse_markdown_receipt(md: str) -> dict:
             "glm-ocr parse: no items section found; md head=%r", md_head
         )
 
-    total, total_corrected = correct_total_with_items(total, items)
+    total, total_corrected = correct_total_with_items(total, items, raw_text=md)
     split_column_flagged = has_rm_sen_split_column(md)
+    items_incomplete = line_items_incomplete(md, items)
 
     confidence = _heuristic_confidence(merchant, total, receipt_date, items)
     if total_corrected:
         confidence = max(0, confidence - CONF_PENALTY_DECIMAL_FIX)
+    elif items_incomplete:
+        confidence = max(0, confidence - CONF_PENALTY_INCOMPLETE_ITEMS)
+        logger.warning(
+            "glm-ocr parse: line items look incomplete (parsed %d, raw shows "
+            "more numbered rows) — total left uncorrected, confidence docked",
+            len(items) if items else 0,
+        )
     if date_flagged:
         confidence = max(0, confidence - CONF_PENALTY_DATE_OUT_OF_WINDOW)
     if split_column_flagged:
