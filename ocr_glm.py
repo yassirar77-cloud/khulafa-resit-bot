@@ -21,6 +21,16 @@ import os
 import re
 import time
 
+from ocr_quality import (
+    CONF_PENALTY_DATE_OUT_OF_WINDOW,
+    CONF_PENALTY_DECIMAL_FIX,
+    CONF_PENALTY_SPLIT_COLUMN,
+    correct_total_with_items,
+    has_rm_sen_split_column,
+    normalize_amount_locale_aware,
+    validate_date,
+)
+
 logger = logging.getLogger(__name__)
 
 GLM_OCR_MODEL = os.environ.get("ZAI_OCR_MODEL", "glm-ocr")
@@ -127,51 +137,7 @@ _ITEM_SPLIT_RE = re.compile(r"\s*(?:[+&,/]|\band\b|\bdan\b)\s*", re.IGNORECASE)
 
 
 def _normalize_amount(s) -> float | None:
-    if s is None:
-        return None
-    cleaned = str(s).replace(",", "").replace(" ", "").strip()
-    if not cleaned:
-        return None
-    try:
-        return float(cleaned)
-    except ValueError:
-        return None
-
-
-def _normalize_date(year: str, month: str, day: str) -> str | None:
-    try:
-        y, m, d = int(year), int(month), int(day)
-    except ValueError:
-        return None
-    if y < 100:
-        y += 2000
-    if not (1 <= m <= 12 and 1 <= d <= 31):
-        return None
-    return f"{y:04d}-{m:02d}-{d:02d}"
-
-
-def _find_date(md: str) -> str | None:
-    # FIXME(ambiguous-date): the YMD branch runs first, so if glm-ocr emits a
-    # date in YYYY-MM-DD form it wins even when the underlying receipt was
-    # written DD/MM/YY. Live failure: a "10/05/2026" (10-May-2026) receipt
-    # came back as "2026-10-05", suggesting glm-ocr re-rendered the date and
-    # transposed day/month — or another YMD-shaped number elsewhere in the
-    # markdown matched first. Next iteration: anchor on a "Date:"/"Tarikh:"
-    # label, prefer the receipt-locale interpretation, and log which branch
-    # matched so we can diagnose. Intentionally not fixed in this PR.
-    for line in md.splitlines():
-        m = re.search(r"\b(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})\b", line)
-        if m:
-            d = _normalize_date(m.group(1), m.group(2), m.group(3))
-            if d:
-                return d
-    for line in md.splitlines():
-        m = re.search(r"\b(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})\b", line)
-        if m:
-            d = _normalize_date(m.group(3), m.group(2), m.group(1))
-            if d:
-                return d
-    return None
+    return normalize_amount_locale_aware(s)
 
 
 def _strip_md(text: str) -> str:
@@ -376,7 +342,7 @@ def parse_markdown_receipt(md: str) -> dict:
             "glm-ocr parse: no GRAND TOTAL/TOTAL/JUMLAH match; md head=%r", md_head
         )
 
-    receipt_date = _find_date(md)
+    receipt_date, date_flagged = validate_date(md)
     if receipt_date is None:
         logger.warning("glm-ocr parse: date regex failed; md head=%r", md_head)
 
@@ -388,7 +354,19 @@ def parse_markdown_receipt(md: str) -> dict:
             "glm-ocr parse: no items section found; md head=%r", md_head
         )
 
+    total, total_corrected = correct_total_with_items(total, items)
+    split_column_flagged = has_rm_sen_split_column(md)
+
     confidence = _heuristic_confidence(merchant, total, receipt_date, items)
+    if total_corrected:
+        confidence = max(0, confidence - CONF_PENALTY_DECIMAL_FIX)
+    if date_flagged:
+        confidence = max(0, confidence - CONF_PENALTY_DATE_OUT_OF_WINDOW)
+    if split_column_flagged:
+        confidence = max(0, confidence - CONF_PENALTY_SPLIT_COLUMN)
+        logger.warning(
+            "glm-ocr parse: RM/Sen split column detected — total may be unreliable"
+        )
 
     return {
         "merchant": merchant,
