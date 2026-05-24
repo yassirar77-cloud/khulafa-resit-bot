@@ -26,10 +26,12 @@ from ocr_quality import (
     CONF_PENALTY_DECIMAL_FIX,
     CONF_PENALTY_INCOMPLETE_ITEMS,
     CONF_PENALTY_SPLIT_COLUMN,
+    CONF_PENALTY_TOTAL_CONFLICT,
     correct_total_with_items,
     has_rm_sen_split_column,
     line_items_incomplete,
     normalize_amount_locale_aware,
+    total_conflicts_with_item_sum,
     validate_date,
 )
 
@@ -359,6 +361,7 @@ def parse_markdown_receipt(md: str) -> dict:
     total, total_corrected = correct_total_with_items(total, items, raw_text=md)
     split_column_flagged = has_rm_sen_split_column(md)
     items_incomplete = line_items_incomplete(md, items)
+    total_conflict = total_conflicts_with_item_sum(total, items)
 
     confidence = _heuristic_confidence(merchant, total, receipt_date, items)
     if total_corrected:
@@ -369,6 +372,17 @@ def parse_markdown_receipt(md: str) -> dict:
             "glm-ocr parse: line items look incomplete (parsed %d, raw shows "
             "more numbered rows) — total left uncorrected, confidence docked",
             len(items) if items else 0,
+        )
+    elif total_conflict:
+        # Totals don't reconcile but it isn't a clean decimal flip — most
+        # often an upstream OCR digit misread (row 1613: GLM read the TOTAL
+        # line as 40.00 when the paper said 42.00). We can't reconstruct the
+        # true digit here; that is a GLM-OCR model issue to improve. Dock
+        # confidence so the digest surfaces it for human review.
+        confidence = max(0, confidence - CONF_PENALTY_TOTAL_CONFLICT)
+        logger.warning(
+            "glm-ocr parse: total does not reconcile with item sum and is not a "
+            "clean decimal flip — leaving total as-is, confidence docked for review"
         )
     if date_flagged:
         confidence = max(0, confidence - CONF_PENALTY_DATE_OUT_OF_WINDOW)
