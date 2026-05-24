@@ -72,11 +72,24 @@ UTILITY_KEYWORDS = [
     "UNIFI",
     "MAXIS",
     "CELCOM",
-    "DIGI",
-    "TIME",
+    # Bare "DIGI" was removed (PR #28c): it substring-matched DIGITAL,
+    # DIGITS, DIGI-* prefixes and IC numbers. Replaced by full brand names.
+    "DIGI TELECOMMUNICATIONS",
+    "DIGI POSTPAID",
+    "DIGI PREPAID",
+    "CELCOMDIGI",
+    # Bare "TIME" was removed (PR #28c): it substring-matched the
+    # "Time: HH:MM" stamp printed on essentially every receipt (the PR #28b
+    # incident). Replaced by full Time dotCom Berhad product names.
+    "TIME DOTCOM",
+    "TIME FIBRE",
+    "TIME INTERNET",
 ]
 
 RENT_LICENSE_KEYWORDS = [
+    # PR #28c audit: medium-risk token — "SEWA" (Malay for "rent") can also
+    # appear inside street addresses. Kept as a substring (brand replacement
+    # doesn't apply to a generic rent term); monitor via the tier-tagged log.
     "SEWA",
     "RENTAL",
     "LESEN",
@@ -375,6 +388,7 @@ def classify_receipt(
 
     # --- 3. UTILITY (merchant-field) ---
     elif (kw := _match_keywords_in_merchant(merchant, UTILITY_KEYWORDS)):
+        logger.info("classify_receipt utility match: tier=merchant kw=%s", kw)
         result = ClassificationResult(
             receipt_type=ReceiptType.UTILITY,
             confidence=0.95,
@@ -384,6 +398,7 @@ def classify_receipt(
 
     # --- 4. RENT_LICENSE (merchant-field) ---
     elif (kw := _match_keywords_in_merchant(merchant, RENT_LICENSE_KEYWORDS)):
+        logger.info("classify_receipt rent_license match: tier=merchant kw=%s", kw)
         result = ClassificationResult(
             receipt_type=ReceiptType.RENT_LICENSE,
             confidence=0.95,
@@ -393,6 +408,7 @@ def classify_receipt(
 
     # --- 5. UTILITY (haystack fallback) ---
     elif (matched := _find_keywords(text, UTILITY_KEYWORDS)):
+        logger.info("classify_receipt utility match: tier=haystack kw=%s", matched[0])
         result = ClassificationResult(
             receipt_type=ReceiptType.UTILITY,
             confidence=0.95,
@@ -402,6 +418,7 @@ def classify_receipt(
 
     # --- 6. RENT_LICENSE (haystack fallback) ---
     elif (matched := _find_keywords(text, RENT_LICENSE_KEYWORDS)):
+        logger.info("classify_receipt rent_license match: tier=haystack kw=%s", matched[0])
         result = ClassificationResult(
             receipt_type=ReceiptType.RENT_LICENSE,
             confidence=0.95,

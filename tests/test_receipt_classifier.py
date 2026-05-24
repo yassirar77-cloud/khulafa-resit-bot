@@ -15,6 +15,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from receipt_classifier import (  # noqa: E402
+    UTILITY_KEYWORDS,
     ClassificationResult,
     ReceiptType,
     classify_receipt,
@@ -819,6 +820,118 @@ class ResultShapeTests(unittest.TestCase):
         self.assertEqual(ReceiptType.STAFF_ADVANCE.value, "STAFF_ADVANCE")
         self.assertEqual(str(ReceiptType.STAFF_ADVANCE), "ReceiptType.STAFF_ADVANCE")
         self.assertEqual(ReceiptType.STAFF_ADVANCE, "STAFF_ADVANCE")
+
+
+class UtilityKeywordTighteningTests(unittest.TestCase):
+    """PR #28c: bare "TIME" / "DIGI" UTILITY keywords replaced by full
+    brand strings so they no longer substring-match the ubiquitous
+    "Time: HH:MM" stamp or DIGITAL/DIGITS text.
+    """
+
+    # --- The four concrete cases from the brief --------------------------
+
+    def test_time_stamp_with_supplier_body_is_supplier_not_utility(self):
+        # merchant=None, body has a "Time:" stamp AND a whitelisted
+        # supplier token. Bare "TIME" is gone, so UTILITY must not fire;
+        # the haystack supplier fallback (priority 8) wins.
+        result = classify_receipt(
+            ocr_text="Time: 14:35\nBABAS JINTAN 22.00",
+            parsed_items=[{"name": "JINTAN", "qty": 1, "price": 22.0}],
+            total=22.0,
+            merchant=None,
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.SUPPLIER_PURCHASE)
+        self.assertEqual(result.extracted_vendor, "BABAS")
+
+    def test_time_dotcom_body_is_utility(self):
+        result = classify_receipt(
+            ocr_text="TIME DOTCOM BROADBAND BILL\nTotal: 150.00",
+            parsed_items=[],
+            total=150.0,
+            merchant=None,
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.UTILITY)
+        self.assertEqual(result.extracted_vendor, "TIME DOTCOM")
+
+    def test_digital_ocean_invoice_is_unknown(self):
+        # The bare "DIGI" substring no longer exists, so "DIGITAL" no
+        # longer matches UTILITY.
+        result = classify_receipt(
+            ocr_text="DIGITAL OCEAN INVOICE\nTotal: 200.00",
+            parsed_items=[],
+            total=200.0,
+            merchant=None,
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.UNKNOWN)
+
+    def test_digi_telecommunications_body_is_utility(self):
+        result = classify_receipt(
+            ocr_text="DIGI TELECOMMUNICATIONS POSTPAID\nTotal: 89.00",
+            parsed_items=[],
+            total=89.0,
+            merchant=None,
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.UTILITY)
+        self.assertEqual(result.extracted_vendor, "DIGI TELECOMMUNICATIONS")
+
+    # --- Regression for every removed / added token ----------------------
+
+    def test_bare_time_token_removed_from_list(self):
+        self.assertNotIn("TIME", UTILITY_KEYWORDS)
+
+    def test_bare_digi_token_removed_from_list(self):
+        self.assertNotIn("DIGI", UTILITY_KEYWORDS)
+
+    def test_added_brand_tokens_present_in_list(self):
+        for brand in (
+            "TIME DOTCOM",
+            "TIME FIBRE",
+            "TIME INTERNET",
+            "DIGI TELECOMMUNICATIONS",
+            "DIGI POSTPAID",
+            "DIGI PREPAID",
+            "CELCOMDIGI",
+        ):
+            self.assertIn(brand, UTILITY_KEYWORDS)
+
+    def test_each_added_brand_classifies_as_utility(self):
+        for brand in (
+            "TIME DOTCOM",
+            "TIME FIBRE",
+            "TIME INTERNET",
+            "DIGI TELECOMMUNICATIONS",
+            "DIGI POSTPAID",
+            "DIGI PREPAID",
+            "CELCOMDIGI",
+        ):
+            with self.subTest(brand=brand):
+                result = classify_receipt(
+                    ocr_text=f"{brand} BILL\nTotal: 99.00",
+                    parsed_items=[],
+                    total=99.0,
+                    merchant=None,
+                )
+                self.assertEqual(result.receipt_type, ReceiptType.UTILITY)
+
+    def test_lone_time_stamp_no_longer_classifies_as_utility(self):
+        # A receipt whose only UTILITY-ish content is a timestamp must
+        # fall through to UNKNOWN now that bare "TIME" is gone.
+        result = classify_receipt(
+            ocr_text="Date: 23/05/2026\nTime: 09:59\nTotal: 650.00",
+            parsed_items=[],
+            total=650.0,
+            merchant=None,
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.UNKNOWN)
+
+    def test_digits_printed_no_longer_classifies_as_utility(self):
+        result = classify_receipt(
+            ocr_text="DIGITS PRINTED ON RECEIPT\nTotal: 30.00",
+            parsed_items=[],
+            total=30.0,
+            merchant=None,
+        )
+        self.assertEqual(result.receipt_type, ReceiptType.UNKNOWN)
 
 
 if __name__ == "__main__":
