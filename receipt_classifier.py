@@ -248,6 +248,36 @@ def _match_supplier_whitelist(text: str) -> Optional[str]:
     return None
 
 
+def _match_keywords_in_merchant(
+    merchant: Optional[str], keywords: Iterable[str]
+) -> Optional[str]:
+    """Substring match a keyword list against ONLY the merchant string.
+
+    Used by the priority-2 tier so a clean merchant header
+    (EVEREST / TENAGA NASIONAL / KWSP / ...) is treated as
+    authoritative, independent of whatever happens to appear in the
+    receipt body. Returns the first matching keyword, or None.
+
+    Matching only the merchant field — not the combined haystack —
+    keeps the haystack-level rules (priority 5+) from misfiring on
+    addresses, timestamps, or product names that happen to contain a
+    keyword. Example: a real TNB bill whose footer says "JALAN MOON"
+    still classifies as UTILITY because the merchant is TNB, not a
+    whitelisted supplier.
+    """
+    if not merchant:
+        return None
+    upper = str(merchant).upper()
+    for kw in keywords:
+        if kw in upper:
+            return kw
+    return None
+
+
+def _match_supplier_whitelist_in_merchant(merchant: Optional[str]) -> Optional[str]:
+    return _match_keywords_in_merchant(merchant, SUPPLIER_WHITELIST)
+
+
 def _match_utility_vendor(text: str) -> Optional[str]:
     for kw in UTILITY_KEYWORDS:
         if kw in text:
@@ -273,22 +303,49 @@ def classify_receipt(
     """Classify a receipt into one of the ReceiptType buckets.
 
     Priority order — first match wins:
-        STAFF_ADVANCE -> UTILITY -> RENT_LICENSE -> PETTY_CASH
-        -> SUPPLIER_PURCHASE (strict whitelist only) -> UNKNOWN
+
+      Tier A (haystack-based, very specific):
+        1. STAFF_ADVANCE
+
+      Tier B (merchant-field-only checks; merchant is authoritative):
+        2. SUPPLIER_PURCHASE  (merchant matches SUPPLIER_WHITELIST)
+        3. UTILITY            (merchant matches UTILITY_KEYWORDS)
+        4. RENT_LICENSE       (merchant matches RENT_LICENSE_KEYWORDS)
+
+      Tier C (haystack fallbacks; for sparse-OCR scenarios where the
+              merchant arrives None and the supplier/vendor name only
+              appears inside raw_text):
+        5. UTILITY            (haystack)
+        6. RENT_LICENSE       (haystack)
+        7. PETTY_CASH         (haystack, with total cap)
+        8. SUPPLIER_PURCHASE  (haystack)
+        9. UNKNOWN
 
     STAFF_ADVANCE runs first because the Khulafa POS prints "PAYOUT" as a
     line item, which would otherwise be misclassified as a purchase SKU.
 
-    SUPPLIER_PURCHASE requires a whitelist substring match — there is no
-    itemised-SKU fallback. New merchants always start as UNKNOWN. This is
-    conservative by design: better to skip than to crash price_aggregation
-    or bill a customer venue as a supplier.
+    Tier B exists so that a clean merchant header — EVEREST, TENAGA
+    NASIONAL, KWSP — is treated as authoritative even when the receipt
+    body contains substring-noise that would otherwise trip another
+    rule. The original bug was supplier receipts being routed to
+    UTILITY because the word "TIME" in a `Time: HH:MM` stamp matched
+    UTILITY_KEYWORDS (PR #28b). The same defence applies to UTILITY
+    and RENT_LICENSE receipts: receipt 1548 (TENAGA NASIONAL,
+    RM4,894.75) classified as UNKNOWN in production because the
+    pre-PR-28 build never saw the merchant header and the bill body
+    had no UTILITY keyword in it. With merchant=TENAGA NASIONAL passed
+    in, the priority-3 check fires and routes to UTILITY directly.
 
-    The `merchant` kwarg is folded into the matching haystack alongside
-    `ocr_text`. Pass it when the OCR provider returns the merchant header
-    in a separate field — without it, sparse raw_text payloads cause
-    whitelist matches to silently fail (the bug that produced 132+
-    EVEREST receipts mis-classified as UNKNOWN).
+    Tier C preserves the PR #28 sparse-OCR safety net: if the OCR
+    provider returns the merchant inside `raw_text` rather than as a
+    separate field, the haystack-level checks still catch it. New
+    merchants always start as UNKNOWN.
+
+    The `merchant` kwarg is folded into the haystack used by Tier A
+    and Tier C. Pass it from the caller whenever the OCR response
+    includes a merchant field — without it, sparse raw_text payloads
+    cause classification to silently fall back to UNKNOWN (the bug
+    that produced 132+ EVEREST receipts mis-classified — PR #28).
     """
     parsed_items = parsed_items or []
     text = _build_combined_text(ocr_text or "", parsed_items, merchant or "")
@@ -307,7 +364,34 @@ def classify_receipt(
             extracted_vendor=issued_by,
         )
 
-    # --- 2. UTILITY ---
+    # --- 2. SUPPLIER_PURCHASE (merchant-field whitelist) ---
+    elif (supplier := _match_keywords_in_merchant(merchant, SUPPLIER_WHITELIST)):
+        result = ClassificationResult(
+            receipt_type=ReceiptType.SUPPLIER_PURCHASE,
+            confidence=0.95,
+            matched_keywords=[supplier],
+            extracted_vendor=supplier,
+        )
+
+    # --- 3. UTILITY (merchant-field) ---
+    elif (kw := _match_keywords_in_merchant(merchant, UTILITY_KEYWORDS)):
+        result = ClassificationResult(
+            receipt_type=ReceiptType.UTILITY,
+            confidence=0.95,
+            matched_keywords=[kw],
+            extracted_vendor=kw,
+        )
+
+    # --- 4. RENT_LICENSE (merchant-field) ---
+    elif (kw := _match_keywords_in_merchant(merchant, RENT_LICENSE_KEYWORDS)):
+        result = ClassificationResult(
+            receipt_type=ReceiptType.RENT_LICENSE,
+            confidence=0.95,
+            matched_keywords=[kw],
+            extracted_vendor=kw,
+        )
+
+    # --- 5. UTILITY (haystack fallback) ---
     elif (matched := _find_keywords(text, UTILITY_KEYWORDS)):
         result = ClassificationResult(
             receipt_type=ReceiptType.UTILITY,
@@ -316,7 +400,7 @@ def classify_receipt(
             extracted_vendor=matched[0],
         )
 
-    # --- 3. RENT_LICENSE ---
+    # --- 6. RENT_LICENSE (haystack fallback) ---
     elif (matched := _find_keywords(text, RENT_LICENSE_KEYWORDS)):
         result = ClassificationResult(
             receipt_type=ReceiptType.RENT_LICENSE,
@@ -325,7 +409,7 @@ def classify_receipt(
             extracted_vendor=matched[0],
         )
 
-    # --- 4. PETTY_CASH ---
+    # --- 7. PETTY_CASH ---
     elif (
         (matched := _find_keywords(text, PETTY_CASH_KEYWORDS))
         and (total is None or total < PETTY_CASH_MAX_TOTAL)
@@ -337,7 +421,14 @@ def classify_receipt(
             extracted_vendor=matched[0],
         )
 
-    # --- 5. SUPPLIER_PURCHASE (strict whitelist only) ---
+    # --- 8. SUPPLIER_PURCHASE (combined-haystack whitelist fallback) ---
+    #
+    # Catches receipts whose OCR provider returned the merchant inside
+    # raw_text rather than as a separate field — the merchant-field
+    # check at priority 2 missed those. Runs after the haystack
+    # UTILITY/RENT/PETTY rules so those still win when the receipt
+    # body legitimately matches them and the whitelist token only
+    # appears incidentally.
     elif (supplier := _match_supplier_whitelist(text)):
         result = ClassificationResult(
             receipt_type=ReceiptType.SUPPLIER_PURCHASE,
@@ -346,7 +437,7 @@ def classify_receipt(
             extracted_vendor=supplier,
         )
 
-    # --- 6. UNKNOWN ---
+    # --- 9. UNKNOWN ---
     else:
         result = ClassificationResult(
             receipt_type=ReceiptType.UNKNOWN,
