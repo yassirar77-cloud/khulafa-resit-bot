@@ -25,17 +25,27 @@ from telegram import (
 from telegram.error import Conflict, TelegramError
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    ConversationHandler,
     MessageHandler,
     filters,
 )
 
 from audit_messages import build_big_purchase_message
+from config.reviewers import REVIEWER_CHAT_IDS, is_reviewer
 from date_utils import normalize_date
 from image_utils import resize_for_ocr
 from items_utils import normalize_items
 from money_utils import normalize_total
+from ocr_quality import total_conflicts_with_item_sum
+from pending_review import (
+    apply_edits_to_parsed,
+    build_review_reason,
+    serialize_parsed_for_review,
+    should_queue,
+)
 from receipt_classifier import ReceiptType, classify_receipt
 
 logging.basicConfig(
@@ -66,6 +76,10 @@ AUDIT_TABLE = "audit_responses"
 STAFF_ADVANCES_TABLE = "staff_advances"
 FIXED_COSTS_TABLE = "fixed_costs"
 PETTY_CASH_TABLE = "petty_cash"
+PENDING_REVIEW_TABLE = "pending_review"
+
+# Edit-flow conversation states (PR #29b manual review).
+REVIEW_EDIT_TOTAL, REVIEW_EDIT_MERCHANT, REVIEW_EDIT_DATE = range(3)
 MALAYSIA_TZ = ZoneInfo("Asia/Kuala_Lumpur")
 
 BIG_PURCHASE_MULTIPLIER = 2.0
@@ -464,6 +478,74 @@ def store_petty_cash(
         "cost_date": normalize_date(cost_date) or _today_my(),
     }
     supabase.table(PETTY_CASH_TABLE).insert(payload).execute()
+
+
+# === PR #29b: low-confidence manual-review queue =============================
+
+def store_pending_review(record: dict) -> dict:
+    payload = dict(record)
+    payload["parsed_date"] = normalize_date(payload.get("parsed_date"))
+    if payload.get("parsed_total") is not None:
+        payload["parsed_total"] = normalize_total(payload.get("parsed_total"))
+    result = supabase.table(PENDING_REVIEW_TABLE).insert(payload).execute()
+    return result.data[0] if result.data else record
+
+
+def fetch_pending_review(review_id) -> dict | None:
+    result = (
+        supabase.table(PENDING_REVIEW_TABLE)
+        .select("*")
+        .eq("id", review_id)
+        .limit(1)
+        .execute()
+    )
+    rows = result.data or []
+    return rows[0] if rows else None
+
+
+def update_pending_review(
+    review_id, status: str, reviewer_chat_id, edited_data: dict | None = None
+) -> None:
+    payload = {
+        "status": status,
+        "reviewer_chat_id": reviewer_chat_id,
+        "reviewed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if edited_data is not None:
+        payload["edited_data"] = edited_data
+    supabase.table(PENDING_REVIEW_TABLE).update(payload).eq("id", review_id).execute()
+
+
+def promote_pending_to_receipt(pending: dict, edits: dict | None = None) -> dict:
+    """Copy an approved/edited ``pending_review`` row into ``receipts``.
+
+    Only the parsed fields survive the queue (the table doesn't carry
+    raw_text / receipt_type), so promoted rows default to UNKNOWN type and do
+    not re-run price aggregation — a documented v1 limitation."""
+    parsed = {
+        "merchant": pending.get("parsed_merchant"),
+        "total": pending.get("parsed_total"),
+        "receipt_date": pending.get("parsed_date"),
+        "items": pending.get("parsed_items") or [],
+    }
+    parsed = apply_edits_to_parsed(parsed, edits)
+    merchant_raw = parsed.get("merchant")
+    chat_id = pending.get("chat_id")
+    record = {
+        "chat_id": chat_id,
+        "message_id": pending.get("telegram_message_id"),
+        "merchant": merchant_raw.upper().strip() if isinstance(merchant_raw, str) else merchant_raw,
+        "outlet": derive_outlet(chat_id, None),
+        "receipt_date": parsed.get("receipt_date"),
+        "total": parsed.get("total"),
+        "currency": "MYR",
+        "items": parsed.get("items"),
+        "verification_status": "MANUAL_REVIEW",
+        "verification_notes": f"approved via review queue (pending #{pending.get('id')})",
+        "confidence": pending.get("confidence"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return store_receipt(record)
 
 
 def derive_outlet(chat_id: int | None, chat_title: str | None) -> str | None:
@@ -889,6 +971,256 @@ async def run_verification(image_bytes: bytes, parsed: dict) -> tuple[dict, str]
     )
 
 
+def _review_keyboard(review_id) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Save as-is", callback_data=f"review:{review_id}:save"),
+        InlineKeyboardButton("✏️ Edit", callback_data=f"review:{review_id}:edit"),
+        InlineKeyboardButton("❌ Discard", callback_data=f"review:{review_id}:discard"),
+    ]])
+
+
+def _format_review_caption(pending: dict) -> str:
+    conf = pending.get("confidence")
+    items = pending.get("parsed_items") or []
+    return (
+        "🔎 Receipt needs review\n"
+        f"Merchant: {pending.get('parsed_merchant') or '—'}\n"
+        f"Total: RM{pending.get('parsed_total') if pending.get('parsed_total') is not None else '—'}\n"
+        f"Date: {pending.get('parsed_date') or '—'}\n"
+        f"Items: {len(items)}\n"
+        f"Confidence: {conf if conf is not None else '—'}\n"
+        f"Reason: {pending.get('reason') or '—'}"
+    )
+
+
+async def _dm_reviewers(context: ContextTypes.DEFAULT_TYPE, pending: dict) -> None:
+    keyboard = _review_keyboard(pending.get("id"))
+    caption = _format_review_caption(pending)
+    photo_file_id = pending.get("photo_file_id")
+    for reviewer_id in REVIEWER_CHAT_IDS:
+        try:
+            if photo_file_id:
+                await context.bot.send_photo(
+                    chat_id=reviewer_id, photo=photo_file_id,
+                    caption=caption, reply_markup=keyboard,
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=reviewer_id, text=caption, reply_markup=keyboard,
+                )
+        except Exception:
+            logger.exception("Failed to DM reviewer %s", reviewer_id)
+
+
+async def route_to_review(
+    message, context: ContextTypes.DEFAULT_TYPE, parsed: dict, verification: dict
+) -> None:
+    confidence = verification.get("confidence")
+    ocr_conflict = total_conflicts_with_item_sum(
+        _to_float(parsed.get("total")), parsed.get("items")
+    )
+    reason = build_review_reason(confidence, verification.get("status"), ocr_conflict)
+    photo = message.photo[-1] if message.photo else None
+    pending_record = {
+        "telegram_message_id": message.message_id,
+        "chat_id": message.chat_id,
+        "photo_file_id": photo.file_id if photo else None,
+        "confidence": confidence,
+        "reason": reason,
+        "status": "pending",
+        **serialize_parsed_for_review(parsed),
+    }
+    try:
+        stored = await asyncio.to_thread(store_pending_review, pending_record)
+    except Exception:
+        logger.exception("Failed to queue receipt for manual review")
+        await message.reply_text(
+            "Couldn't queue this receipt for review — please try resending."
+        )
+        return
+    logger.info(
+        "Receipt queued for review: pending_id=%s confidence=%s reason=%s",
+        stored.get("id"), confidence, reason,
+    )
+    await message.reply_text(
+        f"🔎 Receipt flagged for review (confidence {confidence if confidence is not None else '—'}). "
+        "A reviewer will confirm it shortly."
+    )
+    await _dm_reviewers(context, stored)
+
+
+async def _finalize_review(
+    review_id, reviewer_chat_id, status: str, edits: dict | None = None
+) -> dict | None:
+    """Promote a pending row to `receipts` (for approve/edit) and flip its
+    status. Returns the stored receipt, or None if the row is gone/handled."""
+    pending = await asyncio.to_thread(fetch_pending_review, review_id)
+    if not pending or pending.get("status") != "pending":
+        return None
+    stored = await asyncio.to_thread(promote_pending_to_receipt, pending, edits)
+    await asyncio.to_thread(
+        update_pending_review, review_id, status, reviewer_chat_id, edits
+    )
+    return stored
+
+
+async def handle_review_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the ✅ Save as-is and ❌ Discard inline buttons. The ✏️ Edit
+    button is the entry point of the edit ConversationHandler instead."""
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+    reviewer_chat_id = query.from_user.id if query.from_user else None
+    if not is_reviewer(reviewer_chat_id):
+        logger.info("Ignoring review callback from non-reviewer chat_id=%s", reviewer_chat_id)
+        return
+    try:
+        _, raw_id, action = (query.data or "").split(":", 2)
+        review_id = int(raw_id)
+    except (ValueError, AttributeError):
+        return
+
+    if action == "discard":
+        await asyncio.to_thread(
+            update_pending_review, review_id, "rejected", reviewer_chat_id
+        )
+        with contextlib.suppress(Exception):
+            await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text("❌ Discarded — nothing saved to receipts.")
+        return
+
+    if action == "save":
+        try:
+            stored = await _finalize_review(review_id, reviewer_chat_id, "approved")
+        except Exception:
+            logger.exception("Failed to approve pending review %s", review_id)
+            await query.message.reply_text("Failed to save — please retry.")
+            return
+        with contextlib.suppress(Exception):
+            await query.edit_message_reply_markup(reply_markup=None)
+        if stored is None:
+            await query.message.reply_text("Already handled.")
+        else:
+            await query.message.reply_text(
+                f"✅ Saved receipt #{stored.get('id')} as-is."
+            )
+
+
+async def review_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if query is None:
+        return ConversationHandler.END
+    await query.answer()
+    reviewer_chat_id = query.from_user.id if query.from_user else None
+    if not is_reviewer(reviewer_chat_id):
+        logger.info("Ignoring edit callback from non-reviewer chat_id=%s", reviewer_chat_id)
+        return ConversationHandler.END
+    try:
+        _, raw_id, _action = (query.data or "").split(":", 2)
+        review_id = int(raw_id)
+    except (ValueError, AttributeError):
+        return ConversationHandler.END
+    pending = await asyncio.to_thread(fetch_pending_review, review_id)
+    if not pending or pending.get("status") != "pending":
+        await query.message.reply_text("This item was already handled.")
+        return ConversationHandler.END
+    context.user_data["review_id"] = review_id
+    context.user_data["review_edits"] = {}
+    with contextlib.suppress(Exception):
+        await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text(
+        f"Editing. Current total: RM{pending.get('parsed_total')}.\n"
+        "Send the corrected total, or 'skip' to keep it."
+    )
+    return REVIEW_EDIT_TOTAL
+
+
+async def review_edit_total(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = (update.effective_message.text or "").strip()
+    if text.lower() != "skip":
+        value = normalize_total(text)
+        if value is None:
+            await update.effective_message.reply_text(
+                "Couldn't read that as a number. Send a total like 42.00, or 'skip'."
+            )
+            return REVIEW_EDIT_TOTAL
+        context.user_data["review_edits"]["total"] = value
+    await update.effective_message.reply_text(
+        "Corrected merchant? Send the name, or 'skip'."
+    )
+    return REVIEW_EDIT_MERCHANT
+
+
+async def review_edit_merchant(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = (update.effective_message.text or "").strip()
+    if text.lower() != "skip":
+        context.user_data["review_edits"]["merchant"] = text
+    await update.effective_message.reply_text(
+        "Corrected date (YYYY-MM-DD)? Send it, or 'skip'."
+    )
+    return REVIEW_EDIT_DATE
+
+
+async def review_edit_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = (update.effective_message.text or "").strip()
+    if text.lower() != "skip":
+        iso = normalize_date(text)
+        if iso is None:
+            await update.effective_message.reply_text(
+                "Couldn't read that date. Send YYYY-MM-DD, or 'skip'."
+            )
+            return REVIEW_EDIT_DATE
+        context.user_data["review_edits"]["receipt_date"] = iso
+
+    review_id = context.user_data.get("review_id")
+    edits = context.user_data.get("review_edits", {})
+    reviewer_chat_id = update.effective_user.id if update.effective_user else None
+    try:
+        stored = await _finalize_review(review_id, reviewer_chat_id, "edited", edits)
+    except Exception:
+        logger.exception("Failed to save edited review %s", review_id)
+        await update.effective_message.reply_text("Failed to save edits — please retry.")
+        return ConversationHandler.END
+    finally:
+        context.user_data.pop("review_id", None)
+        context.user_data.pop("review_edits", None)
+    if stored is None:
+        await update.effective_message.reply_text("This item was already handled.")
+    else:
+        await update.effective_message.reply_text(
+            f"✏️ Saved receipt #{stored.get('id')} with your edits."
+        )
+    return ConversationHandler.END
+
+
+async def review_edit_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.pop("review_id", None)
+    context.user_data.pop("review_edits", None)
+    await update.effective_message.reply_text("Edit cancelled — item left pending.")
+    return ConversationHandler.END
+
+
+def build_review_edit_conversation() -> ConversationHandler:
+    return ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(review_edit_start, pattern=r"^review:\d+:edit$")
+        ],
+        states={
+            REVIEW_EDIT_TOTAL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, review_edit_total)
+            ],
+            REVIEW_EDIT_MERCHANT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, review_edit_merchant)
+            ],
+            REVIEW_EDIT_DATE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, review_edit_date)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", review_edit_cancel)],
+    )
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message or not message.photo:
@@ -981,6 +1313,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "receipt_type": classification.receipt_type.value,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+
+    # PR #29b: low-confidence receipts do NOT auto-save. Route them to the
+    # manual-review queue and DM an authorised reviewer instead, so bad OCR
+    # never reaches `receipts`/`item_prices` and poisons price intelligence.
+    # We gate on the stored confidence — the second-pass verifier score.
+    if should_queue(verification["confidence"]):
+        await route_to_review(message, context, parsed, verification)
+        return
 
     try:
         stored = await asyncio.to_thread(store_receipt, record)
@@ -1840,6 +2180,13 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("advances", advances_command))
     app.add_handler(CommandHandler("dashboard", dashboard))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    # PR #29b manual review: the edit conversation must be registered before
+    # the audit-reply handler so a reviewer's in-flow text replies are routed
+    # to the conversation, not mistaken for an audit reply.
+    app.add_handler(build_review_edit_conversation())
+    app.add_handler(
+        CallbackQueryHandler(handle_review_action, pattern=r"^review:\d+:(save|discard)$")
+    )
     app.add_handler(
         MessageHandler(filters.TEXT & filters.REPLY & ~filters.COMMAND, handle_audit_reply)
     )
