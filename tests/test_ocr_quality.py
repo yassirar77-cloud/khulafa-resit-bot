@@ -18,6 +18,7 @@ from ocr_quality import (  # noqa: E402
     is_date_in_window,
     line_items_incomplete,
     normalize_amount_locale_aware,
+    total_conflicts_with_item_sum,
     validate_date,
 )
 
@@ -468,6 +469,161 @@ class IncompleteItemsIntegration(unittest.TestCase):
         )
         self.assertEqual(result["total"], 99.0)
         self.assertEqual(len(result["items"]), 2)
+        self.assertEqual(result["confidence"], 100)
+
+
+class ConservativeCorrectionTests(unittest.TestCase):
+    """Row 1613 regression: only correct CLEAN power-of-ten decimal flips,
+    and never let FOC / null-priced lines contribute to the item sum."""
+
+    # --- clean decimal flips still correct -------------------------------
+
+    def test_flip_100x_too_large(self):
+        # sum 18, total 1800 -> ratio 0.01 -> 18.00 (PVS SANTAN shape).
+        corrected, fixed = correct_total_with_items(
+            1800.0, [{"name": "santan", "price": 18.0}],
+        )
+        self.assertEqual(corrected, 18.0)
+        self.assertTrue(fixed)
+
+    def test_flip_100x_too_large_ice(self):
+        corrected, fixed = correct_total_with_items(
+            9000.0, [{"name": "ice", "price": 90.0}],
+        )
+        self.assertEqual(corrected, 90.0)
+        self.assertTrue(fixed)
+
+    def test_flip_10x(self):
+        # ratio 0.1 -> divide by 10.
+        corrected, fixed = correct_total_with_items(
+            420.0, [{"name": "x", "price": 42.0}],
+        )
+        self.assertEqual(corrected, 42.0)
+        self.assertTrue(fixed)
+
+    def test_flip_times_100_undershoot(self):
+        corrected, fixed = correct_total_with_items(
+            1.80, [{"name": "x", "price": 180.0}],
+        )
+        self.assertEqual(corrected, 180.0)
+        self.assertTrue(fixed)
+
+    # --- vague mismatches are NOT corrected ------------------------------
+
+    def test_row_1613_ratio_not_a_flip_left_alone(self):
+        # sum 42 vs total 40 -> ratio 1.05 -> NOT a clean flip -> keep 40.
+        corrected, fixed = correct_total_with_items(
+            40.0, [{"name": "Tube Ice", "price": 42.0}],
+        )
+        self.assertEqual(corrected, 40.0)
+        self.assertFalse(fixed)
+
+    def test_ratio_1_075_left_alone(self):
+        corrected, fixed = correct_total_with_items(
+            40.0,
+            [{"name": "Tube Ice", "price": 42.0}, {"name": "Soda", "price": 1.0}],
+        )
+        self.assertEqual(corrected, 40.0)
+        self.assertFalse(fixed)
+
+    # --- FOC / null exclusion --------------------------------------------
+
+    def test_foc_keyword_excluded_from_items_sum(self):
+        # Tube Ice 42 + "Block Ice Foc" RM1: the FOC line is ignored, so the
+        # sum is 42 and matches a real total of 42 (no phantom conflict).
+        items = [
+            {"name": "Tube Ice", "price": 42.0},
+            {"name": "Block Ice Foc", "price": 1.0},
+        ]
+        self.assertFalse(total_conflicts_with_item_sum(42.0, items))
+
+    def test_foc_spellings_excluded(self):
+        for name in ("FOC", "F.O.C", "free gift", "Air Percuma", "block ice foc=1"):
+            with self.subTest(name=name):
+                items = [
+                    {"name": "Tea", "price": 10.0},
+                    {"name": name, "price": 5.0},
+                ]
+                self.assertFalse(total_conflicts_with_item_sum(10.0, items))
+
+    def test_foc_line_does_not_trigger_correction(self):
+        # Without FOC exclusion, sum would be 43 vs total 40 (ratio 1.075) —
+        # still not a flip, but the exclusion keeps the sum honest at 42.
+        items = [
+            {"name": "Tube Ice", "price": 42.0},
+            {"name": "Block Ice FOC", "price": 1.0},
+        ]
+        corrected, fixed = correct_total_with_items(40.0, items)
+        self.assertEqual(corrected, 40.0)
+        self.assertFalse(fixed)
+
+    def test_non_foc_name_still_counts(self):
+        items = [{"name": "Tea", "price": 10.0}, {"name": "Coffee", "price": 5.0}]
+        self.assertTrue(total_conflicts_with_item_sum(10.0, items))
+
+    # --- conflict predicate edges ----------------------------------------
+
+    def test_no_conflict_when_equal(self):
+        self.assertFalse(
+            total_conflicts_with_item_sum(15.0, [{"name": "x", "price": 15.0}])
+        )
+
+    def test_conflict_when_unequal(self):
+        self.assertTrue(
+            total_conflicts_with_item_sum(40.0, [{"name": "x", "price": 42.0}])
+        )
+
+    def test_no_conflict_without_priced_items(self):
+        self.assertFalse(
+            total_conflicts_with_item_sum(15.0, [{"name": "x", "price": None}])
+        )
+        self.assertFalse(total_conflicts_with_item_sum(15.0, None))
+
+
+class ConservativeCorrectionIntegration(unittest.TestCase):
+    """End-to-end confidence wiring for the conservative-correction rules."""
+
+    def test_row_1613_total_40_with_foc_items_no_correction(self):
+        from ocr_glm import parse_markdown_receipt
+
+        result = parse_markdown_receipt(
+            "# EVEREST AISVARAM SDN BHD\n"
+            "1. Tube Ice RM 42.00\n"
+            "2. Block Ice Foc RM 1.00\n"
+            "3. Crush Ice RM 0.00\n"
+            "TOTAL RM 40.00\n"
+            "Date: 20/05/2026\n"
+        )
+        # OCR misread the TOTAL line (paper said 42); we keep what was read
+        # rather than guess, and dock confidence for review.
+        self.assertEqual(result["total"], 40.0)
+        self.assertEqual(len(result["items"]), 3)
+        self.assertEqual(result["confidence"], 90)  # 100 - 10 conflict
+
+    def test_pvs_santan_decimal_flip_still_works(self):
+        from ocr_glm import parse_markdown_receipt
+
+        result = parse_markdown_receipt(
+            "# PVS SANTAN SDN BHD\n"
+            "| Item | Qty | Amount |\n"
+            "|---|---|---|\n"
+            "| Santan | 1 | 18.00 |\n"
+            "GRAND TOTAL: RM 1,800.00\n"
+            "Tarikh: 22/05/2026\n"
+        )
+        self.assertEqual(result["total"], 18.0)
+        self.assertEqual(result["confidence"], 80)  # 100 - 20 decimal fix
+
+    def test_clean_total_no_penalty(self):
+        from ocr_glm import parse_markdown_receipt
+
+        result = parse_markdown_receipt(
+            "# BABAS MASALA\n"
+            "1. Curry powder RM 25.00\n"
+            "TOTAL RM 25.00\n"
+            "Date: 20/05/2026\n"
+        )
+        self.assertEqual(result["total"], 25.0)
         self.assertEqual(result["confidence"], 100)
 
 

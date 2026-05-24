@@ -34,11 +34,13 @@ logger = logging.getLogger(__name__)
 DATE_PAST_LIMIT_DAYS = 365
 DATE_FUTURE_LIMIT_DAYS = 7
 
-# Decimal-loss correction thresholds. Tuned so receipts where the total
-# happens to be close to sum(items) are left alone, but the 100x-off
-# pattern (extracted 18000, real 180) triggers reliably.
-DECIMAL_OFFSET_THRESHOLD = 0.5   # >50% mismatch needed before we consider correcting
-DECIMAL_MATCH_THRESHOLD = 0.10   # corrected value must land within 10% of sum_items
+# Decimal-loss correction is intentionally conservative: we only "fix" a
+# total when sum(items)/total is a CLEAN power-of-ten flip (a dropped or
+# spurious decimal point). A vague mismatch — e.g. sum 42 vs total 40,
+# ratio 1.05 — is NOT corrected; it usually means an OCR digit misread we
+# can't safely reconstruct, so we leave the total and flag for review.
+DECIMAL_FLIP_RATIOS = (0.01, 0.1, 10.0, 100.0)
+DECIMAL_FLIP_TOLERANCE = 0.02   # ratio must be within 2% of a flip target
 
 # Confidence penalties (consumed by ocr_glm.parse_markdown_receipt).
 CONF_PENALTY_DECIMAL_FIX = 20
@@ -47,6 +49,9 @@ CONF_PENALTY_SPLIT_COLUMN = 10
 # Docked when item parsing looks incomplete, so the total could not be
 # cross-validated against the line items (moderate, not low, confidence).
 CONF_PENALTY_INCOMPLETE_ITEMS = 15
+# Docked when sum(items) and the total disagree but the gap is NOT a clean
+# decimal flip (so we don't correct) — signals "something off, review".
+CONF_PENALTY_TOTAL_CONFLICT = 10
 
 
 # --- Locale-aware amount normalisation --------------------------------------
@@ -126,6 +131,16 @@ def normalize_amount_locale_aware(value: Any) -> float | None:
 
 # --- Total cross-validation against line items ------------------------------
 
+# Free-of-charge markers. A FOC line ("Block Ice Foc", "Air PERCUMA") must
+# contribute nothing to the item sum even when OCR assigns it a stray price
+# (row 1613: a "Foc=1" qty leaked in as RM1 and inflated the sum to 43).
+_FOC_NAME_RE = re.compile(r"(?i)\b(?:f\.?o\.?c\.?|free|percuma)\b")
+
+
+def _is_foc_item(item: dict) -> bool:
+    name = item.get("name")
+    return isinstance(name, str) and bool(_FOC_NAME_RE.search(name))
+
 
 def _sum_line_item_prices(items: list[dict] | None) -> float:
     if not items:
@@ -134,12 +149,23 @@ def _sum_line_item_prices(items: list[dict] | None) -> float:
     for item in items:
         if not isinstance(item, dict):
             continue
+        if _is_foc_item(item):
+            continue
         price = item.get("price")
         if isinstance(price, bool):
             continue
         if isinstance(price, (int, float)):
             total += float(price)
     return total
+
+
+def _clean_decimal_flip(ratio: float) -> float | None:
+    """Return the flip factor if ``ratio`` (= sum_items / total) is within
+    tolerance of a clean power-of-ten flip, else ``None``."""
+    for target in DECIMAL_FLIP_RATIOS:
+        if abs(ratio - target) <= DECIMAL_FLIP_TOLERANCE * target:
+            return target
+    return None
 
 
 # Numbered line-item rows, e.g. "1. Tube Ice ... 90.00". OCR occasionally
@@ -178,23 +204,26 @@ def correct_total_with_items(
 
     Returns ``(corrected_total, was_corrected)``.
 
-    The correction only fires when:
+    The correction is deliberately conservative — it fires ONLY when:
 
     * item parsing does not look incomplete (see ``line_items_incomplete``;
       requires ``raw_text`` to assess — without it the check is skipped),
-    * we have at least one line item with a numeric price,
-    * the extracted total is more than 50% off the sum, AND
-    * either ``total / 100`` or ``total * 100`` lands within 10% of the
-      sum.
+    * we have at least one line item with a usable price (FOC / free-of-
+      charge lines and null prices contribute nothing), AND
+    * ``sum_items / total`` is within 2% of a clean power-of-ten flip
+      (0.01, 0.1, 10, 100) — i.e. a dropped or spurious decimal point.
 
-    If both directions match, prefer the divide-by-100 fix (this is
-    the much more common OCR failure mode — a dropped decimal point).
+    A vague mismatch (e.g. sum 42 vs total 40, ratio 1.05) is left alone:
+    that is almost always an OCR digit misread we cannot reconstruct, and
+    overwriting the total with the item sum would just trade one wrong
+    number for another. ``parse_markdown_receipt`` docks confidence in that
+    case so a human reviews it.
     """
     if total is None or not isinstance(total, (int, float)) or isinstance(total, bool):
         return total, False
 
     sum_items = _sum_line_item_prices(items)
-    if sum_items <= 0:
+    if sum_items <= 0 or total <= 0:
         return total, False
 
     # Incomplete item parse -> sum_items is unreliable; trust the total.
@@ -207,31 +236,39 @@ def correct_total_with_items(
         )
         return total, False
 
-    rel_diff = abs(total - sum_items) / sum_items
-    if rel_diff <= DECIMAL_OFFSET_THRESHOLD:
+    ratio = sum_items / total
+    flip = _clean_decimal_flip(ratio)
+    if flip is None:
+        # Not a clean decimal flip — don't guess. (Confidence is docked by
+        # the caller via total_conflicts_with_item_sum.)
         return total, False
 
-    # Try dividing by 100 first (lost decimal point).
-    candidate_div = total / 100.0
-    if candidate_div > 0 and abs(candidate_div - sum_items) / sum_items <= DECIMAL_MATCH_THRESHOLD:
-        logger.warning(
-            "ocr_quality.correct_total_with_items: total=%.2f is ~100x too large "
-            "vs sum_items=%.2f; corrected to %.2f",
-            total, sum_items, candidate_div,
-        )
-        return candidate_div, True
+    corrected = round(total * flip, 2)
+    logger.warning(
+        "ocr_quality.correct_total_with_items: total=%.2f vs sum_items=%.2f is a "
+        "clean %gx decimal flip; corrected to %.2f",
+        total, sum_items, flip, corrected,
+    )
+    return corrected, True
 
-    # Try multiplying by 100 (spurious decimal inserted).
-    candidate_mul = total * 100.0
-    if candidate_mul > 0 and abs(candidate_mul - sum_items) / sum_items <= DECIMAL_MATCH_THRESHOLD:
-        logger.warning(
-            "ocr_quality.correct_total_with_items: total=%.2f is ~100x too small "
-            "vs sum_items=%.2f; corrected to %.2f",
-            total, sum_items, candidate_mul,
-        )
-        return candidate_mul, True
 
-    return total, False
+def total_conflicts_with_item_sum(
+    total: float | None, items: list[dict] | None
+) -> bool:
+    """True when there is a usable item sum that materially disagrees with
+    ``total`` (more than one cent apart).
+
+    Callers use this to dock confidence when the totals don't reconcile but
+    ``correct_total_with_items`` declined to "fix" it (no clean decimal
+    flip). FOC and null-priced lines are excluded from the sum, matching the
+    correction logic.
+    """
+    if total is None or isinstance(total, bool) or not isinstance(total, (int, float)):
+        return False
+    sum_items = _sum_line_item_prices(items)
+    if sum_items <= 0:
+        return False
+    return abs(sum_items - total) > 0.01
 
 
 # --- Date sanity ------------------------------------------------------------
