@@ -16,6 +16,7 @@ Run locally against production:
 Optional: set TELEGRAM_BOT_TOKEN and YASSIR_CHAT_ID to also DM the report.
 """
 
+import argparse
 import logging
 import os
 import sys
@@ -95,8 +96,10 @@ def notify_owner(text: str) -> None:
         logger.warning("Could not DM reparse report to owner", exc_info=True)
 
 
-def run(client) -> dict:
+def run(client, dry_run: bool = False, limit=None) -> dict:
     candidates = fetch_candidates(client)
+    if limit is not None:
+        candidates = candidates[:limit]
     applied_ids = _audit_receipt_ids(client, applied=True)
     pending_ids = _audit_receipt_ids(client, applied=False)
 
@@ -120,13 +123,14 @@ def run(client) -> dict:
         if not proposal["has_change"]:
             stats["no_change"] += 1
             continue
-        try:
-            insert_audit_row(client, proposal)
-        except Exception:
-            # Most likely the partial unique index rejecting a concurrent dup.
-            logger.warning("Skipping audit insert for receipt %s", receipt_id, exc_info=True)
-            stats["already"] += 1
-            continue
+        if not dry_run:
+            try:
+                insert_audit_row(client, proposal)
+            except Exception:
+                # Most likely the partial unique index rejecting a concurrent dup.
+                logger.warning("Skipping audit insert for receipt %s", receipt_id, exc_info=True)
+                stats["already"] += 1
+                continue
         pending_ids.add(receipt_id)
         stats["created"] += 1
         created_rows.append(proposal)
@@ -139,20 +143,37 @@ def run(client) -> dict:
         elif date_c:
             stats["date_only"] += 1
 
+    top_n = 20 if dry_run else 5
     top_rows = sorted(
         created_rows,
         key=lambda r: abs((r.get("old_total") or 0) - (r.get("new_total") or 0)),
         reverse=True,
-    )[:5]
-    report = format_report(stats, top_rows)
+    )[:top_n]
+    report = format_report(stats, top_rows, dry_run=dry_run)
     print(report)
-    notify_owner(report)
+    # Dry runs stay local: no audit writes, no owner DM.
+    if not dry_run:
+        notify_owner(report)
     return stats
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="PR #29c historical OCR re-parse. Default: process all "
+        "candidates and queue audit rows (never edits receipts).",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="evaluate and print the full report (top 20 deltas) without "
+        "inserting any audit rows",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=None, metavar="N",
+        help="process only the first N candidates from the query",
+    )
+    args = parser.parse_args()
     client = _build_client()
-    run(client)
+    run(client, dry_run=args.dry_run, limit=args.limit)
 
 
 if __name__ == "__main__":
