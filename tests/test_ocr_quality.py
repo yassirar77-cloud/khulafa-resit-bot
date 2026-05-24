@@ -16,6 +16,7 @@ from ocr_quality import (  # noqa: E402
     correct_total_with_items,
     has_rm_sen_split_column,
     is_date_in_window,
+    line_items_incomplete,
     normalize_amount_locale_aware,
     validate_date,
 )
@@ -339,6 +340,134 @@ class ParseMarkdownReceiptIntegration(unittest.TestCase):
         result = parse_markdown_receipt(md)
         self.assertEqual(result["total"], 25.0)
         self.assertEqual(result["receipt_date"], "2026-05-20")
+        self.assertEqual(result["confidence"], 100)
+
+
+class IncompleteItemsGuardTests(unittest.TestCase):
+    """Row 1588 regression: when OCR drops a line item, sum(items) is
+    understated and must NOT be used to 'correct' an already-correct total."""
+
+    ROW_1588_RAW = (
+        "# EVEREST AISVARAM SDN BHD\n"
+        "1. Tube Ice RM 90.00\n"
+        "2. Crush Ice RM 9.00\n"
+        "TOTAL RM 99.00\n"
+    )
+
+    def test_detects_missing_row(self):
+        # 2 numbered rows in raw, only 1 parsed -> incomplete.
+        self.assertTrue(
+            line_items_incomplete(
+                self.ROW_1588_RAW, [{"name": "Tube Ice", "price": 90.0}]
+            )
+        )
+
+    def test_complete_when_counts_match(self):
+        self.assertFalse(
+            line_items_incomplete(
+                self.ROW_1588_RAW,
+                [
+                    {"name": "Tube Ice", "price": 90.0},
+                    {"name": "Crush Ice", "price": 9.0},
+                ],
+            )
+        )
+
+    def test_no_numbered_rows_never_incomplete(self):
+        # RM/Sen table format has no "1." rows -> gate inert (BESTARI shape).
+        md = "# BESTARI FARM\n| Item | RM | Sen |\n|---|---|---|\n| Eggs | 2000 | 00 |\n"
+        self.assertFalse(
+            line_items_incomplete(md, [{"name": "Eggs", "price": 2000.0}])
+        )
+
+    def test_empty_raw_text_never_incomplete(self):
+        self.assertFalse(line_items_incomplete("", [{"price": 1.0}]))
+        self.assertFalse(line_items_incomplete(None, [{"price": 1.0}]))
+
+    def test_row_1588_total_not_corrected(self):
+        # The literal reported numbers: total 99 vs parsed-only 90 stays 99.
+        corrected, was_fixed = correct_total_with_items(
+            99.0,
+            [{"name": "Tube Ice", "price": 90.0}],
+            raw_text=self.ROW_1588_RAW,
+        )
+        self.assertEqual(corrected, 99.0)
+        self.assertFalse(was_fixed)
+
+    def test_guard_blocks_wrong_large_correction(self):
+        # The failure mode that actually corrupts data: a real total in the
+        # thousands with only one item parsed. Without the guard this would
+        # "correct" 9000 -> 90; the guard suppresses it.
+        raw = (
+            "1. Tube Ice RM 90.00\n"
+            "2. Crush Ice RM 8910.00\n"
+            "TOTAL RM 9000.00\n"
+        )
+        guarded, fixed = correct_total_with_items(
+            9000.0, [{"name": "Tube Ice", "price": 90.0}], raw_text=raw,
+        )
+        self.assertEqual(guarded, 9000.0)
+        self.assertFalse(fixed)
+
+    def test_without_raw_text_old_behaviour_preserved(self):
+        # Same incomplete inputs, but no raw_text to assess completeness:
+        # the function can't tell, so the legacy correction still fires.
+        # This documents WHY raw_text must be threaded through from the caller.
+        legacy, fixed = correct_total_with_items(
+            9000.0, [{"name": "Tube Ice", "price": 90.0}],
+        )
+        self.assertEqual(legacy, 90.0)
+        self.assertTrue(fixed)
+
+    def test_bestari_rm_sen_complete_unaffected(self):
+        # Row 1586: complete items, RM/Sen table, correct total 2170.76.
+        # Guard is inert (no numbered rows); total left untouched.
+        md = (
+            "# BESTARI FARM\n| Item | RM | Sen |\n|---|---|---|\n"
+            "| Eggs | 2000 | 00 |\n| Flour | 170 | 76 |\n"
+            "GRAND TOTAL: RM 2,170.76\n"
+        )
+        items = [
+            {"name": "Eggs", "price": 2000.0},
+            {"name": "Flour", "price": 170.76},
+        ]
+        self.assertFalse(line_items_incomplete(md, items))
+        corrected, was_fixed = correct_total_with_items(2170.76, items, raw_text=md)
+        self.assertEqual(corrected, 2170.76)
+        self.assertFalse(was_fixed)
+
+
+class IncompleteItemsIntegration(unittest.TestCase):
+    """End-to-end through parse_markdown_receipt: incomplete parse keeps the
+    total and docks confidence by the incomplete-items penalty (15)."""
+
+    def test_row_1588_total_preserved_confidence_docked(self):
+        from ocr_glm import parse_markdown_receipt
+
+        result = parse_markdown_receipt(
+            "# EVEREST AISVARAM SDN BHD\n"
+            "1. Tube Ice RM 90.00\n"
+            "2. Crush Ice\n"  # no price -> parser drops it, raw still shows row 2
+            "TOTAL RM 99.00\n"
+            "Date: 20/05/2026\n"
+        )
+        self.assertEqual(result["total"], 99.0)
+        self.assertEqual(len(result["items"]), 1)
+        # 30 merchant + 30 total + 20 date + 20 items = 100, minus 15 incomplete.
+        self.assertEqual(result["confidence"], 85)
+
+    def test_complete_parse_no_incomplete_penalty(self):
+        from ocr_glm import parse_markdown_receipt
+
+        result = parse_markdown_receipt(
+            "# EVEREST AISVARAM SDN BHD\n"
+            "1. Tube Ice RM 90.00\n"
+            "2. Crush Ice RM 9.00\n"
+            "TOTAL RM 99.00\n"
+            "Date: 20/05/2026\n"
+        )
+        self.assertEqual(result["total"], 99.0)
+        self.assertEqual(len(result["items"]), 2)
         self.assertEqual(result["confidence"], 100)
 
 

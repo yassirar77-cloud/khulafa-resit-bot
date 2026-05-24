@@ -44,6 +44,9 @@ DECIMAL_MATCH_THRESHOLD = 0.10   # corrected value must land within 10% of sum_i
 CONF_PENALTY_DECIMAL_FIX = 20
 CONF_PENALTY_DATE_OUT_OF_WINDOW = 15
 CONF_PENALTY_SPLIT_COLUMN = 10
+# Docked when item parsing looks incomplete, so the total could not be
+# cross-validated against the line items (moderate, not low, confidence).
+CONF_PENALTY_INCOMPLETE_ITEMS = 15
 
 
 # --- Locale-aware amount normalisation --------------------------------------
@@ -139,9 +142,37 @@ def _sum_line_item_prices(items: list[dict] | None) -> float:
     return total
 
 
+# Numbered line-item rows, e.g. "1. Tube Ice ... 90.00". OCR occasionally
+# drops one (the row-1588 Crush Ice case), leaving sum(items) understated.
+_NUMBERED_LINE_RE = re.compile(r"^\d+\.\s", re.MULTILINE)
+
+
+def line_items_incomplete(
+    raw_text: str | None, items: list[dict] | None
+) -> bool:
+    """True when the raw markdown shows more numbered item rows than were
+    parsed into ``items``.
+
+    When this fires, ``sum(item.price)`` understates the real receipt and
+    must NOT be used to "correct" the total — doing so would overwrite a
+    correct total with the sum of a partial item list (row 1588: parsed
+    only "Tube Ice RM90" of a "Tube Ice RM90 + Crush Ice RM9 = RM99"
+    receipt). Receipts with no numbered rows (e.g. RM/Sen table format)
+    return ``False`` — there is nothing to count against.
+    """
+    if not isinstance(raw_text, str) or not raw_text:
+        return False
+    numbered = len(_NUMBERED_LINE_RE.findall(raw_text))
+    if numbered == 0:
+        return False
+    parsed = len(items) if items else 0
+    return parsed < numbered
+
+
 def correct_total_with_items(
     total: float | None,
     items: list[dict] | None,
+    raw_text: str | None = None,
 ) -> tuple[float | None, bool]:
     """Cross-validate ``total`` against the sum of line item prices.
 
@@ -149,6 +180,8 @@ def correct_total_with_items(
 
     The correction only fires when:
 
+    * item parsing does not look incomplete (see ``line_items_incomplete``;
+      requires ``raw_text`` to assess — without it the check is skipped),
     * we have at least one line item with a numeric price,
     * the extracted total is more than 50% off the sum, AND
     * either ``total / 100`` or ``total * 100`` lands within 10% of the
@@ -162,6 +195,16 @@ def correct_total_with_items(
 
     sum_items = _sum_line_item_prices(items)
     if sum_items <= 0:
+        return total, False
+
+    # Incomplete item parse -> sum_items is unreliable; trust the total.
+    if line_items_incomplete(raw_text, items):
+        logger.warning(
+            "ocr_quality.correct_total_with_items: skipping correction — parsed "
+            "%d item(s) but raw_text shows more numbered rows; sum_items=%.2f "
+            "is unreliable, keeping total=%.2f",
+            len(items) if items else 0, sum_items, total,
+        )
         return total, False
 
     rel_diff = abs(total - sum_items) / sum_items
