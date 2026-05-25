@@ -24,7 +24,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from digest import build_digest_messages  # noqa: E402
+from digest import build_digest_messages, parse_mode_attempts  # noqa: E402
 from digest_data import MALAYSIA_TZ, gather_digest_data, log_digest  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -50,16 +50,18 @@ def _recipients() -> list:
     return ids
 
 
-def _telegram_send(recipient, text) -> None:
-    """Send one Markdown message. Raises on a non-200 Telegram response so the
-    caller records failed/partial."""
+def _telegram_send(recipient, text, parse_mode) -> None:
+    """Send one message with the given parse_mode (None = plain text). Raises on
+    a non-200 Telegram response so the caller can fall back / record failure."""
     token = os.environ["TELEGRAM_BOT_TOKEN"]
-    data = urllib.parse.urlencode({
+    fields = {
         "chat_id": recipient,
         "text": text,
-        "parse_mode": "Markdown",
         "disable_web_page_preview": "true",
-    }).encode()
+    }
+    if parse_mode:
+        fields["parse_mode"] = parse_mode
+    data = urllib.parse.urlencode(fields).encode()
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     with urllib.request.urlopen(url, data=data, timeout=20) as resp:  # noqa: S310
         body = json.loads(resp.read().decode())
@@ -67,25 +69,44 @@ def _telegram_send(recipient, text) -> None:
         raise RuntimeError(f"Telegram error: {body.get('description')}")
 
 
-def run(client, *, recipients, now_my, send_fn, data=None) -> dict:
+def _deliver_message(send_fn, recipient, message, plain):
+    """Try each parse_mode in turn (Markdown then plain, unless forced plain).
+    Returns (delivered, used_fallback, error)."""
+    last_error = None
+    attempts = parse_mode_attempts(plain)
+    for i, parse_mode in enumerate(attempts):
+        try:
+            send_fn(recipient, message, parse_mode)
+            return True, (i > 0), None
+        except Exception as exc:  # noqa: BLE001 - recorded, not swallowed
+            last_error = str(exc)
+            logger.warning(
+                "digest send to %s (parse_mode=%s) failed: %s", recipient, parse_mode, last_error
+            )
+    return False, False, last_error
+
+
+def run(client, *, recipients, now_my, send_fn, data=None, plain=False) -> dict:
     """Build + deliver the digest to each recipient, logging each outcome.
-    Returns ``{recipient: status}``. ``send_fn(recipient, text)`` must raise on
-    failure."""
+    Returns ``{recipient: status}``. ``send_fn(recipient, text, parse_mode)``
+    must raise on failure; delivery falls back to plain text on a Markdown
+    parse error so it always gets through."""
     if data is None:
         data = gather_digest_data(client, now_my)
     messages = build_digest_messages(data, now_my)
     full_text = "\n\n".join(messages)
+    message_bytes = len(full_text.encode("utf-8"))
 
     summary = {}
     for recipient in recipients:
-        sent, error = 0, None
+        sent, error, used_fallback = 0, None, False
         for message in messages:
-            try:
-                send_fn(recipient, message)
+            delivered, fb, err = _deliver_message(send_fn, recipient, message, plain)
+            if delivered:
                 sent += 1
-            except Exception as exc:  # noqa: BLE001 - recorded, not swallowed
-                error = str(exc)
-                logger.warning("digest send to %s failed: %s", recipient, error)
+                used_fallback = used_fallback or fb
+            else:
+                error = err
                 break
         if sent == len(messages):
             status = "success"
@@ -93,19 +114,29 @@ def run(client, *, recipients, now_my, send_fn, data=None) -> dict:
             status = "failed"
         else:
             status = "partial"
-        log_digest(client, recipient, full_text, status, error)
+        if status == "success" and used_fallback:
+            error = "delivered as plain text (markdown parse fallback)"
+        log_digest(client, recipient, full_text, status, error, message_bytes=message_bytes)
         summary[recipient] = status
     return summary
 
 
 def main() -> None:
+    import argparse
+    parser = argparse.ArgumentParser(description="PR #34 nightly Khulafa digest.")
+    parser.add_argument(
+        "--plain", action="store_true",
+        help="send as plain text (no Markdown) — use if formatting keeps breaking",
+    )
+    args = parser.parse_args()
+
     recipients = _recipients()
     if not recipients:
         logger.error("No digest recipients (set DIGEST_RECIPIENTS or YASSIR_CHAT_ID). Aborting.")
         return
     client = _build_client()
     now_my = datetime.now(MALAYSIA_TZ)
-    summary = run(client, recipients=recipients, now_my=now_my, send_fn=_telegram_send)
+    summary = run(client, recipients=recipients, now_my=now_my, send_fn=_telegram_send, plain=args.plain)
     logger.info("Digest delivery: %s", summary)
 
 
