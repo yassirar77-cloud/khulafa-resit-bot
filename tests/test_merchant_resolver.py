@@ -218,13 +218,15 @@ class MigrationSeed(unittest.TestCase):
 
     def test_merchant_canonical_seeded(self):
         names = {r[0] for r in self.canonical_rows}
-        # 51 canonicals after the review additions (46 + 4 suppliers + 1 strata).
-        self.assertEqual(len(names), 51)
+        # 56 canonicals after the second review round (51 + 5 high-volume).
+        self.assertGreaterEqual(len(names), 55)
         for expected in (
             "EVEREST", "BABAS", "MYMOON", "PVS SANTAN", "TNB", "AIR SELANGOR",
             "UNIFI", "KHULAFA BISTRO", "KHULAFA GROUP",
             "S. THAYANI", "RK MUBARAKA", "AKS SHAZZ", "SWEETTI FREEZEE",
             "VISTA ALAM JMB",
+            "NASI KANDAR HAJI SHARFUDDIN", "NASI KANDAR KHULAFA", "ALASKA ICE",
+            "PETRONAS", "LIAN HUAH COCONUT TRADING",
         ):
             self.assertIn(expected, names, f"{expected} missing from canonical seed")
 

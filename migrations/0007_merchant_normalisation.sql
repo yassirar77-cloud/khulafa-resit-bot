@@ -106,7 +106,12 @@ INSERT INTO public.merchant_canonical (display_name, legal_name, category, notes
   ('RK MUBARAKA', 'RK MUBARAKA SDN BHD', 'supplier', 'TBD'),
   ('AKS SHAZZ', 'AKS SHAZZ ENTERPRISE / GEDA TRADING', 'supplier', 'sos and chemicals'),
   ('SWEETTI FREEZEE', 'SWEETTI FREEZEE ENTERPRISE', 'supplier', 'fresh fruits supplier'),
-  ('VISTA ALAM JMB', 'BADAN PENGURUSAN BERSAMA VISTA ALAM', 'rent_license', 'Strata management fee for Vista Alam outlet')
+  ('VISTA ALAM JMB', 'BADAN PENGURUSAN BERSAMA VISTA ALAM', 'rent_license', 'Strata management fee for Vista Alam outlet'),
+  ('NASI KANDAR HAJI SHARFUDDIN', 'RESTORAN NASI KANDAR HJ SHARFUDDIN', 'internal_transfer', 'Klang variant — verify with Ariffin'),
+  ('NASI KANDAR KHULAFA', 'NASI KANDAR KHULAFA', 'internal_transfer', 'Generic Khulafa outlet variant'),
+  ('ALASKA ICE', 'ALASKA ICE SDN BHD', 'supplier', 'Ice supplier — alternative to EVEREST'),
+  ('PETRONAS', 'PETRONAS DAGANGAN BERHAD', 'utility', 'Fuel for vehicles/generators'),
+  ('LIAN HUAH COCONUT TRADING', 'LIAN HUAH COCONUT TRADING', 'supplier', 'Coconut supplier alternative to PVS SANTAN/SUN MAJU')
 ON CONFLICT (display_name) DO NOTHING;
 
 -- ============================================================================
@@ -142,7 +147,16 @@ INSERT INTO public.merchant_alias (alias_text, canonical_id, created_via)
     ('KHULAFA BISTRO', 'RESTORAN KHULAFA SDN. BHD.'),
     ('KHULAFA BISTRO', 'KHULAFA NASI KANDAR BISTRO'),
     ('AKS SHAZZ', 'GEDA TRADING'),
-    ('VISTA ALAM JMB', 'BADAN PENGURUSAN BERSAMA-VISTA ALAM')
+    ('VISTA ALAM JMB', 'BADAN PENGURUSAN BERSAMA-VISTA ALAM'),
+    ('NASI KANDAR HAJI SHARFUDDIN', 'HJ SHARFUDDIN'),
+    ('NASI KANDAR HAJI SHARFUDDIN', 'NASI KANDAR SHARFUDDIN'),
+    ('NASI KANDAR HAJI SHARFUDDIN', 'RESTORAN HJ SHARFUDDIN'),
+    ('NASI KANDAR KHULAFA', 'NASI KANDAR KHULAFA DU'),
+    ('NASI KANDAR KHULAFA', 'NASI KANDAR KHULAFA SEK 6'),
+    ('NASI KANDAR KHULAFA', 'NASI KANDAR KHULAFA VISTA'),
+    ('ALASKA ICE', 'ALASKA ICE SDN. BHD.'),
+    ('PETRONAS', 'PETRONAS DAGANGAN'),
+    ('LIAN HUAH COCONUT TRADING', 'LIAN HUAH COCONUT')
   ) AS v(display_name, alias_text)
   JOIN public.merchant_canonical c ON c.display_name = v.display_name
 ON CONFLICT (alias_text) DO NOTHING;
