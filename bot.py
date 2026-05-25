@@ -52,6 +52,13 @@ from reparse import (
     format_status,
     summarize_audit_rows,
 )
+from merchant_resolver import (
+    CANONICAL_TABLE,
+    ALIAS_TABLE,
+    format_merchant_list,
+    format_merchant_show,
+    format_pending_aliases,
+)
 from receipt_classifier import ReceiptType, classify_receipt
 
 logging.basicConfig(
@@ -2335,6 +2342,173 @@ async def reparse_apply_all_callback(update: Update, context: ContextTypes.DEFAU
     await query.message.reply_text(f"✅ Applied ALL {applied} pending correction(s).")
 
 
+# === PR #30: merchant canonical review commands (owner-only) =================
+
+def _fetch_canonicals() -> list:
+    result = (
+        supabase.table(CANONICAL_TABLE)
+        .select("id, display_name, legal_name, category, notes")
+        .execute()
+    )
+    return result.data or []
+
+
+def _fetch_canonical(canonical_id) -> dict | None:
+    result = (
+        supabase.table(CANONICAL_TABLE).select("*").eq("id", canonical_id).limit(1).execute()
+    )
+    rows = result.data or []
+    return rows[0] if rows else None
+
+
+def _fetch_aliases(canonical_id=None) -> list:
+    query = supabase.table(ALIAS_TABLE).select(
+        "id, alias_text, canonical_id, match_confidence, created_via"
+    )
+    if canonical_id is not None:
+        query = query.eq("canonical_id", canonical_id)
+    return query.execute().data or []
+
+
+def _fetch_pending_aliases() -> list:
+    return (
+        supabase.table(ALIAS_TABLE)
+        .select("id, alias_text, canonical_id, match_confidence, created_via")
+        .eq("created_via", "fuzzy_auto")
+        .order("id", desc=False)
+        .execute()
+        .data
+        or []
+    )
+
+
+def _alias_counts() -> dict:
+    counts: dict = {}
+    for a in _fetch_aliases():
+        cid = a.get("canonical_id")
+        counts[cid] = counts.get(cid, 0) + 1
+    return counts
+
+
+async def merchant_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    try:
+        canonicals = await asyncio.to_thread(_fetch_canonicals)
+        counts = await asyncio.to_thread(_alias_counts)
+    except Exception:
+        logger.exception("merchant_list failed")
+        await message.reply_text("Failed to read merchants.")
+        return
+    await message.reply_text(format_merchant_list(canonicals, counts))
+
+
+async def merchant_show_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    args = context.args or []
+    if not args or not args[0].isdigit():
+        await message.reply_text("Usage: /merchant_show <canonical_id>")
+        return
+    cid = int(args[0])
+    try:
+        canonical = await asyncio.to_thread(_fetch_canonical, cid)
+        aliases = await asyncio.to_thread(_fetch_aliases, cid)
+    except Exception:
+        logger.exception("merchant_show failed")
+        await message.reply_text("Failed to read merchant.")
+        return
+    await message.reply_text(format_merchant_show(canonical, aliases))
+
+
+async def merchant_aliases_pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    try:
+        aliases = await asyncio.to_thread(_fetch_pending_aliases)
+    except Exception:
+        logger.exception("merchant_aliases_pending failed")
+        await message.reply_text("Failed to read pending aliases.")
+        return
+    await message.reply_text(format_pending_aliases(aliases))
+
+
+async def merchant_confirm_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    args = context.args or []
+    if not args or not args[0].isdigit():
+        await message.reply_text("Usage: /merchant_confirm <alias_id>")
+        return
+    alias_id = int(args[0])
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table(ALIAS_TABLE)
+            .update({"created_via": "fuzzy_confirmed"})
+            .eq("id", alias_id)
+            .execute()
+        )
+    except Exception:
+        logger.exception("merchant_confirm failed")
+        await message.reply_text("Failed to confirm alias.")
+        return
+    await message.reply_text(f"✅ Alias #{alias_id} confirmed.")
+
+
+async def merchant_reject_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    args = context.args or []
+    if not args or not args[0].isdigit():
+        await message.reply_text("Usage: /merchant_reject <alias_id>")
+        return
+    alias_id = int(args[0])
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table(ALIAS_TABLE).delete().eq("id", alias_id).execute()
+        )
+    except Exception:
+        logger.exception("merchant_reject failed")
+        await message.reply_text("Failed to reject alias.")
+        return
+    await message.reply_text(f"❌ Alias #{alias_id} deleted.")
+
+
+async def merchant_add_alias_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    args = context.args or []
+    if len(args) < 2 or not args[0].isdigit():
+        await message.reply_text("Usage: /merchant_add_alias <canonical_id> <alias_text>")
+        return
+    canonical_id = int(args[0])
+    alias_text = " ".join(args[1:]).strip()
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table(ALIAS_TABLE)
+            .insert({
+                "alias_text": alias_text,
+                "canonical_id": canonical_id,
+                "match_confidence": 100,
+                "created_via": "manual",
+            })
+            .execute()
+        )
+    except Exception:
+        logger.exception("merchant_add_alias failed")
+        await message.reply_text(
+            "Failed to add alias (it may already exist — aliases are unique)."
+        )
+        return
+    await message.reply_text(f"✅ Added alias {alias_text!r} -> canonical #{canonical_id}.")
+
+
 async def run_bot() -> None:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -2347,6 +2521,12 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("reparse_preview", reparse_preview_command))
     app.add_handler(CommandHandler("reparse_apply", reparse_apply_command))
     app.add_handler(CommandHandler("reparse_apply_all", reparse_apply_all_command))
+    app.add_handler(CommandHandler("merchant_list", merchant_list_command))
+    app.add_handler(CommandHandler("merchant_show", merchant_show_command))
+    app.add_handler(CommandHandler("merchant_aliases_pending", merchant_aliases_pending_command))
+    app.add_handler(CommandHandler("merchant_confirm", merchant_confirm_command))
+    app.add_handler(CommandHandler("merchant_reject", merchant_reject_command))
+    app.add_handler(CommandHandler("merchant_add_alias", merchant_add_alias_command))
     app.add_handler(
         CallbackQueryHandler(reparse_apply_all_callback, pattern=r"^reparse_applyall:(yes|no)$")
     )
