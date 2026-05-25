@@ -43,6 +43,8 @@ from ocr_quality import total_conflicts_with_item_sum
 from pending_review import (
     apply_edits_to_parsed,
     build_review_reason,
+    is_duplicate_review,
+    resolve_confidence,
     serialize_parsed_for_review,
     should_queue,
 )
@@ -985,35 +987,49 @@ async def run_verification(image_bytes: bytes, parsed: dict) -> tuple[dict, str]
     corrections = result["corrections"]
     notes = "; ".join(str(e) for e in errors) if errors else None
 
+    def _final(status):
+        # Resolved AFTER any corrections so the math-agreement check sees the
+        # data we actually store. Math agreement -> 100; WRONG -> 80; etc.
+        return resolve_confidence(
+            status, confidence, parsed.get("items"), _to_float(parsed.get("total"))
+        )
+
     if verdict == "CONFIRMED":
         _bump_verdict("CONFIRMED")
+        final = _final("CONFIRMED")
         return (
-            {"status": "CONFIRMED", "notes": notes, "confidence": confidence},
-            f"✅ Verified ({confidence}%)",
+            {"status": "CONFIRMED", "notes": notes, "confidence": final},
+            f"✅ Verified ({final}%)",
         )
 
     if verdict == "PARTIAL":
         changes = _apply_corrections(parsed, corrections)
         _bump_verdict("PARTIAL")
+        final = _final("PARTIAL")
         change_text = ", ".join(changes) if changes else (notes or "minor issues")
         return (
-            {"status": "PARTIAL", "notes": notes, "confidence": confidence},
-            f"⚠️ Verified with corrections ({confidence}%): {change_text}",
+            {"status": "PARTIAL", "notes": notes, "confidence": final},
+            f"⚠️ Verified with corrections ({final}%): {change_text}",
         )
 
     # verdict == "WRONG"
     _bump_verdict("WRONG")
-    if confidence < 50:
+    if confidence is not None and confidence < 50:
+        # Don't auto-apply corrections — but math agreement can still vouch for
+        # it (resolve_confidence returns 100), keeping a clean receipt out of
+        # review even when the verifier is unsure.
+        final = _final("WRONG")
         total = parsed.get("total")
         return (
-            {"status": "WRONG", "notes": notes, "confidence": confidence},
-            f"❓ OCR uncertain ({confidence}%) — please verify total RM{total} and items",
+            {"status": "WRONG", "notes": notes, "confidence": final},
+            f"❓ OCR uncertain ({final}%) — please verify total RM{total} and items",
         )
     changes = _apply_corrections(parsed, corrections)
+    final = _final("WRONG")
     summary = ", ".join(changes) if changes else (notes or "see verifier notes")
     return (
-        {"status": "WRONG", "notes": notes, "confidence": confidence},
-        f"✅ Auto-corrected ({confidence}%): {summary}",
+        {"status": "WRONG", "notes": notes, "confidence": final},
+        f"✅ Auto-corrected ({final}%): {summary}",
     )
 
 
@@ -1058,10 +1074,35 @@ async def _dm_reviewers(context: ContextTypes.DEFAULT_TYPE, pending: dict) -> No
             logger.exception("Failed to DM reviewer %s", reviewer_id)
 
 
+def fetch_recent_pending_reviews(within_hours: int = 24) -> list:
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=within_hours)).isoformat()
+    result = (
+        supabase.table(PENDING_REVIEW_TABLE)
+        .select("parsed_merchant, parsed_total, parsed_date, created_at, status")
+        .eq("status", "pending")
+        .gte("created_at", cutoff)
+        .execute()
+    )
+    return result.data or []
+
+
 async def route_to_review(
     message, context: ContextTypes.DEFAULT_TYPE, parsed: dict, verification: dict
 ) -> None:
     confidence = verification.get("confidence")
+    # De-dup: if an equivalent receipt is already pending review from the last
+    # 24h (re-upload / re-process), don't queue or DM the reviewer again.
+    try:
+        recent = await asyncio.to_thread(fetch_recent_pending_reviews)
+    except Exception:
+        logger.warning("Could not check recent pending reviews for dedup", exc_info=True)
+        recent = []
+    if is_duplicate_review(recent, parsed):
+        logger.info("Skipping duplicate review DM (already pending within 24h)")
+        await message.reply_text(
+            "🔎 This receipt is already in the review queue from earlier — not re-sending."
+        )
+        return
     ocr_conflict = total_conflicts_with_item_sum(
         _to_float(parsed.get("total")), parsed.get("items")
     )

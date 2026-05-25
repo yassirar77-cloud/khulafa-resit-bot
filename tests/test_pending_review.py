@@ -23,10 +23,11 @@ from pending_review import (  # noqa: E402
 
 class ShouldQueue(unittest.TestCase):
     def test_below_floor_queues(self):
-        self.assertTrue(should_queue(50, []))
+        self.assertTrue(should_queue(30, []))  # floor is 40
 
     def test_at_floor_does_not_queue(self):
-        self.assertFalse(should_queue(60, []))
+        self.assertFalse(should_queue(40, []))
+        self.assertFalse(should_queue(50, []))  # 50 now stays out of review
 
     def test_above_floor_does_not_queue(self):
         self.assertFalse(should_queue(80, []))
@@ -49,7 +50,7 @@ class ShouldQueue(unittest.TestCase):
 
     def test_malformed_floor_falls_back_to_default(self):
         with mock.patch.dict(os.environ, {"REVIEW_CONFIDENCE_FLOOR": "abc"}):
-            self.assertEqual(pending_review.review_confidence_floor(), 60)
+            self.assertEqual(pending_review.review_confidence_floor(), 40)
 
 
 class BuildReviewReason(unittest.TestCase):

@@ -68,7 +68,8 @@ Migration filename: `migrations/0005_pending_review.sql`.
 ### 2. Routing decision in `bot.py handle_photo`
 
 After OCR + classification, check `confidence < CONFIDENCE_FLOOR`
-(default `60`, exposed as `os.environ["REVIEW_CONFIDENCE_FLOOR"]`).
+(default `40` since the auto-review-too-aggressive hotfix — was `60`;
+exposed as `os.environ["REVIEW_CONFIDENCE_FLOOR"]`).
 If under the floor:
 
 * Write to `pending_review` with `reason` populated from the
