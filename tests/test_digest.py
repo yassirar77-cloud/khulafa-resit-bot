@@ -57,9 +57,16 @@ class Formatting(unittest.TestCase):
         self.assertTrue(out.endswith("…"))
         self.assertEqual(digest.truncate("SHORT"), "SHORT")
 
-    def test_markdown_escaped(self):
-        # a stray underscore in a name must be escaped, not left to 400 Telegram
-        self.assertIn("\\_", digest._name("ITEM_WITH_UNDERSCORE"))
+    def test_html_escape_handles_amp_lt_gt(self):
+        self.assertEqual(digest._html("A & B < C > D"), "A &amp; B &lt; C &gt; D")
+        # ampersand escaped first (no double-escaping of the entity)
+        self.assertEqual(digest._html("<&>"), "&lt;&amp;&gt;")
+        # underscores are NOT special in HTML mode — left as-is
+        self.assertEqual(digest._name("protein_seafood"), "protein_seafood")
+
+    def test_parse_mode_attempts(self):
+        self.assertEqual(digest.parse_mode_attempts(False), ["HTML", None])
+        self.assertEqual(digest.parse_mode_attempts(True), [None])
 
 
 class Sections(unittest.TestCase):
@@ -79,6 +86,18 @@ class Sections(unittest.TestCase):
     def test_digest_handles_empty_price_alerts_section(self):
         joined = "\n\n".join(digest.build_digest_messages(EMPTY_DATA, NOW))
         self.assertIn("No significant price changes", joined)
+
+    def test_no_unescaped_angle_brackets_for_html_mode(self):
+        # After removing the only allowed tags, no bare < or > may remain — those
+        # would make Telegram's HTML parser choke (the original bug was "<60").
+        data = dict(EMPTY_DATA)
+        data["pm_window_rows"] = [_pm(2, "ayam bersih", 11, "BS FROZEN", 800, "2026-05-24")]
+        joined = "\n\n".join(digest.build_digest_messages(data, NOW))
+        stripped = joined
+        for tag in ("<b>", "</b>", "<i>", "</i>"):
+            stripped = stripped.replace(tag, "")
+        self.assertNotIn("<", stripped)
+        self.assertNotIn(">", stripped)
 
     def test_digest_filters_outliers_above_5000(self):
         data = dict(EMPTY_DATA)
@@ -100,6 +119,21 @@ class Sections(unittest.TestCase):
         ]
         items = digest.aggregate_items(rows, 5)
         self.assertEqual([i["name"] for i in items], ["ayam bersih"])
+        suppliers = digest.aggregate_suppliers(rows, 5)
+        self.assertEqual([s["name"] for s in suppliers], ["BS FROZEN"])
+
+    def test_top_items_excludes_zero_spend(self):
+        rows = [
+            _pm(1, "asam jawa drink", 10, "KM SETIA", 0, "2026-05-24"),
+            _pm(2, "extra joss", 10, "KM SETIA", 0, "2026-05-24"),
+            _pm(3, "ayam bersih", 11, "BS FROZEN", 800, "2026-05-24"),
+        ]
+        items = digest.aggregate_items(rows, 5)
+        names = [i["name"] for i in items]
+        self.assertEqual(names, ["ayam bersih"])
+        self.assertNotIn("asam jawa drink", names)
+        self.assertNotIn("extra joss", names)
+        # same guard on suppliers (the RM0.00 supplier shouldn't rank)
         suppliers = digest.aggregate_suppliers(rows, 5)
         self.assertEqual([s["name"] for s in suppliers], ["BS FROZEN"])
 
@@ -179,19 +213,57 @@ class SendDigest(unittest.TestCase):
         sent = []
         summary = send_daily_digest.run(
             client, recipients=[123], now_my=NOW,
-            send_fn=lambda r, t: sent.append((r, t)), data=EMPTY_DATA,
+            send_fn=lambda r, t, pm: sent.append((r, t, pm)), data=EMPTY_DATA,
         )
         self.assertEqual(summary, {123: "success"})
-        self.assertEqual(len(sent), 1)            # one message for the empty digest
+        self.assertEqual(len(sent), 1)             # one message for the empty digest
+        self.assertEqual(sent[0][2], "HTML")        # first attempt is HTML
         logs = client.store.get("digest_log", [])
         self.assertEqual(len(logs), 1)
         self.assertEqual(logs[0]["recipient"], 123)
         self.assertEqual(logs[0]["status"], "success")
 
+    def test_logs_message_bytes(self):
+        client = FakeClient()
+        send_daily_digest.run(
+            client, recipients=[123], now_my=NOW,
+            send_fn=lambda r, t, pm: None, data=EMPTY_DATA,
+        )
+        full_text = "\n\n".join(digest.build_digest_messages(EMPTY_DATA, NOW))
+        self.assertEqual(client.store["digest_log"][0]["message_bytes"], len(full_text.encode("utf-8")))
+
+    def test_send_falls_back_to_plain_text_on_parse_failure(self):
+        client = FakeClient()
+        attempts = []
+
+        def html_fails(recipient, text, parse_mode):
+            attempts.append(parse_mode)
+            if parse_mode == "HTML":
+                raise RuntimeError("Bad Request: can't parse entities")
+            # parse_mode=None (plain) succeeds
+
+        summary = send_daily_digest.run(
+            client, recipients=[123], now_my=NOW, send_fn=html_fails, data=EMPTY_DATA,
+        )
+        self.assertEqual(summary, {123: "success"})       # delivered via fallback
+        self.assertEqual(attempts, ["HTML", None])         # tried HTML, then plain
+        log = client.store["digest_log"][0]
+        self.assertEqual(log["status"], "success")
+        self.assertIn("plain text", log["error_msg"])      # fallback noted
+
+    def test_plain_mode_skips_html(self):
+        client = FakeClient()
+        attempts = []
+        send_daily_digest.run(
+            client, recipients=[123], now_my=NOW,
+            send_fn=lambda r, t, pm: attempts.append(pm), data=EMPTY_DATA, plain=True,
+        )
+        self.assertEqual(attempts, [None])  # never tries HTML
+
     def test_send_records_failure(self):
         client = FakeClient()
 
-        def boom(r, t):
+        def boom(r, t, pm):
             raise RuntimeError("Telegram error: chat not found")
 
         summary = send_daily_digest.run(
@@ -210,6 +282,11 @@ class Migration(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS public.digest_log", sql)
         self.assertIn("status        text CHECK (status IN ('success', 'failed', 'partial'))", sql)
         self.assertIn("recipient     bigint NOT NULL", sql)
+
+    def test_message_bytes_column_migration(self):
+        with open(os.path.join(REPO_ROOT, "migrations", "0014_digest_log_message_bytes.sql")) as f:
+            sql = f.read()
+        self.assertIn("ADD COLUMN IF NOT EXISTS message_bytes integer", sql)
 
 
 class BotCommand(unittest.TestCase):

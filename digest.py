@@ -7,8 +7,14 @@ and the /test_digest command.
 
 Analytics sections read the clean price_movements rows (already confidence/total/
 date filtered by the view). On top of that, top-items / top-suppliers apply a
-digest-level outlier cut (drop any aggregate > RM5,000) to catch residual OCR
-phantoms like the curry-powder-fish line, and the digest says so openly.
+digest-level outlier cut (drop any aggregate outside (0, RM5,000]) to catch
+residual OCR phantoms like the curry-powder-fish line AND zero-spend lines, and
+the digest says so openly.
+
+Rendered as Telegram HTML (parse_mode="HTML"): only & < > need escaping, so RM
+periods, parentheses, dashes etc. in dynamic content are safe. Legacy "Markdown"
+was abandoned — its backslash escapes (\\_) aren't recognised, so a category
+like "protein_seafood" opened an italic run Telegram couldn't close (400).
 """
 
 from datetime import timedelta
@@ -22,16 +28,16 @@ TOP_N = 5
 TG_LIMIT = 4096
 SECTION_SEP = "═══════════════════════"
 
-# The 8 section headers (used by tests to assert completeness).
+# The 8 section headers (used by tests to assert completeness). HTML bold.
 SECTION_HEADERS = (
-    "📊 *TODAY'S RECEIPTS*",
-    "🏪 *TOP SUPPLIERS TODAY*",
-    "🍴 *TOP ITEMS THIS WEEK*",
-    "📈 *PRICE ALERTS*",
-    "🏢 *OUTLET SPENDING THIS WEEK*",
-    "⚠️ *DATA QUALITY ALERTS*",
-    "🚫 *OUTLIER FILTER NOTICE*",
-    "🛡️ *NEW SUPPLIERS DISCOVERED*",
+    "📊 <b>TODAY'S RECEIPTS</b>",
+    "🏪 <b>TOP SUPPLIERS TODAY</b>",
+    "🍴 <b>TOP ITEMS THIS WEEK</b>",
+    "📈 <b>PRICE ALERTS</b>",
+    "🏢 <b>OUTLET SPENDING THIS WEEK</b>",
+    "⚠️ <b>DATA QUALITY ALERTS</b>",
+    "🚫 <b>OUTLIER FILTER NOTICE</b>",
+    "🛡️ <b>NEW SUPPLIERS DISCOVERED</b>",
 )
 
 
@@ -51,17 +57,20 @@ def truncate(name, n=NAME_MAX) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
-def _md(text) -> str:
-    """Escape Telegram legacy-Markdown specials so a stray _ or * in a merchant
-    / item name can't produce an unbalanced entity (which Telegram 400s on)."""
-    out = str(text if text is not None else "")
-    for ch in ("\\", "_", "*", "`", "["):
-        out = out.replace(ch, "\\" + ch)
-    return out
+def _html(text) -> str:
+    """Escape the only three chars Telegram HTML parse_mode treats specially, so
+    a stray & / < / > in a merchant or item name can't break the entity parse.
+    & must go first."""
+    return (
+        str(text if text is not None else "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
 
 
 def _name(text) -> str:
-    return _md(truncate(text))
+    return _html(truncate(text))
 
 
 # --- date windowing ---------------------------------------------------------
@@ -89,7 +98,9 @@ def aggregate_suppliers(rows, limit=TOP_N, outlier_max=OUTLIER_MAX):
         a = agg.setdefault(key, {"name": r.get("merchant_display_name"), "amount": 0.0, "line_count": 0})
         a["amount"] += _num(r.get("line_total")) or 0.0
         a["line_count"] += 1
-    kept = [a for a in agg.values() if a["amount"] <= outlier_max]
+    # (0, outlier_max]: drop zero-spend lines (RM0.00 ranking noise) and OCR
+    # phantoms above the cut.
+    kept = [a for a in agg.values() if 0 < a["amount"] <= outlier_max]
     return sorted(kept, key=lambda x: (-x["amount"], x["name"] or ""))[:limit]
 
 
@@ -106,7 +117,9 @@ def aggregate_items(rows, limit=TOP_N, outlier_max=OUTLIER_MAX):
         })
         a["amount"] += _num(r.get("line_total")) or 0.0
         a["line_count"] += 1
-    kept = [a for a in agg.values() if a["amount"] <= outlier_max]
+    # (0, outlier_max]: exclude zero-spend items (asam jawa / extra joss / ikan
+    # lines came through at RM0.00 and ranked in the top 5) and OCR phantoms.
+    kept = [a for a in agg.values() if 0 < a["amount"] <= outlier_max]
     return sorted(kept, key=lambda x: (-x["amount"], x["name"] or ""))[:limit]
 
 
@@ -162,8 +175,8 @@ def price_alerts(recent_rows, prior_rows, limit=PRICE_ALERT_LIMIT):
 def _header_block(now_my):
     return "\n".join([
         SECTION_SEP,
-        "🌙 *KHULAFA DAILY DIGEST*",
-        _md(now_my.strftime("%A, %d %B %Y")),
+        "🌙 <b>KHULAFA DAILY DIGEST</b>",
+        _html(now_my.strftime("%A, %d %B %Y")),
         SECTION_SEP,
     ])
 
@@ -193,14 +206,14 @@ def _items_block(items):
         lines.append("- (no items resolved this week)")
     else:
         for it in items:
-            lines.append(f"- {_name(it['name'])} ({_md(it['category'])}): {format_rm(it['amount'])} over 7 days")
+            lines.append(f"- {_name(it['name'])} ({_html(it['category'])}): {format_rm(it['amount'])} over 7 days")
     return "\n".join(lines)
 
 
 def _alerts_block(alerts):
     lines = [f"{SECTION_HEADERS[3]} (last 7 days vs prior 7 days)"]
     if not alerts:
-        lines.append("- No significant price changes (>10%) this week.")
+        lines.append("- No significant price changes (over 10%) this week.")
     else:
         for a in alerts:
             arrow = "🔺" if a["direction"] == "up" else "🔻"
@@ -224,7 +237,7 @@ def _outlets_block(outlets):
 def _data_quality_block(dq):
     return "\n".join([
         SECTION_HEADERS[5],
-        f"- {int(dq.get('low_confidence', 0))} receipts with confidence <60 → /reparse_status",
+        f"- {int(dq.get('low_confidence', 0))} receipts with confidence below 60 → /reparse_status",
         f"- {int(dq.get('reparse_pending', 0))} receipts pending in /reparse_preview",
         f"- {int(dq.get('unresolved_merchants', 0))} unresolved merchants in /merchant_coverage",
     ])
@@ -235,7 +248,7 @@ def _outlier_block(outliers):
     threshold = format_rm(outliers.get("threshold", OUTLIER_MAX))
     return "\n".join([
         SECTION_HEADERS[6],
-        f"- {count} receipts excluded from analytics (total >{threshold} — likely OCR errors "
+        f"- {count} receipts excluded from analytics (total over {threshold} — likely OCR errors "
         "from RM/Sen split-column receipts).",
         "- Some totals above may look low because of this filtering — numbers are honest, not complete.",
     ])
@@ -257,8 +270,8 @@ def _new_suppliers_block(new_suppliers):
 def _footer_block(now_my):
     return "\n".join([
         SECTION_SEP,
-        "_Generated by Khulafa Resit Monitor_",
-        _md(now_my.strftime("%Y-%m-%d %H:%M %Z")),
+        "<i>Generated by Khulafa Resit Monitor</i>",
+        _html(now_my.strftime("%Y-%m-%d %H:%M %Z")),
         "Issues: ping Yassir",
         SECTION_SEP,
     ])
@@ -312,3 +325,10 @@ def pack_messages(blocks, limit=TG_LIMIT):
 
 def build_digest_messages(data, now_my, limit=TG_LIMIT):
     return pack_messages(render_blocks(data, now_my), limit)
+
+
+def parse_mode_attempts(plain: bool):
+    """Ordered Telegram parse_mode attempts. Plain forces no formatting;
+    otherwise try HTML then fall back to plain text so a bad entity (the
+    "can't find end of the entity" 400) never blocks delivery."""
+    return [None] if plain else ["HTML", None]

@@ -3075,6 +3075,7 @@ async def test_digest_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if recipient is None:
         await message.reply_text("YASSIR_CHAT_ID is not set — can't send the digest.")
         return
+    plain = bool(context.args) and context.args[0].lower() in ("plain", "--plain")
     now_my = datetime.now(MALAYSIA_TZ)
     try:
         data = await asyncio.to_thread(gather_digest_data, supabase, now_my)
@@ -3083,24 +3084,38 @@ async def test_digest_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await message.reply_text("Failed to gather digest data.")
         return
     messages = digest.build_digest_messages(data, now_my)
-    sent, error = 0, None
+    full_text = "\n\n".join(messages)
+    message_bytes = len(full_text.encode("utf-8"))
+    attempts = digest.parse_mode_attempts(plain)
+    sent, error, used_fallback = 0, None, False
     for msg in messages:
-        try:
-            await context.bot.send_message(
-                chat_id=recipient, text=msg, parse_mode="Markdown",
-                disable_web_page_preview=True,
-            )
+        delivered, last_err = False, None
+        for i, parse_mode in enumerate(attempts):
+            try:
+                await context.bot.send_message(
+                    chat_id=recipient, text=msg, parse_mode=parse_mode,
+                    disable_web_page_preview=True,
+                )
+                delivered = True
+                used_fallback = used_fallback or i > 0
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_err = str(exc)
+                logger.warning("test_digest send (parse_mode=%s) failed: %s", parse_mode, last_err)
+        if delivered:
             sent += 1
-        except Exception as exc:  # noqa: BLE001
-            error = str(exc)
-            logger.warning("test_digest send failed: %s", error)
+        else:
+            error = last_err
             break
     status = "success" if sent == len(messages) else ("failed" if sent == 0 else "partial")
+    if status == "success" and used_fallback:
+        error = "delivered as plain text (markdown parse fallback)"
     await asyncio.to_thread(
-        log_digest, supabase, recipient, "\n\n".join(messages), status, error
+        log_digest, supabase, recipient, full_text, status, error, message_bytes
     )
     if status == "success":
-        await message.reply_text(f"✅ Digest sent to YASSIR_CHAT_ID ({sent} message(s)).")
+        note = " (plain-text fallback)" if used_fallback else ""
+        await message.reply_text(f"✅ Digest sent to YASSIR_CHAT_ID ({sent} message(s)){note}.")
     else:
         await message.reply_text(f"⚠️ Digest delivery {status} ({sent}/{len(messages)} sent). {error or ''}")
 

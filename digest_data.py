@@ -139,13 +139,25 @@ def gather_digest_data(client, now_my) -> dict:
     }
 
 
-def log_digest(client, recipient, message_text, status, error_msg=None) -> None:
+def log_digest(client, recipient, message_text, status, error_msg=None, message_bytes=None) -> None:
+    payload = {
+        "recipient": recipient,
+        "message_text": message_text,
+        "status": status,
+        "error_msg": error_msg,
+    }
+    if message_bytes is not None:
+        payload["message_bytes"] = message_bytes
     try:
-        client.table(DIGEST_LOG_TABLE).insert({
-            "recipient": recipient,
-            "message_text": message_text,
-            "status": status,
-            "error_msg": error_msg,
-        }).execute()
+        client.table(DIGEST_LOG_TABLE).insert(payload).execute()
     except Exception:
+        # message_bytes column may not be migrated yet (0014) — retry without it
+        # so we still capture the row for diagnosis.
+        if "message_bytes" in payload:
+            payload.pop("message_bytes")
+            try:
+                client.table(DIGEST_LOG_TABLE).insert(payload).execute()
+                return
+            except Exception:
+                pass
         logger.warning("digest: could not write digest_log for %s", recipient, exc_info=True)
