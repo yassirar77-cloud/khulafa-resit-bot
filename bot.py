@@ -84,6 +84,7 @@ from backfill_items import (
     format_unmatched as format_item_backfill_unmatched,
     top_unmatched_from_resolutions,
 )
+import analytics
 from receipt_classifier import ReceiptType, classify_receipt
 
 logging.basicConfig(
@@ -2967,6 +2968,97 @@ async def item_backfill_unmatched_command(update: Update, context: ContextTypes.
     await message.reply_text(format_item_backfill_unmatched(pairs))
 
 
+# === PR #33: price_movements analytics (owner-only) ==========================
+
+def _fetch_pm_rows(columns: str, item_canonical_id=None) -> list:
+    query = supabase.table(analytics.PRICE_MOVEMENTS_VIEW).select(columns)
+    if item_canonical_id is not None:
+        query = query.eq("item_canonical_id", item_canonical_id)
+    return query.execute().data or []
+
+
+async def refresh_analytics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    try:
+        await asyncio.to_thread(analytics.refresh, supabase)
+    except Exception:
+        logger.exception("refresh_analytics failed")
+        await message.reply_text("Failed to refresh price_movements.")
+        return
+    await message.reply_text("✅ Refreshed price_movements. See /price_movements_status.")
+
+
+async def price_movements_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    try:
+        rows = await asyncio.to_thread(_fetch_pm_rows, "receipt_date")
+    except Exception:
+        logger.exception("price_movements_status failed")
+        await message.reply_text("Failed to read price_movements.")
+        return
+    await message.reply_text(analytics.format_status(analytics.summarise_status(rows)))
+
+
+async def top_items_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    n = _parse_reparse_n(context.args, 10, 50)
+    try:
+        rows = await asyncio.to_thread(
+            _fetch_pm_rows, "item_canonical_id, item_display_name, item_category, line_total"
+        )
+    except Exception:
+        logger.exception("top_items failed")
+        await message.reply_text("Failed to read price_movements.")
+        return
+    await message.reply_text(analytics.format_top_items(analytics.top_items(rows, n)))
+
+
+async def top_suppliers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    n = _parse_reparse_n(context.args, 10, 50)
+    try:
+        rows = await asyncio.to_thread(
+            _fetch_pm_rows, "merchant_canonical_id, merchant_display_name, merchant_category, line_total"
+        )
+    except Exception:
+        logger.exception("top_suppliers failed")
+        await message.reply_text("Failed to read price_movements.")
+        return
+    await message.reply_text(analytics.format_top_suppliers(analytics.top_suppliers(rows, n)))
+
+
+async def price_history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    args = context.args or []
+    if not args or not args[0].isdigit():
+        await message.reply_text("Usage: /price_history <item_canonical_id>")
+        return
+    item_id = int(args[0])
+    try:
+        rows = await asyncio.to_thread(
+            _fetch_pm_rows,
+            "item_canonical_id, receipt_date, merchant_display_name, qty, unit_price, line_total",
+            item_id,
+        )
+    except Exception:
+        logger.exception("price_history failed")
+        await message.reply_text("Failed to read price_movements.")
+        return
+    await message.reply_text(
+        analytics.format_price_history(item_id, analytics.price_history(rows, item_id))
+    )
+
+
 async def run_bot() -> None:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -3000,6 +3092,11 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("item_add_alias", item_add_alias_command))
     app.add_handler(CommandHandler("item_backfill_status", item_backfill_status_command))
     app.add_handler(CommandHandler("item_backfill_unmatched", item_backfill_unmatched_command))
+    app.add_handler(CommandHandler("refresh_analytics", refresh_analytics_command))
+    app.add_handler(CommandHandler("price_movements_status", price_movements_status_command))
+    app.add_handler(CommandHandler("top_items", top_items_command))
+    app.add_handler(CommandHandler("top_suppliers", top_suppliers_command))
+    app.add_handler(CommandHandler("price_history", price_history_command))
     app.add_handler(
         CallbackQueryHandler(reparse_apply_all_callback, pattern=r"^reparse_applyall:(yes|no)$")
     )
