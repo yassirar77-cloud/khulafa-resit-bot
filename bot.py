@@ -71,6 +71,13 @@ from backfill_canonical import (
     should_apply as backfill_should_apply,
     top_unmatched_from_audit,
 )
+import item_resolver
+from item_resolver import (
+    format_coverage_report as format_item_coverage,
+    format_item_list,
+    format_item_show,
+    format_pending_aliases as format_item_pending_aliases,
+)
 from receipt_classifier import ReceiptType, classify_receipt
 
 logging.basicConfig(
@@ -2716,6 +2723,192 @@ async def backfill_unmatched_command(update: Update, context: ContextTypes.DEFAU
     await message.reply_text(format_backfill_unmatched(pairs))
 
 
+# === PR #32: item canonical review commands (owner-only) =====================
+
+def _fetch_item_canonicals() -> list:
+    return (
+        supabase.table(item_resolver.CANONICAL_TABLE)
+        .select("id, display_name, category, unit, notes").execute().data or []
+    )
+
+
+def _fetch_item_canonical(canonical_id) -> dict | None:
+    rows = (
+        supabase.table(item_resolver.CANONICAL_TABLE).select("*").eq("id", canonical_id).limit(1).execute().data or []
+    )
+    return rows[0] if rows else None
+
+
+def _fetch_item_aliases(canonical_id=None) -> list:
+    query = supabase.table(item_resolver.ALIAS_TABLE).select(
+        "id, alias_text, canonical_id, match_confidence, created_via"
+    )
+    if canonical_id is not None:
+        query = query.eq("canonical_id", canonical_id)
+    return query.execute().data or []
+
+
+def _fetch_item_pending_aliases() -> list:
+    return (
+        supabase.table(item_resolver.ALIAS_TABLE)
+        .select("id, alias_text, canonical_id, match_confidence, created_via")
+        .eq("created_via", "fuzzy_auto").order("id", desc=False).execute().data or []
+    )
+
+
+def _item_alias_counts() -> dict:
+    counts: dict = {}
+    for a in _fetch_item_aliases():
+        cid = a.get("canonical_id")
+        counts[cid] = counts.get(cid, 0) + 1
+    return counts
+
+
+def _compute_item_coverage() -> dict:
+    rows = supabase.table(RECEIPTS_TABLE).select("items").execute().data or []
+    counts: dict = {}
+    for r in rows:
+        items = r.get("items") or []
+        if not isinstance(items, list):
+            continue
+        for it in items:
+            name = (it.get("name") if isinstance(it, dict) else it) or ""
+            name = str(name).strip()
+            if name:
+                counts[name] = counts.get(name, 0) + 1
+    aliases, canonicals = item_resolver.load_snapshot(supabase)
+    return item_resolver.compute_coverage(list(counts.items()), aliases, canonicals)
+
+
+async def item_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    try:
+        canonicals = await asyncio.to_thread(_fetch_item_canonicals)
+        counts = await asyncio.to_thread(_item_alias_counts)
+    except Exception:
+        logger.exception("item_list failed")
+        await message.reply_text("Failed to read items.")
+        return
+    await message.reply_text(format_item_list(canonicals, counts))
+
+
+async def item_show_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    args = context.args or []
+    if not args or not args[0].isdigit():
+        await message.reply_text("Usage: /item_show <canonical_id>")
+        return
+    cid = int(args[0])
+    try:
+        canonical = await asyncio.to_thread(_fetch_item_canonical, cid)
+        aliases = await asyncio.to_thread(_fetch_item_aliases, cid)
+    except Exception:
+        logger.exception("item_show failed")
+        await message.reply_text("Failed to read item.")
+        return
+    await message.reply_text(format_item_show(canonical, aliases))
+
+
+async def item_coverage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    try:
+        summary = await asyncio.to_thread(_compute_item_coverage)
+    except Exception:
+        logger.exception("item_coverage failed")
+        await message.reply_text("Failed to compute item coverage.")
+        return
+    await message.reply_text(format_item_coverage(summary))
+
+
+async def item_aliases_pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    try:
+        aliases = await asyncio.to_thread(_fetch_item_pending_aliases)
+    except Exception:
+        logger.exception("item_aliases_pending failed")
+        await message.reply_text("Failed to read pending item aliases.")
+        return
+    await message.reply_text(format_item_pending_aliases(aliases))
+
+
+async def item_confirm_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    args = context.args or []
+    if not args or not args[0].isdigit():
+        await message.reply_text("Usage: /item_confirm <alias_id>")
+        return
+    alias_id = int(args[0])
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table(item_resolver.ALIAS_TABLE)
+            .update({"created_via": "fuzzy_confirmed"}).eq("id", alias_id).execute()
+        )
+    except Exception:
+        logger.exception("item_confirm failed")
+        await message.reply_text("Failed to confirm item alias.")
+        return
+    await message.reply_text(f"✅ Item alias #{alias_id} confirmed.")
+
+
+async def item_reject_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    args = context.args or []
+    if not args or not args[0].isdigit():
+        await message.reply_text("Usage: /item_reject <alias_id>")
+        return
+    alias_id = int(args[0])
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table(item_resolver.ALIAS_TABLE).delete().eq("id", alias_id).execute()
+        )
+    except Exception:
+        logger.exception("item_reject failed")
+        await message.reply_text("Failed to reject item alias.")
+        return
+    await message.reply_text(f"❌ Item alias #{alias_id} deleted.")
+
+
+async def item_add_alias_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    args = context.args or []
+    if len(args) < 2 or not args[0].isdigit():
+        await message.reply_text("Usage: /item_add_alias <canonical_id> <alias_text>")
+        return
+    canonical_id = int(args[0])
+    alias_text = " ".join(args[1:]).strip()
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table(item_resolver.ALIAS_TABLE)
+            .insert({
+                "alias_text": alias_text,
+                "canonical_id": canonical_id,
+                "match_confidence": 100,
+                "created_via": "manual",
+            }).execute()
+        )
+    except Exception:
+        logger.exception("item_add_alias failed")
+        await message.reply_text(
+            "Failed to add item alias (it may already exist — aliases are unique)."
+        )
+        return
+    await message.reply_text(f"✅ Added item alias {alias_text!r} -> canonical #{canonical_id}.")
+
+
 async def run_bot() -> None:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -2740,6 +2933,13 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("backfill_apply", backfill_apply_command))
     app.add_handler(CommandHandler("backfill_apply_all", backfill_apply_all_command))
     app.add_handler(CommandHandler("backfill_unmatched", backfill_unmatched_command))
+    app.add_handler(CommandHandler("item_list", item_list_command))
+    app.add_handler(CommandHandler("item_show", item_show_command))
+    app.add_handler(CommandHandler("item_coverage", item_coverage_command))
+    app.add_handler(CommandHandler("item_aliases_pending", item_aliases_pending_command))
+    app.add_handler(CommandHandler("item_confirm", item_confirm_command))
+    app.add_handler(CommandHandler("item_reject", item_reject_command))
+    app.add_handler(CommandHandler("item_add_alias", item_add_alias_command))
     app.add_handler(
         CallbackQueryHandler(reparse_apply_all_callback, pattern=r"^reparse_applyall:(yes|no)$")
     )
