@@ -100,6 +100,15 @@ INSERT INTO public.merchant_canonical (display_name, legal_name, category) VALUE
   ('KHULAFA GROUP', 'KHULAFA GROUP HOLDINGS', 'internal_transfer')
 ON CONFLICT (display_name) DO NOTHING;
 
+-- Canonicals carrying review notes (kept separate so the notes column is set).
+INSERT INTO public.merchant_canonical (display_name, legal_name, category, notes) VALUES
+  ('S. THAYANI', 'S. THAYANI ENTERPRISE', 'supplier', 'TBD what supplied'),
+  ('RK MUBARAKA', 'RK MUBARAKA SDN BHD', 'supplier', 'TBD'),
+  ('AKS SHAZZ', 'AKS SHAZZ ENTERPRISE / GEDA TRADING', 'supplier', 'sos and chemicals'),
+  ('SWEETTI FREEZEE', 'SWEETTI FREEZEE ENTERPRISE', 'supplier', 'fresh fruits supplier'),
+  ('VISTA ALAM JMB', 'BADAN PENGURUSAN BERSAMA VISTA ALAM', 'rent_license', 'Strata management fee for Vista Alam outlet')
+ON CONFLICT (display_name) DO NOTHING;
+
 -- ============================================================================
 -- Seed aliases. Every canonical gets its display_name and legal_name as seed
 -- aliases (deduped by the UNIQUE(alias_text) ON CONFLICT), so backfill always
@@ -131,7 +140,9 @@ INSERT INTO public.merchant_alias (alias_text, canonical_id, created_via)
     ('TNB', 'TENAGA NASIONAL'),
     ('UNIFI', 'TM UNIFI'),
     ('KHULAFA BISTRO', 'RESTORAN KHULAFA SDN. BHD.'),
-    ('KHULAFA BISTRO', 'KHULAFA NASI KANDAR BISTRO')
+    ('KHULAFA BISTRO', 'KHULAFA NASI KANDAR BISTRO'),
+    ('AKS SHAZZ', 'GEDA TRADING'),
+    ('VISTA ALAM JMB', 'BADAN PENGURUSAN BERSAMA-VISTA ALAM')
   ) AS v(display_name, alias_text)
   JOIN public.merchant_canonical c ON c.display_name = v.display_name
 ON CONFLICT (alias_text) DO NOTHING;

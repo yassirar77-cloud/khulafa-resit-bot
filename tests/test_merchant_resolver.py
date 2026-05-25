@@ -16,6 +16,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import merchant_resolver as mr  # noqa: E402
 from merchant_resolver import (  # noqa: E402
+    compute_coverage,
+    format_coverage_report,
     levenshtein,
     match_merchant,
     normalise_text,
@@ -157,6 +159,46 @@ class ResolveMerchant(unittest.TestCase):
         self.assertEqual(client.inserted, [])
 
 
+class Coverage(unittest.TestCase):
+    def test_compute_coverage_counts_and_top_unresolved(self):
+        merchant_counts = [
+            ("EVEREST AISVARAM SDN BHD", 10),  # exact -> resolved
+            ("EVEREST AIVSARAM", 3),           # fuzzy -> resolved
+            ("WEIRD VENDOR A", 7),             # unresolved
+            ("WEIRD VENDOR B", 12),            # unresolved (highest count)
+        ]
+        summary = compute_coverage(merchant_counts, ALIASES, CANONICALS)
+        self.assertEqual(summary["total_unique"], 4)
+        self.assertEqual(summary["resolved"], 2)
+        self.assertEqual(summary["unresolved"], 2)
+        # Sorted by occurrence count, descending.
+        self.assertEqual(summary["top_unresolved"][0], ("WEIRD VENDOR B", 12))
+        self.assertEqual(summary["top_unresolved"][1], ("WEIRD VENDOR A", 7))
+
+    def test_compute_coverage_caps_top_at_20(self):
+        merchant_counts = [(f"UNKNOWN {i}", i) for i in range(30)]
+        summary = compute_coverage(merchant_counts, ALIASES, CANONICALS)
+        self.assertEqual(summary["unresolved"], 30)
+        self.assertEqual(len(summary["top_unresolved"]), 20)
+
+    def test_coverage_is_read_only(self):
+        # compute_coverage must not write fuzzy aliases.
+        client = FakeClient(ALIASES, CANONICALS)
+        compute_coverage([("EVEREST AIVSARAM", 1)], client.aliases, client.canonicals)
+        self.assertEqual(client.inserted, [])
+
+    def test_format_coverage_report(self):
+        summary = {
+            "total_unique": 3, "resolved": 1, "unresolved": 2,
+            "top_unresolved": [("VENDOR X", 5), ("VENDOR Y", 2)],
+        }
+        out = format_coverage_report(summary)
+        self.assertIn("unique merchants: 3", out)
+        self.assertIn("resolved (any confidence): 1", out)
+        self.assertIn("unresolved (confidence 0): 2", out)
+        self.assertIn("VENDOR X", out)
+
+
 # --- seed content (parse the migration SQL) ---------------------------------
 
 class MigrationSeed(unittest.TestCase):
@@ -165,19 +207,24 @@ class MigrationSeed(unittest.TestCase):
         path = os.path.join(REPO_ROOT, "migrations", "0007_merchant_normalisation.sql")
         with open(path) as f:
             cls.sql = f.read()
-        # Canonical rows look like: ('DISPLAY', 'LEGAL', 'category'),
+        # Canonical rows: ('DISPLAY', 'LEGAL', 'category') with an optional 4th
+        # notes column: ('DISPLAY', 'LEGAL', 'category', 'notes').
         cls.canonical_rows = re.findall(
-            r"\(\s*'((?:[^']|'')+)'\s*,\s*'((?:[^']|'')+)'\s*,\s*'(supplier|utility|rent_license|internal_transfer|staff_advance|petty_cash|unknown)'\s*\)",
+            r"\(\s*'((?:[^']|'')+)'\s*,\s*'((?:[^']|'')+)'\s*,\s*"
+            r"'(supplier|utility|rent_license|internal_transfer|staff_advance|petty_cash|unknown)'"
+            r"(?:\s*,\s*'(?:[^']|'')*')?\s*\)",
             cls.sql,
         )
 
     def test_merchant_canonical_seeded(self):
         names = {r[0] for r in self.canonical_rows}
-        # ~46 canonicals (brief said ~33; the seed lists actually total ~46).
-        self.assertGreaterEqual(len(names), 40)
+        # 51 canonicals after the review additions (46 + 4 suppliers + 1 strata).
+        self.assertEqual(len(names), 51)
         for expected in (
             "EVEREST", "BABAS", "MYMOON", "PVS SANTAN", "TNB", "AIR SELANGOR",
             "UNIFI", "KHULAFA BISTRO", "KHULAFA GROUP",
+            "S. THAYANI", "RK MUBARAKA", "AKS SHAZZ", "SWEETTI FREEZEE",
+            "VISTA ALAM JMB",
         ):
             self.assertIn(expected, names, f"{expected} missing from canonical seed")
 
@@ -186,6 +233,7 @@ class MigrationSeed(unittest.TestCase):
         self.assertIn("supplier", cats)
         self.assertIn("utility", cats)
         self.assertIn("internal_transfer", cats)
+        self.assertIn("rent_license", cats)
 
     def test_merchant_alias_seeded_for_every_canonical(self):
         # The two bulk INSERT...SELECT statements guarantee every canonical
@@ -217,9 +265,10 @@ class BotMerchantCommands(unittest.TestCase):
 
     def test_telegram_commands_owner_only(self):
         for fn in (
-            "merchant_list_command", "merchant_show_command",
-            "merchant_aliases_pending_command", "merchant_confirm_command",
-            "merchant_reject_command", "merchant_add_alias_command",
+            "merchant_coverage_command", "merchant_list_command",
+            "merchant_show_command", "merchant_aliases_pending_command",
+            "merchant_confirm_command", "merchant_reject_command",
+            "merchant_add_alias_command",
         ):
             idx = self.src.index(f"async def {fn}(")
             body = self.src[idx:idx + 600]
@@ -230,6 +279,7 @@ class BotMerchantCommands(unittest.TestCase):
 
     def test_commands_registered(self):
         for cmd, fn in (
+            ("merchant_coverage", "merchant_coverage_command"),
             ("merchant_list", "merchant_list_command"),
             ("merchant_show", "merchant_show_command"),
             ("merchant_aliases_pending", "merchant_aliases_pending_command"),

@@ -193,6 +193,49 @@ def format_merchant_show(canonical, aliases) -> str:
     return "\n".join(lines)
 
 
+def compute_coverage(merchant_counts, aliases, canonicals) -> dict:
+    """Read-only coverage over distinct receipt merchants.
+
+    ``merchant_counts``: iterable of ``(merchant_text, occurrence_count)``.
+    Uses ``match_merchant`` (pure, no DB writes — does NOT record fuzzy
+    aliases). Returns totals plus the 20 most frequent unresolved merchants.
+    """
+    resolved = 0
+    unresolved = []
+    total = 0
+    for text, count in merchant_counts:
+        total += 1
+        cid, conf = match_merchant(text, aliases, canonicals)
+        if cid is not None and conf > 0:
+            resolved += 1
+        else:
+            unresolved.append((text, count))
+    unresolved.sort(key=lambda x: (-x[1], x[0]))
+    return {
+        "total_unique": total,
+        "resolved": resolved,
+        "unresolved": len(unresolved),
+        "top_unresolved": unresolved[:20],
+    }
+
+
+def format_coverage_report(summary) -> str:
+    lines = [
+        "Merchant coverage:",
+        f"  unique merchants: {summary['total_unique']}",
+        f"  resolved (any confidence): {summary['resolved']}",
+        f"  unresolved (confidence 0): {summary['unresolved']}",
+    ]
+    top = summary["top_unresolved"]
+    if top:
+        lines.append(f"\nTop {len(top)} unresolved (by occurrences):")
+        for text, count in top:
+            lines.append(f"  {count:>4}x  {text}")
+    else:
+        lines.append("\nAll merchants resolved.")
+    return "\n".join(lines)
+
+
 def format_pending_aliases(aliases) -> str:
     if not aliases:
         return "No fuzzy_auto aliases pending review."

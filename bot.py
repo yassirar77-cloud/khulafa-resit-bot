@@ -55,9 +55,12 @@ from reparse import (
 from merchant_resolver import (
     CANONICAL_TABLE,
     ALIAS_TABLE,
+    compute_coverage,
+    format_coverage_report,
     format_merchant_list,
     format_merchant_show,
     format_pending_aliases,
+    load_snapshot,
 )
 from receipt_classifier import ReceiptType, classify_receipt
 
@@ -2390,6 +2393,30 @@ def _alias_counts() -> dict:
     return counts
 
 
+def _compute_merchant_coverage() -> dict:
+    rows = supabase.table(RECEIPTS_TABLE).select("merchant").execute().data or []
+    counts: dict = {}
+    for r in rows:
+        name = (r.get("merchant") or "").strip()
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    aliases, canonicals = load_snapshot(supabase)
+    return compute_coverage(list(counts.items()), aliases, canonicals)
+
+
+async def merchant_coverage_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    try:
+        summary = await asyncio.to_thread(_compute_merchant_coverage)
+    except Exception:
+        logger.exception("merchant_coverage failed")
+        await message.reply_text("Failed to compute coverage.")
+        return
+    await message.reply_text(format_coverage_report(summary))
+
+
 async def merchant_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message or not is_reviewer(_command_owner_id(update)):
@@ -2521,6 +2548,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("reparse_preview", reparse_preview_command))
     app.add_handler(CommandHandler("reparse_apply", reparse_apply_command))
     app.add_handler(CommandHandler("reparse_apply_all", reparse_apply_all_command))
+    app.add_handler(CommandHandler("merchant_coverage", merchant_coverage_command))
     app.add_handler(CommandHandler("merchant_list", merchant_list_command))
     app.add_handler(CommandHandler("merchant_show", merchant_show_command))
     app.add_handler(CommandHandler("merchant_aliases_pending", merchant_aliases_pending_command))
