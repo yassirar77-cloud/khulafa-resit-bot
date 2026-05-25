@@ -85,6 +85,8 @@ from backfill_items import (
     top_unmatched_from_resolutions,
 )
 import analytics
+import digest
+from digest_data import gather_digest_data, log_digest
 from receipt_classifier import ReceiptType, classify_receipt
 
 logging.basicConfig(
@@ -3059,6 +3061,50 @@ async def price_history_command(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 
+# === PR #34: daily digest preview (owner-only) ===============================
+
+async def test_digest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    raw = os.environ.get("YASSIR_CHAT_ID")
+    try:
+        recipient = int(raw) if raw else None
+    except ValueError:
+        recipient = None
+    if recipient is None:
+        await message.reply_text("YASSIR_CHAT_ID is not set — can't send the digest.")
+        return
+    now_my = datetime.now(MALAYSIA_TZ)
+    try:
+        data = await asyncio.to_thread(gather_digest_data, supabase, now_my)
+    except Exception:
+        logger.exception("test_digest gather failed")
+        await message.reply_text("Failed to gather digest data.")
+        return
+    messages = digest.build_digest_messages(data, now_my)
+    sent, error = 0, None
+    for msg in messages:
+        try:
+            await context.bot.send_message(
+                chat_id=recipient, text=msg, parse_mode="Markdown",
+                disable_web_page_preview=True,
+            )
+            sent += 1
+        except Exception as exc:  # noqa: BLE001
+            error = str(exc)
+            logger.warning("test_digest send failed: %s", error)
+            break
+    status = "success" if sent == len(messages) else ("failed" if sent == 0 else "partial")
+    await asyncio.to_thread(
+        log_digest, supabase, recipient, "\n\n".join(messages), status, error
+    )
+    if status == "success":
+        await message.reply_text(f"✅ Digest sent to YASSIR_CHAT_ID ({sent} message(s)).")
+    else:
+        await message.reply_text(f"⚠️ Digest delivery {status} ({sent}/{len(messages)} sent). {error or ''}")
+
+
 async def run_bot() -> None:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -3097,6 +3143,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("top_items", top_items_command))
     app.add_handler(CommandHandler("top_suppliers", top_suppliers_command))
     app.add_handler(CommandHandler("price_history", price_history_command))
+    app.add_handler(CommandHandler("test_digest", test_digest_command))
     app.add_handler(
         CallbackQueryHandler(reparse_apply_all_callback, pattern=r"^reparse_applyall:(yes|no)$")
     )
