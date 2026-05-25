@@ -16,11 +16,12 @@ from datetime import datetime, timezone
 
 from merchant_resolver import (
     ALIAS_TABLE,
+    CANONICAL_TABLE,
     match_merchant,
     record_fuzzy_alias,
     tier_for_confidence,
 )
-from receipt_classifier import classify_receipt
+from receipt_classifier import ReceiptType, classify_receipt
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +38,25 @@ CONF_APPLY_MIN = 80
 TYPE_PRIORITY = {
     "UNKNOWN": 0,
     "PETTY_CASH": 1,
-    "SUPPLIER_PURCHASE": 2,
-    "UTILITY": 3,
-    "RENT_LICENSE": 4,
-    "STAFF_ADVANCE": 5,
+    "INTERNAL_TRANSFER": 2,
+    "SUPPLIER_PURCHASE": 3,
+    "UTILITY": 4,
+    "RENT_LICENSE": 5,
+    "STAFF_ADVANCE": 6,
+}
+
+# Canonical merchant category -> receipt_type. When a receipt resolves to a
+# canonical, the canonical's category is a direct, authoritative receipt_type
+# signal — it fires even when the keyword classifier wouldn't (e.g. a strata
+# fee whose raw_text has no rent keyword). 'unknown' maps to None (no override).
+CATEGORY_TO_RECEIPT_TYPE = {
+    "supplier": ReceiptType.SUPPLIER_PURCHASE.value,
+    "utility": ReceiptType.UTILITY.value,
+    "rent_license": ReceiptType.RENT_LICENSE.value,
+    "internal_transfer": ReceiptType.INTERNAL_TRANSFER.value,
+    "staff_advance": ReceiptType.STAFF_ADVANCE.value,
+    "petty_cash": ReceiptType.PETTY_CASH.value,
+    "unknown": None,
 }
 
 # Helper-only fields not present as columns in backfill_audit.
@@ -105,20 +121,32 @@ def should_upgrade_type(old_type, new_type) -> bool:
 
 
 def propose_reclassification(receipt, canonical) -> str | None:
-    """Re-run the classifier feeding it the canonical merchant header (more
-    authoritative than the raw OCR string), and return the new receipt_type
-    ONLY if it is a strict upgrade over the receipt's current type. Otherwise
-    None (leave the existing type untouched)."""
+    """Propose a new receipt_type, or None to leave it untouched.
+
+    Two signals, in priority order:
+      1. The resolved canonical's category (authoritative — fires even when the
+         keyword classifier can't, e.g. a strata fee with no rent keyword).
+      2. Fallback: re-run ``classify_receipt`` fed the canonical merchant
+         header (or, with no canonical, the raw merchant) — for keyword hits.
+
+    Whichever candidate it picks is applied ONLY if it is a strict upgrade over
+    the receipt's current type, so a correct existing classification is kept.
+    """
     old_type = receipt.get("receipt_type") or "UNKNOWN"
-    merchant = (canonical or {}).get("display_name") or receipt.get("merchant")
-    result = classify_receipt(
-        ocr_text=receipt.get("raw_text") or "",
-        parsed_items=receipt.get("items") or [],
-        total=_to_float(receipt.get("total")),
-        merchant=merchant,
-    )
-    new_type = result.receipt_type.value
-    return new_type if should_upgrade_type(old_type, new_type) else None
+    category = (canonical or {}).get("category")
+
+    candidate = CATEGORY_TO_RECEIPT_TYPE.get(category) if category else None
+    if candidate is None:
+        merchant = (canonical or {}).get("display_name") or receipt.get("merchant")
+        result = classify_receipt(
+            ocr_text=receipt.get("raw_text") or "",
+            parsed_items=receipt.get("items") or [],
+            total=_to_float(receipt.get("total")),
+            merchant=merchant,
+        )
+        candidate = result.receipt_type.value
+
+    return candidate if candidate and should_upgrade_type(old_type, candidate) else None
 
 
 # --- apply (mutates receipts) -----------------------------------------------
@@ -289,6 +317,13 @@ def _existing_audit_receipt_ids(client) -> set:
     return {r["receipt_id"] for r in rows if r.get("receipt_id") is not None}
 
 
+def _fetch_canonical_categories(client) -> dict:
+    """id -> {display_name, category}. load_snapshot omits category, so
+    --reclassify pulls it here (only when needed)."""
+    rows = client.table(CANONICAL_TABLE).select("id, display_name, category").execute().data or []
+    return {r["id"]: r for r in rows}
+
+
 def run_backfill(client, *, dry_run=False, limit=None, apply=False, reclassify=False, now=None):
     """Evaluate candidate receipts and (optionally) tag them.
 
@@ -303,7 +338,7 @@ def run_backfill(client, *, dry_run=False, limit=None, apply=False, reclassify=F
 
     now = now or _now_iso()
     aliases, canonicals = load_snapshot(client)
-    canon_by_id = {c.get("id"): c for c in canonicals}
+    canon_by_id = _fetch_canonical_categories(client) if reclassify else {}
     candidates = fetch_candidates(client, limit)
     already = set() if dry_run else _existing_audit_receipt_ids(client)
 

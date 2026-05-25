@@ -46,11 +46,21 @@ Matching reuses `match_merchant` (the pure core of `resolve_merchant`) over a
 single snapshot — no per-receipt DB round-trip and no writes during dry-run.
 
 Flags: `--dry-run` (write nothing), `--limit N`, `--apply` (default is
-audit-only, no receipt mutation), `--reclassify` (with `--apply`: re-run
-`classify_receipt` fed the **canonical** merchant header and upgrade
-`receipt_type` only when the new type has strictly higher priority —
-`UNKNOWN < PETTY_CASH < SUPPLIER_PURCHASE < UTILITY < RENT_LICENSE <
-STAFF_ADVANCE` — so a good existing classification is never clobbered).
+audit-only, no receipt mutation), `--reclassify` (with `--apply`: upgrade
+`receipt_type`). Reclassify uses two signals, in order: (1) the resolved
+canonical's **category** mapped directly to a receipt_type — authoritative, and
+fires even when keyword logic can't (e.g. `VISTA ALAM JMB` → `RENT_LICENSE`
+despite no rent keyword in the body); (2) fallback to `classify_receipt` fed
+the canonical merchant header. Either candidate is applied ONLY when it is a
+strict upgrade over the current type — priority `UNKNOWN < PETTY_CASH <
+INTERNAL_TRANSFER < SUPPLIER_PURCHASE < UTILITY < RENT_LICENSE < STAFF_ADVANCE`
+— so a good existing classification is never clobbered.
+
+`internal_transfer` canonicals (the Khulafa outlets) map to a new
+`INTERNAL_TRANSFER` receipt_type. This required adding the value to the
+`ReceiptType` enum and widening the `receipts_receipt_type_check` constraint —
+**`migrations/0009_receipt_type_internal_transfer.sql`** (apply before any
+`--reclassify --apply` run).
 
 Idempotent: candidates are NULL-canonical rows only, and `backfill_audit` has
 UNIQUE(receipt_id).

@@ -307,7 +307,8 @@ class RunBackfill(unittest.TestCase):
 # --- reclassify -------------------------------------------------------------
 
 class Reclassify(unittest.TestCase):
-    def test_propose_reclassification_upgrades_unknown(self):
+    def test_propose_reclassification_keyword_fallback_when_no_category(self):
+        # No category on the canonical -> falls back to the keyword classifier.
         receipt = {"id": 1, "merchant": "EVEREST AISVARAM SDN BHD", "receipt_type": "UNKNOWN",
                    "raw_text": "", "items": [], "total": 50}
         canonical = {"id": 1, "display_name": "EVEREST"}
@@ -316,7 +317,34 @@ class Reclassify(unittest.TestCase):
     def test_propose_reclassification_never_downgrades(self):
         receipt = {"id": 2, "merchant": "EVEREST AISVARAM SDN BHD", "receipt_type": "STAFF_ADVANCE",
                    "raw_text": "", "items": [], "total": 50}
-        canonical = {"id": 1, "display_name": "EVEREST"}
+        canonical = {"id": 1, "display_name": "EVEREST", "category": "supplier"}
+        self.assertIsNone(propose_reclassification(receipt, canonical))
+
+    def test_reclassify_upgrades_unknown_via_canonical_category(self):
+        # Strata fee: raw_text has NO rent keyword, so the keyword classifier
+        # alone yields UNKNOWN — only the canonical category rescues it.
+        receipt = {"id": 3, "merchant": "BADAN PENGURUSAN BERSAMA VISTA ALAM",
+                   "receipt_type": "UNKNOWN", "raw_text": "JALAN VISTA, SHAH ALAM",
+                   "items": [], "total": 350}
+        canonical = {"id": 99, "display_name": "VISTA ALAM JMB", "category": "rent_license"}
+        from receipt_classifier import classify_receipt
+        keyword_only = classify_receipt(
+            ocr_text=receipt["raw_text"], merchant=canonical["display_name"], total=350
+        )
+        self.assertEqual(keyword_only.receipt_type.value, "UNKNOWN")  # keyword path can't
+        self.assertEqual(propose_reclassification(receipt, canonical), "RENT_LICENSE")
+
+    def test_reclassify_internal_transfer_via_category(self):
+        receipt = {"id": 4, "merchant": "RESTORAN KHULAFA VISTA", "receipt_type": "UNKNOWN",
+                   "raw_text": "", "items": [], "total": 1200}
+        canonical = {"id": 41, "display_name": "KHULAFA VISTA", "category": "internal_transfer"}
+        self.assertEqual(propose_reclassification(receipt, canonical), "INTERNAL_TRANSFER")
+
+    def test_reclassify_keeps_higher_priority_existing_type(self):
+        # Already a more-specific type than the canonical category implies.
+        receipt = {"id": 5, "merchant": "EVEREST AISVARAM SDN BHD", "receipt_type": "RENT_LICENSE",
+                   "raw_text": "", "items": [], "total": 50}
+        canonical = {"id": 1, "display_name": "EVEREST", "category": "supplier"}
         self.assertIsNone(propose_reclassification(receipt, canonical))
 
     def test_reclassify_only_upgrades_in_run(self):
@@ -350,6 +378,15 @@ class Migration(unittest.TestCase):
         self.assertIn("REFERENCES public.merchant_canonical(id)", self.sql)
         for tier in ("exact", "substring", "fuzzy-alias", "fuzzy-canonical", "none"):
             self.assertIn(f"'{tier}'", self.sql)
+
+    def test_internal_transfer_constraint_migration(self):
+        with open(os.path.join(REPO_ROOT, "migrations", "0009_receipt_type_internal_transfer.sql")) as f:
+            sql = f.read()
+        self.assertIn("DROP CONSTRAINT IF EXISTS receipts_receipt_type_check", sql)
+        self.assertIn("'INTERNAL_TRANSFER'", sql)
+        # all original types preserved
+        for t in ("SUPPLIER_PURCHASE", "STAFF_ADVANCE", "UTILITY", "RENT_LICENSE", "PETTY_CASH", "UNKNOWN"):
+            self.assertIn(f"'{t}'", sql)
 
 
 class BotBackfillCommands(unittest.TestCase):
