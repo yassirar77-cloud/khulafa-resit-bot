@@ -1,17 +1,25 @@
 """Analytics over the price_movements materialised view (PR #33).
 
-The view itself (migrations/0011) does the join/filter/projection in Postgres.
-This module holds the pure aggregation/formatting the bot runs on rows fetched
-from the view (/top_items, /top_suppliers, /price_history, /price_movements_status),
-plus a thin refresh() wrapper. ``row_passes_filters`` / ``compute_line`` are a
-Python reference of the view's WHERE + line maths, used to lock the semantics in
-tests (a sibling test asserts the SQL carries the same clauses).
+The view itself (migrations/0011, tightened by 0012) does the join/filter/
+projection in Postgres. This module holds the pure aggregation/formatting the
+bot runs on rows fetched from the view (/top_items, /top_suppliers,
+/price_history, /price_movements_status), plus a thin refresh() wrapper.
+``row_passes_filters`` / ``compute_line`` are a Python reference of the view's
+WHERE + line maths, used to lock the semantics in tests (a sibling test asserts
+the SQL carries the same clauses).
 """
+
+from datetime import date, timedelta
 
 PRICE_MOVEMENTS_VIEW = "price_movements"
 REFRESH_FUNCTION = "refresh_price_movements"
 
-MIN_CONFIDENCE = 60
+# Data-quality bounds (kept in sync with migration 0012's WHERE clause).
+MIN_CONFIDENCE = 80
+MIN_TOTAL = 0.01
+MAX_TOTAL = 5000
+MIN_RECEIPT_DATE = "2024-01-01"
+FUTURE_GRACE_DAYS = 7
 VIEW_RECEIPT_TYPES = ("SUPPLIER_PURCHASE", "UTILITY", "RENT_LICENSE", "INTERNAL_TRANSFER")
 
 
@@ -22,18 +30,37 @@ def _num(value):
         return None
 
 
+def _date_str(value):
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()[:10]
+    return str(value)[:10]
+
+
 # --- reference of the view's row semantics (used by tests) ------------------
 
-def row_passes_filters(receipt, resolution) -> bool:
-    """Mirror of the view WHERE clause: a (receipt, resolved-item) pair is in
-    the view iff it has a canonical merchant, confidence >= 60, a reportable
-    receipt_type, and a resolved item canonical."""
-    return (
+def row_passes_filters(receipt, resolution, today=None) -> bool:
+    """Mirror of the view WHERE clause (migration 0012): a (receipt, resolved-
+    item) pair is in the view iff it has a canonical merchant, confidence >= 80,
+    a reportable receipt_type, a resolved item canonical, a total in
+    [0.01, 5000], and a receipt_date in [2024-01-01, today + 7 days]."""
+    if not (
         receipt.get("merchant_canonical_id") is not None
         and (receipt.get("confidence") or 0) >= MIN_CONFIDENCE
         and receipt.get("receipt_type") in VIEW_RECEIPT_TYPES
         and resolution.get("canonical_id") is not None
-    )
+    ):
+        return False
+    total = _num(receipt.get("total"))
+    if total is None or not (MIN_TOTAL <= total <= MAX_TOTAL):
+        return False
+    d = _date_str(receipt.get("receipt_date"))
+    if d is None:
+        return False
+    today = today or date.today()
+    upper = (today + timedelta(days=FUTURE_GRACE_DAYS)).isoformat()
+    return MIN_RECEIPT_DATE <= d <= upper
 
 
 def compute_line(item):
