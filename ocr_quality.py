@@ -34,6 +34,14 @@ logger = logging.getLogger(__name__)
 DATE_PAST_LIMIT_DAYS = 365
 DATE_FUTURE_LIMIT_DAYS = 7
 
+# When no date is in the window above, the out-of-window fallback keeps a
+# year within +/- this many years of today as-is (a 2026-11 receipt seen in
+# 2026-05 stays 2026-11), but re-infers an implausibly distant year (e.g. a
+# 2-digit "01" read as 2001, or a value bumped during legacy ingestion) to a
+# sensible recent year instead of proposing nonsense like 2001.
+DATE_PLAUSIBLE_PAST_YEARS = 5
+DATE_PLAUSIBLE_FUTURE_YEARS = 5
+
 # Decimal-loss correction is intentionally conservative: we only "fix" a
 # total when sum(items)/total is a CLEAN power-of-ten flip (a dropped or
 # spurious decimal point). A vague mismatch — e.g. sum 42 vs total 40,
@@ -350,6 +358,34 @@ def is_date_in_window(candidate: date, today: date) -> bool:
     return earliest <= candidate <= latest
 
 
+def _infer_year_from_month(month: int, today: date) -> int:
+    """Best-guess year for a receipt whose stated year is implausible.
+
+    A month that has already passed this year is most likely from this year;
+    a month still ahead of us is most likely from last year (e.g. a November
+    receipt seen in May was almost certainly last November)."""
+    return today.year if month <= today.month else today.year - 1
+
+
+def _sanitize_far_out_year(candidate: date, today: date) -> date:
+    """Out-of-window fallback. Keep the month/day; keep the year if it is
+    within +/- the plausible band, otherwise re-infer a sensible recent year.
+
+    This is what stops a 2-digit "01" (parsed as 2001) or a legacy-bumped
+    value from being proposed verbatim — instead November 2001 becomes the
+    most recent plausible November."""
+    earliest = today.year - DATE_PLAUSIBLE_PAST_YEARS
+    latest = today.year + DATE_PLAUSIBLE_FUTURE_YEARS
+    if earliest <= candidate.year <= latest:
+        return candidate
+    year = _infer_year_from_month(candidate.month, today)
+    try:
+        return date(year, candidate.month, candidate.day)
+    except ValueError:
+        # e.g. 29 Feb in a non-leap target year -> clamp to 28.
+        return date(year, candidate.month, min(candidate.day, 28))
+
+
 def validate_date(
     raw_text: str,
     *,
@@ -364,7 +400,10 @@ def validate_date(
        window.
     2. Any candidate in plausible window.
     3. Label-anchored even if out of window.
-    4. First candidate found.
+    4. First candidate found, with its year sanitised: an implausibly
+       distant year (more than ``DATE_PLAUSIBLE_*_YEARS`` off, e.g. a
+       2-digit "01" parsed as 2001) is pulled to the nearest sensible
+       recent year while preserving month/day.
 
     ``was_flagged`` is ``True`` when the chosen candidate fell outside
     the plausible window (caller should dock confidence).
@@ -400,13 +439,12 @@ def validate_date(
             return d.isoformat(), False
 
     chosen = label_candidates[0] if label_candidates else any_candidates[0]
-    earliest = today - timedelta(days=DATE_PAST_LIMIT_DAYS)
-    latest = today + timedelta(days=DATE_FUTURE_LIMIT_DAYS)
+    sane = _sanitize_far_out_year(chosen, today)
     logger.warning(
-        "ocr_quality.validate_date: no candidate in window [%s..%s]; using %s",
-        earliest.isoformat(), latest.isoformat(), chosen.isoformat(),
+        "ocr_quality.validate_date: no candidate in window; chosen=%s -> using %s",
+        chosen.isoformat(), sane.isoformat(),
     )
-    return chosen.isoformat(), True
+    return sane.isoformat(), True
 
 
 # --- Split column detection -------------------------------------------------
