@@ -62,6 +62,15 @@ from merchant_resolver import (
     format_pending_aliases,
     load_snapshot,
 )
+from backfill_canonical import (
+    BACKFILL_AUDIT_TABLE,
+    apply_backfill_audit_row,
+    format_preview as format_backfill_preview,
+    format_status as format_backfill_status,
+    format_unmatched as format_backfill_unmatched,
+    should_apply as backfill_should_apply,
+    top_unmatched_from_audit,
+)
 from receipt_classifier import ReceiptType, classify_receipt
 
 logging.basicConfig(
@@ -2536,6 +2545,177 @@ async def merchant_add_alias_command(update: Update, context: ContextTypes.DEFAU
     await message.reply_text(f"✅ Added alias {alias_text!r} -> canonical #{canonical_id}.")
 
 
+# === PR #31: canonical-merchant backfill commands (owner-only) ===============
+
+BACKFILL_DEFAULT_N = 10
+BACKFILL_MAX_N = 200
+
+
+def _backfill_status_counts() -> dict:
+    with_merchant = (
+        supabase.table(RECEIPTS_TABLE).select("id").not_.is_("merchant", "null").execute().data or []
+    )
+    backfilled = (
+        supabase.table(RECEIPTS_TABLE).select("id").not_.is_("merchant_canonical_id", "null").execute().data or []
+    )
+    pending = (
+        supabase.table(RECEIPTS_TABLE).select("id")
+        .is_("merchant_canonical_id", "null").not_.is_("merchant", "null").execute().data or []
+    )
+    audit = (
+        supabase.table(BACKFILL_AUDIT_TABLE)
+        .select("matched_canonical_id, confidence, applied").execute().data or []
+    )
+    return {
+        "with_merchant": len(with_merchant),
+        "backfilled": len(backfilled),
+        "pending": len(pending),
+        "no_match": sum(1 for r in audit if not backfill_should_apply(r)),
+    }
+
+
+def _fetch_pending_backfill_rows(limit: int) -> list:
+    return (
+        supabase.table(BACKFILL_AUDIT_TABLE).select("*")
+        .eq("applied", False).order("id", desc=False).limit(limit).execute().data or []
+    )
+
+
+def _count_applicable_pending_backfill() -> int:
+    rows = (
+        supabase.table(BACKFILL_AUDIT_TABLE)
+        .select("matched_canonical_id, confidence, applied").eq("applied", False).execute().data or []
+    )
+    return sum(1 for r in rows if backfill_should_apply(r))
+
+
+def _apply_pending_backfill_rows(rows: list) -> int:
+    applied = 0
+    for row in rows:
+        try:
+            if apply_backfill_audit_row(supabase, row):
+                applied += 1
+        except Exception:
+            logger.exception("Failed to apply backfill audit row %s", row.get("id"))
+    return applied
+
+
+def _fetch_unmatched_backfill(limit: int) -> list:
+    rows = (
+        supabase.table(BACKFILL_AUDIT_TABLE)
+        .select("matched_canonical_id, confidence, applied, raw_merchant").execute().data or []
+    )
+    return top_unmatched_from_audit(rows, limit)
+
+
+async def backfill_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    try:
+        counts = await asyncio.to_thread(_backfill_status_counts)
+    except Exception:
+        logger.exception("backfill_status failed")
+        await message.reply_text("Failed to read backfill status.")
+        return
+    await message.reply_text(format_backfill_status(counts))
+
+
+async def backfill_preview_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    n = _parse_reparse_n(context.args, BACKFILL_DEFAULT_N, BACKFILL_MAX_N)
+    try:
+        rows = await asyncio.to_thread(_fetch_pending_backfill_rows, n)
+    except Exception:
+        logger.exception("backfill_preview failed")
+        await message.reply_text("Failed to read pending backfill rows.")
+        return
+    await message.reply_text(format_backfill_preview(rows))
+
+
+async def backfill_apply_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    n = _parse_reparse_n(context.args, BACKFILL_DEFAULT_N, BACKFILL_MAX_N)
+    try:
+        rows = await asyncio.to_thread(_fetch_pending_backfill_rows, n)
+        applied = await asyncio.to_thread(_apply_pending_backfill_rows, rows)
+    except Exception:
+        logger.exception("backfill_apply failed")
+        await message.reply_text("Failed to apply backfill rows.")
+        return
+    await message.reply_text(
+        f"✅ Tagged {applied} receipt(s) with a canonical merchant. "
+        "Check /backfill_status for what's left."
+    )
+
+
+async def backfill_apply_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    try:
+        applicable = await asyncio.to_thread(_count_applicable_pending_backfill)
+    except Exception:
+        logger.exception("backfill_apply_all count failed")
+        await message.reply_text("Failed to read pending backfill rows.")
+        return
+    if applicable == 0:
+        await message.reply_text("No applicable pending backfill rows to apply.")
+        return
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Yes, apply all", callback_data="backfill_applyall:yes"),
+        InlineKeyboardButton("❌ Cancel", callback_data="backfill_applyall:no"),
+    ]])
+    await message.reply_text(
+        f"⚠️ Tag ALL {applicable} confident (>= 80) pending receipt(s) with their "
+        "canonical merchant? This updates real rows. Confirm:",
+        reply_markup=keyboard,
+    )
+
+
+async def backfill_apply_all_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+    if not is_reviewer(query.from_user.id if query.from_user else None):
+        return
+    try:
+        _, choice = (query.data or "").split(":", 1)
+    except ValueError:
+        return
+    with contextlib.suppress(Exception):
+        await query.edit_message_reply_markup(reply_markup=None)
+    if choice != "yes":
+        await query.message.reply_text("Cancelled — no receipts tagged.")
+        return
+    try:
+        rows = await asyncio.to_thread(_fetch_pending_backfill_rows, 1_000_000)
+        applied = await asyncio.to_thread(_apply_pending_backfill_rows, rows)
+    except Exception:
+        logger.exception("backfill_apply_all failed")
+        await query.message.reply_text("Failed to apply backfill rows.")
+        return
+    await query.message.reply_text(f"✅ Tagged ALL {applied} pending receipt(s).")
+
+
+async def backfill_unmatched_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    try:
+        pairs = await asyncio.to_thread(_fetch_unmatched_backfill, 30)
+    except Exception:
+        logger.exception("backfill_unmatched failed")
+        await message.reply_text("Failed to read unmatched merchants.")
+        return
+    await message.reply_text(format_backfill_unmatched(pairs))
+
+
 async def run_bot() -> None:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -2555,8 +2735,16 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("merchant_confirm", merchant_confirm_command))
     app.add_handler(CommandHandler("merchant_reject", merchant_reject_command))
     app.add_handler(CommandHandler("merchant_add_alias", merchant_add_alias_command))
+    app.add_handler(CommandHandler("backfill_status", backfill_status_command))
+    app.add_handler(CommandHandler("backfill_preview", backfill_preview_command))
+    app.add_handler(CommandHandler("backfill_apply", backfill_apply_command))
+    app.add_handler(CommandHandler("backfill_apply_all", backfill_apply_all_command))
+    app.add_handler(CommandHandler("backfill_unmatched", backfill_unmatched_command))
     app.add_handler(
         CallbackQueryHandler(reparse_apply_all_callback, pattern=r"^reparse_applyall:(yes|no)$")
+    )
+    app.add_handler(
+        CallbackQueryHandler(backfill_apply_all_callback, pattern=r"^backfill_applyall:(yes|no)$")
     )
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     # PR #29b manual review: the edit conversation must be registered before

@@ -1,183 +1,96 @@
-# PR #31 — Classifier backfill on historical receipts
+# PR #31 — Canonical-merchant backfill (historical receipts)
 
-**Status:** Brief drafted, not implemented
-**Depends on:** PR #30 (merchant_canonical_id available makes the
-classifier more accurate). Must land after.
-**Blocks:** PR #34 (digest's staff advances / supplier activity
-sections rely on populated side tables).
+**Status:** Implemented.
+**Depends on:** PR #30 (canonical layer + `resolve_merchant` + substring tier).
+**Blocks:** PR #33 (`price_movements` groups by canonical merchant), PR #34
+(digest aggregates by canonical merchant).
+
+> This brief was rewritten to match the implemented spec. The earlier draft
+> described a *different* backfill — re-running `classify_receipt` over
+> `receipt_type = UNKNOWN` rows to fill the `staff_advances` / `fixed_costs` /
+> `petty_cash` side tables (with `backfill_disagreements` / `backfill_runs`
+> tables and `/backfill_disagreements_review`). That design was superseded by
+> the canonical-merchant backfill below. The classifier re-run survives as the
+> optional `--reclassify` flag.
 
 ---
 
 ## Why
 
-Production has ~1,500 receipts. The majority were uploaded before
-PR #28 / PR #28b shipped, which means:
+PR #30 shipped the canonical merchant layer and added (but did not populate)
+`receipts.merchant_canonical_id`. `/merchant_coverage` resolves ~55% of unique
+merchant strings. We now need to walk the ~1,500 historical receipts and tag
+each with its canonical id so the reporting PRs have something to group by.
 
-* Most are classified as `UNKNOWN` because the classifier never
-  saw the merchant header.
-* The `staff_advances`, `fixed_costs`, and `petty_cash` side
-  tables are nearly empty — historical PAYOUT / PINJAM / TNB /
-  KWSP / SHELL receipts never reached their respective ledgers.
-* Reports like `/advances all_time` return effectively nothing.
-
-The classifier now does the right thing on new uploads. We need
-to re-run it across the historical set so the side tables fill
-out and the digest has real data to summarise.
-
-This is a one-time batch job, not an ongoing pipeline. It is
-designed to be safe to re-run.
+One-time, owner-driven batch job. Safe to re-run.
 
 ## Scope
 
-### 1. One-time script `scripts/backfill_classifier.py`
+### 1. `migrations/0008_backfill_audit.sql`
 
-Algorithm:
+`backfill_audit(id, receipt_id UNIQUE → receipts, matched_canonical_id →
+merchant_canonical, confidence, match_tier, raw_merchant, applied, applied_at,
+created_at)`. `match_tier ∈ {exact, case-insensitive, normalised, substring,
+fuzzy-alias, fuzzy-canonical, none}` — one row per receipt processed, so
+exact-vs-fuzzy resolution rates and the still-unmatched merchants are auditable.
 
-```
-For each receipt where receipt_type = 'UNKNOWN':
-  result = classify_receipt(
-    ocr_text=receipt.raw_text,
-    parsed_items=receipt.items,
-    total=receipt.total,
-    merchant=receipt.merchant,
-  )
-  UPDATE receipts SET receipt_type = result.receipt_type WHERE id = ...
-  
-  if result.receipt_type == STAFF_ADVANCE and no staff_advances row exists:
-    INSERT staff_advances (receipt_id, staff_name, amount, issued_by, ...)
-  elif result.receipt_type in (UTILITY, RENT_LICENSE) and no fixed_costs row:
-    INSERT fixed_costs (receipt_id, vendor, amount, ...)
-  elif result.receipt_type == PETTY_CASH and no petty_cash row:
-    INSERT petty_cash (receipt_id, category, amount, ...)
-```
+### 2. `scripts/backfill_canonical_merchants.py` + `backfill_canonical.py`
 
-Three guarantees:
+For each receipt with `merchant_canonical_id IS NULL` and a non-null merchant:
+run it through `resolve_merchant`'s matcher, record a `backfill_audit` row, and
+(in `--apply`) tag `merchant_canonical_id` when **confidence ≥ 80**. Sub-80
+matches (only `fuzzy-canonical`, 60) are left NULL — we don't guess. On a
+sub-100 apply, the raw string is cached as a `fuzzy_auto` alias.
 
-* **Idempotent.** The script checks for an existing side-table row
-  keyed by `receipt_id` before inserting. Re-running is a no-op
-  on already-processed receipts.
-* **Non-destructive on disagreement.** If a receipt's
-  `receipt_type` is already set to something specific (i.e. NOT
-  `UNKNOWN`) — even if the classifier now disagrees — the script
-  does NOT overwrite. It logs the disagreement to a
-  `backfill_disagreements` table so the owner can review and
-  decide.
-* **Manual review queue for missing data.** When the classifier
-  returns `STAFF_ADVANCE` but `extract_staff_name` returns `None`,
-  insert a row into the `pending_review` table from PR #29b with
-  `reason = 'staff_name_missing'`. The owner edits the name and
-  approves; the side-table row is created on approval.
+Matching reuses `match_merchant` (the pure core of `resolve_merchant`) over a
+single snapshot — no per-receipt DB round-trip and no writes during dry-run.
 
-### 2. `backfill_disagreements` table
+Flags: `--dry-run` (write nothing), `--limit N`, `--apply` (default is
+audit-only, no receipt mutation), `--reclassify` (with `--apply`: upgrade
+`receipt_type`). Reclassify uses two signals, in order: (1) the resolved
+canonical's **category** mapped directly to a receipt_type — authoritative, and
+fires even when keyword logic can't (e.g. `VISTA ALAM JMB` → `RENT_LICENSE`
+despite no rent keyword in the body); (2) fallback to `classify_receipt` fed
+the canonical merchant header. Either candidate is applied ONLY when it is a
+strict upgrade over the current type — priority `UNKNOWN < PETTY_CASH <
+INTERNAL_TRANSFER < SUPPLIER_PURCHASE < UTILITY < RENT_LICENSE < STAFF_ADVANCE`
+— so a good existing classification is never clobbered.
 
-```sql
-CREATE TABLE backfill_disagreements (
-  id BIGSERIAL PRIMARY KEY,
-  receipt_id BIGINT REFERENCES receipts(id) ON DELETE CASCADE,
-  existing_type TEXT NOT NULL,
-  proposed_type TEXT NOT NULL,
-  reason TEXT,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE (receipt_id)
-);
-```
+`internal_transfer` canonicals (the Khulafa outlets) map to a new
+`INTERNAL_TRANSFER` receipt_type. This required adding the value to the
+`ReceiptType` enum and widening the `receipts_receipt_type_check` constraint —
+**`migrations/0009_receipt_type_internal_transfer.sql`** (apply before any
+`--reclassify --apply` run).
 
-Migration filename: `migrations/0008_backfill_disagreements.sql`.
+Idempotent: candidates are NULL-canonical rows only, and `backfill_audit` has
+UNIQUE(receipt_id).
 
-### 3. Final report
+### 3. Owner-only Telegram commands
 
-```
-Backfill complete (idempotent):
-  Receipts queried (UNKNOWN):     1,287
-  Re-classified:                    662
-    SUPPLIER_PURCHASE:              412
-    STAFF_ADVANCE:                   87  (12 missing staff_name -> review queue)
-    UTILITY:                         45
-    RENT_LICENSE:                    23
-    PETTY_CASH:                      95
-  Still UNKNOWN:                    625
-  Disagreements logged:               4
-  
-  Side-table inserts:
-    staff_advances:    75  (87 STAFF_ADVANCE - 12 queued)
-    fixed_costs:       68  (UTILITY + RENT_LICENSE)
-    petty_cash:        95
-  
-  Next:
-    /backfill_disagreements_review
-    /pending_review   (for queued staff_advance names)
-```
-
-### 4. Two new owner-only Telegram commands
-
-* `/backfill_disagreements_review` — paginated listing of every
-  row in `backfill_disagreements`. Each entry: receipt_id, current
-  type, proposed type, snippet of raw_text. Inline buttons to
-  accept the proposed type, keep the current type, or open the
-  receipt in Telegram.
-* `/backfill_stats` — last backfill run report (re-rendered from
-  the audit table — see section 5).
-
-### 5. Backfill audit log
-
-Persist the final report into a `backfill_runs` table so the
-owner can audit when each run happened and the counts:
-
-```sql
-CREATE TABLE backfill_runs (
-  id BIGSERIAL PRIMARY KEY,
-  started_at TIMESTAMPTZ DEFAULT NOW(),
-  finished_at TIMESTAMPTZ,
-  triggered_by_chat_id BIGINT,
-  receipts_queried INTEGER,
-  reclassified_count INTEGER,
-  side_table_inserts JSONB,
-  disagreements INTEGER,
-  pending_review INTEGER,
-  notes TEXT
-);
-```
-
-## Files
-
-| File | Change |
-|---|---|
-| `migrations/0008_backfill_disagreements.sql` | NEW. Two new tables. |
-| `scripts/backfill_classifier.py` | NEW. The batch processor. |
-| `bot.py` | Two new owner-only command handlers. |
-| `backfill.py` | NEW. Pure helpers: `propose_classification(receipt_row)`, `should_insert_side_row(conn, receipt_id, receipt_type)`. |
-| `tests/test_backfill.py` | NEW. Unit tests. |
-
-## Tests
-
-* Backfilling the Dina RM500 PAYOUT receipt produces
-  `receipt_type = STAFF_ADVANCE` AND a row in `staff_advances`
-  with `staff_name = 'Dina'`.
-* Backfilling an EVEREST receipt produces `SUPPLIER_PURCHASE`.
-* Running the script twice in a row produces zero additional
-  side-table rows on the second run.
-* A receipt whose `receipt_type` is already `SUPPLIER_PURCHASE`
-  but the new classifier returns `UNKNOWN` is left untouched and
-  a row appears in `backfill_disagreements`.
-* A `STAFF_ADVANCE` classification with `staff_name = None` lands
-  in `pending_review`, NOT in `staff_advances`.
+`/backfill_status` (with-merchant / backfilled / pending / no-match counts),
+`/backfill_preview N`, `/backfill_apply N`, `/backfill_apply_all` (inline Y/N
+confirm like `/reparse_apply_all`), `/backfill_unmatched` (top 30 unresolved
+raw merchant strings by count — tells the owner which canonicals to add).
 
 ## Out of scope
 
-* Auto-rerunning the backfill on a schedule. Manual via owner
-  command only.
-* Backfilling receipts that already have a non-UNKNOWN type
-  (overwriting is too risky without per-row owner approval).
-* Side-table schema changes. Re-use whatever the current
-  `staff_advances` / `fixed_costs` / `petty_cash` tables look
-  like.
+Filling the `staff_advances` / `fixed_costs` / `petty_cash` side tables (the
+old brief's focus) — `--reclassify` only fixes `receipt_type`. Auto-scheduling.
+Editing merchant text. Re-tagging receipts that already have a canonical.
 
-## Acceptance
+## Tests (`tests/test_backfill.py`)
 
-* Migration runs cleanly.
-* Script runs end-to-end on production data.
-* < 15% of receipts remain `UNKNOWN` after the run.
-* Owner can `/advances all_time` and see historical loans for
-  Dina, Siti, Kumar, etc.
-* Re-running the script the same day produces zero additional
-  inserts.
+Pure helpers, plus the runner driven by an in-memory fake Supabase client:
+exact / substring resolution, sub-80 skip, null-merchant skip, idempotent
+re-run, dry-run writes nothing, match_tier tracking, and reclassify-only-
+upgrades. Migration content + owner-gated command wiring checked source-level.
+
+## Rollout
+
+1. Apply migration 0008 in Supabase.
+2. `--dry-run --limit 50` sanity check → full `--dry-run`.
+3. `--apply` (optionally `--reclassify`).
+4. `/backfill_status` to verify, then random SQL sampling for quality.
+5. `/backfill_unmatched` → decide which canonicals to add next.
+
+Goal: 1,500+ receipts tagged, unblocking PR #33 / PR #34.

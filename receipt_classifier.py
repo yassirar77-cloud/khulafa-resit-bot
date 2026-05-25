@@ -30,6 +30,10 @@ class ReceiptType(str, Enum):
     UTILITY = "UTILITY"
     RENT_LICENSE = "RENT_LICENSE"
     PETTY_CASH = "PETTY_CASH"
+    # Transfers between Khulafa outlets. The keyword classifier never emits
+    # this — it is only assigned by the PR #31 backfill from a canonical
+    # merchant whose category is 'internal_transfer'.
+    INTERNAL_TRANSFER = "INTERNAL_TRANSFER"
     UNKNOWN = "UNKNOWN"
 
 

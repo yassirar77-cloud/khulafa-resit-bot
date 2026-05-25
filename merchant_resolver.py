@@ -196,6 +196,23 @@ def match_merchant(raw_text, aliases, canonicals):
     return None, 0
 
 
+# Each tier emits a unique confidence, so the confidence value alone identifies
+# which tier matched — used by the backfill audit (PR #31) to track resolution
+# quality without threading an extra return value through the matcher.
+TIER_BY_CONFIDENCE = {
+    CONF_EXACT: "exact",
+    CONF_CASE_INSENSITIVE: "case-insensitive",
+    CONF_NORMALISED: "normalised",
+    CONF_SUBSTRING: "substring",
+    CONF_FUZZY_ALIAS: "fuzzy-alias",
+    CONF_FUZZY_CANONICAL: "fuzzy-canonical",
+}
+
+
+def tier_for_confidence(confidence) -> str:
+    return TIER_BY_CONFIDENCE.get(confidence, "none")
+
+
 def load_snapshot(client):
     aliases = (
         client.table(ALIAS_TABLE).select("id, alias_text, canonical_id").execute().data
