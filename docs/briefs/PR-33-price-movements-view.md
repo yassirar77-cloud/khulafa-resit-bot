@@ -75,9 +75,20 @@ merchant), line_total = qty×unit_price, refresh callable (fake rpc), top_items 
 top_suppliers ordering + aggregation, price_history filter+sort, status summary,
 and migration content (view, joins, filters, unique grain index, refresh fn).
 
+## Hotfix — `migrations/0012_tighten_price_movements_view.sql`
+
+`/top_items` on the deployed view exposed residual OCR contamination (e.g. curry
+powder fish at RM12,955; suppliers inflated by unfixed RM/Sen receipts and
+phantom dates). 0012 drops + recreates the view with tighter WHERE filters:
+`confidence >= 80` (was 60), `total IS NOT NULL AND total BETWEEN 0.01 AND 5000`,
+and `receipt_date BETWEEN '2024-01-01' AND CURRENT_DATE + 7 days`. The
+`analytics.row_passes_filters` reference and its tests were updated to match;
+`refresh_price_movements()` survives the CASCADE drop (referenced by name).
+
 ## Rollout
 
-1. Apply migration 0011 (creates + populates the matview).
+1. Apply migration 0011, then 0012 (drops + recreates + repopulates the matview).
 2. Created WITH DATA, so already populated; later use `/refresh_analytics`.
-3. Sanity: `SELECT count(*) FROM price_movements;` (~1500–2000).
+3. Sanity: `SELECT count(*) FROM price_movements;` (drops vs the 0011 count as
+   contamination is filtered out).
 4. `/top_items 10`, `/top_suppliers 10` in Telegram.

@@ -10,6 +10,7 @@ import os
 import sys
 import types
 import unittest
+from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -18,8 +19,15 @@ import analytics  # noqa: E402
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+# Fixed "today" so the date-window assertions don't depend on the wall clock.
+TODAY = date(2026, 5, 25)
+
+
 def _receipt(**kw):
-    base = {"merchant_canonical_id": 1, "confidence": 90, "receipt_type": "SUPPLIER_PURCHASE"}
+    base = {
+        "merchant_canonical_id": 1, "confidence": 90, "receipt_type": "SUPPLIER_PURCHASE",
+        "total": 200.0, "receipt_date": "2026-05-15",
+    }
     base.update(kw)
     return base
 
@@ -28,25 +36,49 @@ def _resolution(canonical_id=5):
     return {"canonical_id": canonical_id}
 
 
-class ViewFilters(unittest.TestCase):
-    def test_includes_valid_row(self):
-        self.assertTrue(analytics.row_passes_filters(_receipt(), _resolution()))
+def _passes(receipt, resolution):
+    return analytics.row_passes_filters(receipt, resolution, today=TODAY)
 
-    def test_view_excludes_low_confidence_receipts(self):
-        self.assertFalse(analytics.row_passes_filters(_receipt(confidence=59), _resolution()))
-        self.assertTrue(analytics.row_passes_filters(_receipt(confidence=60), _resolution()))
+
+class ViewFilters(unittest.TestCase):
+    def test_view_includes_clean_receipts(self):
+        self.assertTrue(_passes(_receipt(confidence=85, total=200, receipt_date="2026-05-15"), _resolution()))
+
+    def test_view_excludes_confidence_below_80(self):
+        self.assertFalse(_passes(_receipt(confidence=79), _resolution()))
+        self.assertTrue(_passes(_receipt(confidence=80), _resolution()))
 
     def test_view_excludes_unknown_receipt_types(self):
         for rt in ("UNKNOWN", "STAFF_ADVANCE", "PETTY_CASH"):
-            self.assertFalse(analytics.row_passes_filters(_receipt(receipt_type=rt), _resolution()))
+            self.assertFalse(_passes(_receipt(receipt_type=rt), _resolution()))
         for rt in analytics.VIEW_RECEIPT_TYPES:
-            self.assertTrue(analytics.row_passes_filters(_receipt(receipt_type=rt), _resolution()))
+            self.assertTrue(_passes(_receipt(receipt_type=rt), _resolution()))
 
     def test_view_excludes_unresolved_items(self):
-        self.assertFalse(analytics.row_passes_filters(_receipt(), {"canonical_id": None}))
+        self.assertFalse(_passes(_receipt(), {"canonical_id": None}))
 
     def test_view_excludes_null_merchant(self):
-        self.assertFalse(analytics.row_passes_filters(_receipt(merchant_canonical_id=None), _resolution()))
+        self.assertFalse(_passes(_receipt(merchant_canonical_id=None), _resolution()))
+
+    def test_view_excludes_high_total_phantoms(self):
+        self.assertFalse(_passes(_receipt(total=18000), _resolution()))
+        self.assertFalse(_passes(_receipt(total=5000.01), _resolution()))
+        self.assertTrue(_passes(_receipt(total=5000), _resolution()))
+
+    def test_view_excludes_zero_or_null_total(self):
+        self.assertFalse(_passes(_receipt(total=0), _resolution()))
+        self.assertFalse(_passes(_receipt(total=None), _resolution()))
+
+    def test_view_excludes_future_dates(self):
+        self.assertFalse(_passes(_receipt(receipt_date="2028-05-18"), _resolution()))
+        # within the +7 day grace window
+        self.assertTrue(_passes(_receipt(receipt_date="2026-05-30"), _resolution()))
+        # beyond the grace window
+        self.assertFalse(_passes(_receipt(receipt_date="2026-06-10"), _resolution()))
+
+    def test_view_excludes_ancient_dates(self):
+        self.assertFalse(_passes(_receipt(receipt_date="2023-12-31"), _resolution()))
+        self.assertTrue(_passes(_receipt(receipt_date="2024-01-01"), _resolution()))
 
 
 class LineComputation(unittest.TestCase):
@@ -150,7 +182,8 @@ class Migration(unittest.TestCase):
         self.assertIn("JOIN public.item_resolutions ir", self.sql)
         self.assertIn("JOIN public.item_canonical ic", self.sql)
 
-    def test_where_filters_match_reference(self):
+    def test_where_filters_present(self):
+        # 0011's original filters (confidence >= 60); 0012 tightens these.
         self.assertIn("r.merchant_canonical_id IS NOT NULL", self.sql)
         self.assertIn("r.confidence >= 60", self.sql)
         self.assertIn("ir.canonical_id IS NOT NULL", self.sql)
@@ -170,6 +203,45 @@ class Migration(unittest.TestCase):
     def test_refresh_function_concurrently(self):
         self.assertIn("CREATE OR REPLACE FUNCTION public.refresh_price_movements()", self.sql)
         self.assertIn("REFRESH MATERIALIZED VIEW CONCURRENTLY public.price_movements", self.sql)
+
+
+class Migration0012(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(REPO_ROOT, "migrations", "0012_tighten_price_movements_view.sql")) as f:
+            cls.sql = f.read()
+
+    def test_drops_and_recreates(self):
+        self.assertIn("DROP MATERIALIZED VIEW IF EXISTS public.price_movements CASCADE", self.sql)
+        self.assertIn("CREATE MATERIALIZED VIEW public.price_movements", self.sql)
+
+    def test_tightened_filters(self):
+        self.assertIn("r.confidence >= 80", self.sql)
+        self.assertIn("r.total IS NOT NULL", self.sql)
+        self.assertIn("r.total BETWEEN 0.01 AND 5000", self.sql)
+        self.assertIn("r.receipt_date BETWEEN '2024-01-01'", self.sql)
+        self.assertIn("CURRENT_DATE + INTERVAL '7 days'", self.sql)
+
+    def test_indexes_recreated(self):
+        self.assertIn("CREATE UNIQUE INDEX", self.sql)
+        self.assertIn("(receipt_id, item_index)", self.sql)
+        self.assertIn("(item_canonical_id, receipt_date DESC)", self.sql)
+
+
+class ExistingAnalytics(unittest.TestCase):
+    def test_existing_analytics_functions_still_work(self):
+        # The aggregation/format helpers are unaffected by the filter tightening.
+        rows = [
+            _row(1, "jintan putih", 10, "BABAS", 100, receipt_date="2026-03-01", qty=2, unit_price=50),
+            _row(2, "ayam bersih", 10, "BABAS", 500, receipt_date="2026-02-01", qty=10, unit_price=50),
+        ]
+        items = analytics.top_items(rows, 10)
+        self.assertEqual([i["item_canonical_id"] for i in items], [2, 1])
+        suppliers = analytics.top_suppliers(rows, 10)
+        self.assertEqual(suppliers[0]["total_spend"], 600.0)
+        self.assertEqual(len(analytics.price_history(rows, 1)), 1)
+        self.assertEqual(analytics.summarise_status(rows)["row_count"], 2)
+        self.assertIn("Top items by spend", analytics.format_top_items(items))
 
 
 class BotCommands(unittest.TestCase):
