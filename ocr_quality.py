@@ -300,6 +300,27 @@ def correct_total_with_items(
     return corrected, True
 
 
+def items_sum_matches_total(
+    total: float | None, items: list[dict] | None, tolerance: float = 0.01
+) -> bool:
+    """True when Σ(qty × price) reconciles with ``total`` within a RELATIVE
+    tolerance (default 1%).
+
+    This is the strongest "clean data" signal — the receipt's own math agreeing
+    with itself. Callers treat it as authoritative and override a noisy verifier
+    downgrade (PR: auto-review-too-aggressive). FOC and null-priced lines are
+    excluded from the sum, matching the rest of this module.
+    """
+    if total is None or isinstance(total, bool) or not isinstance(total, (int, float)):
+        return False
+    if total <= 0:
+        return False
+    sum_items = _sum_line_item_prices(items)
+    if sum_items <= 0:
+        return False
+    return abs(sum_items - total) <= tolerance * abs(total)
+
+
 def total_conflicts_with_item_sum(
     total: float | None, items: list[dict] | None
 ) -> bool:
