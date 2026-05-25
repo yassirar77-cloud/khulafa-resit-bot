@@ -22,6 +22,7 @@ ALIAS_TABLE = "merchant_alias"
 CONF_EXACT = 100
 CONF_CASE_INSENSITIVE = 95
 CONF_NORMALISED = 90
+CONF_SUBSTRING = 85
 CONF_FUZZY_ALIAS = 80
 CONF_FUZZY_CANONICAL = 60
 
@@ -30,6 +31,21 @@ CONF_FUZZY_CANONICAL = 60
 # looser budget since they're the last resort before giving up.
 LEV_ALIAS_MAX = 2
 LEV_CANONICAL_MAX = 5
+
+# Shortest token length that counts as a "significant" word for the substring
+# tier's word-overlap rule.
+SIGNIFICANT_WORD_MIN_LEN = 4
+
+# Generic legal/business suffixes plus the ambiguous nasi-kandar-khulafa chain.
+# These never count as a significant word on their own — otherwise every
+# "... ENTERPRISE" would collide, and every Khulafa outlet would match every
+# other. They are NOT removed from phrase matching, only from word-overlap.
+_SUBSTRING_STOPWORDS = frozenset({
+    "sdn", "bhd", "berhad", "enterprise", "trading", "resources", "group",
+    "holdings", "restoran", "products", "product", "food", "foods", "frozen",
+    "meat", "seafood", "seafoods", "success", "maju", "nasi", "kandar",
+    "khulafa", "bakeries",
+})
 
 _PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
 _WS_RE = re.compile(r"\s+")
@@ -67,6 +83,53 @@ def levenshtein(a: str, b: str) -> int:
     return previous[-1]
 
 
+def _phrase_in(haystack_norm: str, needle_norm: str) -> bool:
+    """True if ``needle_norm`` appears in ``haystack_norm`` on whole-word
+    boundaries. Inputs must already be normalised (space-separated tokens), so
+    "fook leong" matches inside "fook leong sea products" but "fook" does NOT
+    match inside "fookleong"."""
+    if not needle_norm:
+        return False
+    return re.search(r"(?<!\S)" + re.escape(needle_norm) + r"(?!\S)", haystack_norm) is not None
+
+
+def _is_significant_word(word: str) -> bool:
+    return len(word) >= SIGNIFICANT_WORD_MIN_LEN and word not in _SUBSTRING_STOPWORDS
+
+
+def substring_score(merchant_norm: str, canonical_norm: str) -> int:
+    """Score how strongly a canonical's normalised display name overlaps a
+    merchant string. 0 = no match; higher = more specific. A full word-bounded
+    phrase containment always outranks a mere shared-word overlap.
+
+    Rules:
+      - single-word canonical: that whole word must appear word-bounded in the
+        merchant (e.g. "HANEE" in "MD HANEE FROZEN AND SEAFOODS").
+      - multi-word canonical: (a) the full canonical phrase appears in the
+        merchant, or (b) the full merchant phrase appears in the canonical
+        (merchant must itself be multi-word), or (c) they share >=1 significant
+        word (merchant must be multi-word, so a lone partial word like "FOOK"
+        does not match "FOOK LEONG").
+    """
+    m_words = merchant_norm.split()
+    c_words = canonical_norm.split()
+    if not m_words or not c_words:
+        return 0
+
+    if len(c_words) == 1:
+        return 100 + 1 if _phrase_in(merchant_norm, canonical_norm) else 0
+
+    if _phrase_in(merchant_norm, canonical_norm):
+        return 100 + len(c_words)
+    if len(m_words) >= 2 and _phrase_in(canonical_norm, merchant_norm):
+        return 100 + len(m_words)
+    if len(m_words) >= 2:
+        m_set = set(m_words)
+        shared = sum(1 for w in c_words if _is_significant_word(w) and w in m_set)
+        return shared
+    return 0
+
+
 def match_merchant(raw_text, aliases, canonicals):
     """Resolve ``raw_text`` against in-memory snapshots.
 
@@ -95,6 +158,21 @@ def match_merchant(raw_text, aliases, canonicals):
     for a in aliases:
         if normalise_text(a.get("alias_text") or "") == raw_norm:
             return a["canonical_id"], CONF_NORMALISED
+
+    # 3b. Substring containment vs canonical display names. Catches "FOOK LEONG
+    # SEA PRODUCTS SDN BHD" -> "FOOK LEONG" and "MD HANEE ..." -> "HANEE" that
+    # the alias-only tiers miss. Most-specific (highest score) canonical wins;
+    # ties break toward the longer display name.
+    best = None  # (canonical_id, score, name_len)
+    for c in canonicals:
+        score = substring_score(raw_norm, normalise_text(c.get("display_name") or ""))
+        if score <= 0:
+            continue
+        name_len = len(normalise_text(c.get("display_name") or ""))
+        if best is None or (score, name_len) > (best[1], best[2]):
+            best = (c["id"], score, name_len)
+    if best is not None:
+        return best[0], CONF_SUBSTRING
 
     # 4. Fuzzy vs aliases (Levenshtein <= 2 on normalised text).
     best = None

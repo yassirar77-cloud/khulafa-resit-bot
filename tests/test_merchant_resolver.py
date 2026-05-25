@@ -16,12 +16,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import merchant_resolver as mr  # noqa: E402
 from merchant_resolver import (  # noqa: E402
+    CONF_SUBSTRING,
     compute_coverage,
     format_coverage_report,
     levenshtein,
     match_merchant,
     normalise_text,
     resolve_merchant,
+    substring_score,
 )
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -72,17 +74,21 @@ class MatchMerchant(unittest.TestCase):
         self.assertEqual(match_merchant("BABAS PRODUCTS (M) SDN. BHD.", ALIASES, CANONICALS), (2, 90))
 
     def test_resolve_fuzzy_typo(self):
-        # "AIVSARAM" is a 2-edit transposition of alias "AISVARAM".
-        self.assertEqual(match_merchant("EVEREST AIVSARAM", ALIASES, CANONICALS), (1, 80))
+        # "EVERST" is a 1-edit typo of alias word "EVEREST" (no whole-word token
+        # match, so this exercises the Levenshtein-vs-alias tier, not substring).
+        self.assertEqual(match_merchant("EVERST AISVARAM", ALIASES, CANONICALS), (1, 80))
 
     def test_resolve_unknown_returns_none(self):
         self.assertEqual(match_merchant("RANDOM XYZ VENDOR", ALIASES, CANONICALS), (None, 0))
 
     def test_levenshtein_threshold_2(self):
-        # "MEWAH GRABS" is distance 3 from alias "MEWAH GROUP" (not <=2) and
-        # distance 6 from display "MEWAH" (not <=5) -> no match.
+        # Isolate the alias-fuzzy tier (no canonicals -> no substring/display
+        # tiers). Distance 3 from the only alias must NOT match (threshold 2);
+        # a distance-2 control must match at conf 80.
+        aliases = [{"alias_text": "MEWAH GROUP", "canonical_id": 3}]
         self.assertEqual(levenshtein(normalise_text("MEWAH GROUP"), normalise_text("MEWAH GRABS")), 3)
-        self.assertEqual(match_merchant("MEWAH GRABS", ALIASES, CANONICALS), (None, 0))
+        self.assertEqual(match_merchant("MEWAH GRABS", aliases, []), (None, 0))
+        self.assertEqual(match_merchant("MEWAH GRXYP", aliases, []), (3, 80))
 
     def test_fuzzy_canonical_display_name_tier(self):
         # 1-edit from display "MEWAH" but no close alias -> 60 via display tier.
@@ -91,6 +97,70 @@ class MatchMerchant(unittest.TestCase):
     def test_empty_input(self):
         self.assertEqual(match_merchant("", ALIASES, CANONICALS), (None, 0))
         self.assertEqual(match_merchant("   ", ALIASES, CANONICALS), (None, 0))
+
+
+# --- substring containment tier (3b) ----------------------------------------
+
+SUBSTRING_CANONICALS = [
+    {"id": 15, "display_name": "FOOK LEONG"},
+    {"id": 6, "display_name": "HANEE"},
+    {"id": 7, "display_name": "CAMELLIAA"},
+    {"id": 50, "display_name": "SWEETTI FREEZEE"},
+    {"id": 49, "display_name": "AKS SHAZZ"},
+    {"id": 14, "display_name": "BESTARI WHOLESALE"},
+    {"id": 13, "display_name": "BESTARI FARM"},
+    {"id": 56, "display_name": "LIAN HUAH COCONUT TRADING"},
+]
+
+
+class SubstringContainment(unittest.TestCase):
+    def test_substring_canonical_in_merchant(self):
+        # Full canonical phrase appears inside a noisier OCR string.
+        self.assertEqual(
+            match_merchant("FOOK LEONG SEA PRODUCTS SDN BHD", [], SUBSTRING_CANONICALS),
+            (15, CONF_SUBSTRING),
+        )
+
+    def test_substring_merchant_in_canonical(self):
+        # Short merchant string is a word-bounded prefix of a longer canonical.
+        self.assertEqual(
+            match_merchant("LIAN HUAH COCONUT", [], SUBSTRING_CANONICALS),
+            (56, CONF_SUBSTRING),
+        )
+
+    def test_substring_word_boundary(self):
+        # A lone partial word must NOT match a multi-word canonical, and a word
+        # without a boundary ("fook" inside "fookleong") must not match either.
+        self.assertEqual(substring_score("fook", "fook leong"), 0)
+        self.assertEqual(substring_score("fookleong", "fook leong"), 0)
+        # With only FOOK LEONG present, "FOOK" resolves to nothing (the tier-5
+        # Levenshtein-vs-display is too far: distance 6).
+        self.assertEqual(match_merchant("FOOK", [], [{"id": 15, "display_name": "FOOK LEONG"}]), (None, 0))
+
+    def test_camelliaa_variant_resolves(self):
+        self.assertEqual(
+            match_merchant("RK CAMELLIAA (M) SDN. BHD.", [], SUBSTRING_CANONICALS),
+            (7, CONF_SUBSTRING),
+        )
+
+    def test_significant_word_overlap_resolves(self):
+        # Neither string contains the other, but they share a significant word.
+        self.assertEqual(match_merchant("FREEZEE ENTERPRISE", [], SUBSTRING_CANONICALS), (50, CONF_SUBSTRING))
+        self.assertEqual(match_merchant("VKS SHAZZ ENTERPRISE", [], SUBSTRING_CANONICALS), (49, CONF_SUBSTRING))
+
+    def test_phrase_match_beats_shared_word(self):
+        # "BESTARI FARM" (full phrase) must win over "BESTARI WHOLESALE" (only
+        # the shared word "bestari").
+        self.assertEqual(match_merchant("BESTARI FARM SDN BHD", [], SUBSTRING_CANONICALS), (13, CONF_SUBSTRING))
+
+    def test_substring_does_not_break_existing_matches(self):
+        # Higher tiers still win where they applied before this tier existed.
+        self.assertEqual(match_merchant("BABAS PRODUCTS (M) SDN BHD", ALIASES, CANONICALS), (2, 100))
+        self.assertEqual(match_merchant("babas products (m) sdn bhd", ALIASES, CANONICALS), (2, 95))
+        self.assertEqual(match_merchant("BABAS PRODUCTS (M) SDN. BHD.", ALIASES, CANONICALS), (2, 90))
+        self.assertEqual(match_merchant("EVERST AISVARAM", ALIASES, CANONICALS), (1, 80))
+        self.assertEqual(match_merchant("MEWAHH", ALIASES, CANONICALS), (3, 60))
+        self.assertEqual(match_merchant("RANDOM XYZ VENDOR", ALIASES, CANONICALS), (None, 0))
 
 
 # --- DB-backed resolve with a recording fake client -------------------------
@@ -138,11 +208,11 @@ class FakeClient:
 class ResolveMerchant(unittest.TestCase):
     def test_resolve_creates_alias_on_fuzzy_match(self):
         client = FakeClient(ALIASES, CANONICALS)
-        cid, conf = resolve_merchant("EVEREST AIVSARAM", client)
+        cid, conf = resolve_merchant("EVERST AISVARAM", client)
         self.assertEqual((cid, conf), (1, 80))
         alias_inserts = [p for (t, p) in client.inserted if t == mr.ALIAS_TABLE]
         self.assertEqual(len(alias_inserts), 1)
-        self.assertEqual(alias_inserts[0]["alias_text"], "EVEREST AIVSARAM")
+        self.assertEqual(alias_inserts[0]["alias_text"], "EVERST AISVARAM")
         self.assertEqual(alias_inserts[0]["created_via"], "fuzzy_auto")
         self.assertEqual(alias_inserts[0]["match_confidence"], 80)
 
