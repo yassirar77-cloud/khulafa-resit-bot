@@ -78,6 +78,12 @@ from item_resolver import (
     format_item_show,
     format_pending_aliases as format_item_pending_aliases,
 )
+from backfill_items import (
+    ITEM_RESOLUTIONS_TABLE,
+    format_status as format_item_backfill_status,
+    format_unmatched as format_item_backfill_unmatched,
+    top_unmatched_from_resolutions,
+)
 from receipt_classifier import ReceiptType, classify_receipt
 
 logging.basicConfig(
@@ -2909,6 +2915,58 @@ async def item_add_alias_command(update: Update, context: ContextTypes.DEFAULT_T
     await message.reply_text(f"✅ Added item alias {alias_text!r} -> canonical #{canonical_id}.")
 
 
+# === PR #32b: item resolution backfill status (owner-only) ===================
+
+def _item_backfill_status_counts() -> dict:
+    rows = (
+        supabase.table(ITEM_RESOLUTIONS_TABLE)
+        .select("canonical_id, match_tier").execute().data or []
+    )
+    resolved = sum(1 for r in rows if r.get("canonical_id") is not None)
+    low_conf = sum(1 for r in rows if r.get("match_tier") == "low_confidence")
+    no_match = sum(1 for r in rows if r.get("match_tier") == "none")
+    return {
+        "total": len(rows),
+        "resolved": resolved,
+        "low_conf": low_conf,
+        "no_match": no_match,
+    }
+
+
+def _fetch_item_backfill_unmatched(limit: int) -> list:
+    rows = (
+        supabase.table(ITEM_RESOLUTIONS_TABLE)
+        .select("canonical_id, raw_name").is_("canonical_id", "null").execute().data or []
+    )
+    return top_unmatched_from_resolutions(rows, limit)
+
+
+async def item_backfill_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    try:
+        counts = await asyncio.to_thread(_item_backfill_status_counts)
+    except Exception:
+        logger.exception("item_backfill_status failed")
+        await message.reply_text("Failed to read item backfill status.")
+        return
+    await message.reply_text(format_item_backfill_status(counts))
+
+
+async def item_backfill_unmatched_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    try:
+        pairs = await asyncio.to_thread(_fetch_item_backfill_unmatched, 30)
+    except Exception:
+        logger.exception("item_backfill_unmatched failed")
+        await message.reply_text("Failed to read unmatched items.")
+        return
+    await message.reply_text(format_item_backfill_unmatched(pairs))
+
+
 async def run_bot() -> None:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -2940,6 +2998,8 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("item_confirm", item_confirm_command))
     app.add_handler(CommandHandler("item_reject", item_reject_command))
     app.add_handler(CommandHandler("item_add_alias", item_add_alias_command))
+    app.add_handler(CommandHandler("item_backfill_status", item_backfill_status_command))
+    app.add_handler(CommandHandler("item_backfill_unmatched", item_backfill_unmatched_command))
     app.add_handler(
         CallbackQueryHandler(reparse_apply_all_callback, pattern=r"^reparse_applyall:(yes|no)$")
     )
