@@ -134,29 +134,35 @@ class Migration(unittest.TestCase):
         with open(os.path.join(REPO_ROOT, "migrations", "0010_item_normalisation.sql")) as f:
             cls.sql = f.read()
         cls.canonicals = re.findall(
-            r"\(\s*'((?:[^']|'')+)'\s*,\s*'(" + _CATEGORIES + r")'\s*,\s*'[^']*'\s*\)",
+            r"\(\s*'((?:[^']|'')+)'\s*,\s*'(" + _CATEGORIES + r")'\s*,\s*'[^']*'"
+            r"(?:\s*,\s*'(?:[^']|'')*')?\s*\)",
             cls.sql,
         )
 
     def test_item_canonical_seeded(self):
         names = {r[0] for r in self.canonicals}
-        self.assertGreaterEqual(len(names), 50)
+        self.assertGreaterEqual(len(names), 60)
         for expected in (
             "ayam bersih", "isi ayam", "jintan putih", "beras basmati",
             "curry powder fish", "santan", "tube ice", "lunch box",
             "minyak masak", "telur",
+            "gas cylinder small", "extra joss", "nasi lemak", "hand wash",
+            "small packet",
         ):
             self.assertIn(expected, names, f"{expected} missing from item seed")
 
     def test_categories_present(self):
         cats = {r[1] for r in self.canonicals}
-        for c in ("protein_chicken", "spices", "packaging", "vegetables_fresh", "rice"):
+        for c in ("protein_chicken", "spices", "packaging", "vegetables_fresh",
+                  "rice", "fuel", "cleaning_supplies", "other"):
             self.assertIn(c, cats)
 
     def test_alias_seeding(self):
         self.assertIn("SELECT display_name, id, 'seed' FROM public.item_canonical", self.sql)
         self.assertIn("CHICKEN WHOLE", self.sql)
         self.assertIn("KELAPA PARUT PUTIH", self.sql)
+        self.assertIn("Silinder Bergas 14kg", self.sql)
+        self.assertIn("Extra Joss Original", self.sql)
         self.assertIn("UNIQUE (receipt_id, item_index)", self.sql)  # item_resolutions
         self.assertIn("CREATE TABLE IF NOT EXISTS public.item_resolutions", self.sql)
 

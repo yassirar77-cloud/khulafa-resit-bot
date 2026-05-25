@@ -117,7 +117,21 @@ INSERT INTO public.item_canonical (display_name, category, unit) VALUES
   ('spoon plastic', 'packaging', 'pack'),
   ('fork plastic', 'packaging', 'pack'),
   ('straw', 'packaging', 'pack'),
-  ('briyani box', 'packaging', 'pack')
+  ('briyani box', 'packaging', 'pack'),
+  ('gas cylinder small', 'fuel', 'pcs'),
+  ('gas cylinder large', 'fuel', 'pcs'),
+  ('gas cylinder generic', 'fuel', 'pcs'),
+  ('extra joss', 'beverages', 'pack'),
+  ('masala tea', 'beverages', 'pack'),
+  ('asam jawa drink', 'beverages', 'pack'),
+  ('nasi lemak', 'other', 'pcs'),
+  ('jambu batu', 'vegetables_fresh', 'pcs'),
+  ('hand wash', 'cleaning_supplies', 'bottle')
+ON CONFLICT (display_name) DO NOTHING;
+
+-- Canonical carrying a review note (kept separate so the notes column is set).
+INSERT INTO public.item_canonical (display_name, category, unit, notes) VALUES
+  ('small packet', 'packaging', 'pcs', 'Empty placeholder line from EVEREST receipts — usually no actual purchase')
 ON CONFLICT (display_name) DO NOTHING;
 
 -- ============================================================================
@@ -271,7 +285,28 @@ INSERT INTO public.item_alias (alias_text, canonical_id, created_via)
     ('fork plastic', 'ECODISPOSABLE GARPU PLASTIK'),
     ('straw', 'STRAW'),
     ('straw', 'STRAW LONG WP'),
-    ('briyani box', 'BRIYANI BOX')
+    ('briyani box', 'BRIYANI BOX'),
+    ('gas cylinder small', 'Silinder Bergas 12kg'),
+    ('gas cylinder small', 'Silinder Bergas 14kg'),
+    ('gas cylinder small', 'Petronas 14kg Filled'),
+    ('gas cylinder small', 'Petronas 14kg - Filled'),
+    ('gas cylinder small', 'Deposit Silinder 12/14kg'),
+    ('gas cylinder large', 'Silinder Bergas 50kg'),
+    ('gas cylinder large', 'Deposit Silinder 50kg'),
+    ('gas cylinder generic', 'Silinder Bergas'),
+    ('extra joss', 'Extra Joss Original'),
+    ('extra joss', 'Extra Joss Manga'),
+    ('extra joss', 'Extra Joss Anggur'),
+    ('masala tea', 'Masala Tea'),
+    ('asam jawa drink', 'Asam Jawa / Soya'),
+    ('asam jawa drink', 'Asam Jawa'),
+    ('nasi lemak', 'NASI LEMAK'),
+    ('nasi lemak', 'Nasi Lemak'),
+    ('jambu batu', 'Jambu Batu'),
+    ('jambu batu', 'Guava'),
+    ('hand wash', 'HAND WASH'),
+    ('hand wash', 'HANDWASH'),
+    ('small packet', 'Small Packet')
   ) AS v(display_name, alias_text)
   JOIN public.item_canonical c ON c.display_name = v.display_name
 ON CONFLICT (alias_text) DO NOTHING;
