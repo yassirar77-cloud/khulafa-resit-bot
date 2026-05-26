@@ -1,0 +1,1220 @@
+          RESTORAN KHULAFA1 (9753) ON 25/May/2026 19:00:06
+==============================================
+SHIFTNO      : 9753 
+DATE         :5/25/2026 7:00:06 PM 
+CASHIER      :Null
+==============================================
+TODAY SALES        :      4,704.10
+TAX                :           0.00
+ROKOK SALES        :           .00
+ROKOK TAX          :           0.00
+NET SALES          :      4,704.10
+TODAY CASH RECEIV  :      4,704.10
+CASH PAYMENT    (-):      741.20
+                    ====================  
+NET AMT            :     3,962.90
+BANK CARD          :      424.60
+QR PAY             :    2,148.50
+                    ====================  
+NET CASH           :     1,389.80
+                    ====================  
+CASH ON HAND       :      1,380.00
+                    ====================
+BALANCE +/-        :     -9.80
+                    --------------------
+DISCOUNT           :     -0.10
+                    ---------------------
+BILLS ON PENDING   :     2249.40
+                    ---------------------
+ 
+TOTAL DELETE RM    :     78.30
+                    ---------------------
+******************************************
+OPENING BALANCE    :        300.00
+ 
+CLOSING BALANCE    :       300.00
+******************************************
+ 
+=========================================
+       1 TIMES ENTRY
+         NOTES  DETAILS
+|======|=============|================|
+| RM   |   NO.       |      TOTAL     |
+|======|=============|================|
+|      |             |                |
+| 100  | 0           |           0.00 |
+|------|-------------|----------------|
+| 50   | 0           |           0.00 |
+|------|-------------|----------------|
+| 20   | 0           |           0.00 |
+|------|-------------|----------------|
+| 10   | 0           |           0.00 |
+|------|-------------|----------------|
+| 5    | 0           |           0.00 |
+|------|-------------|----------------|
+| 1    | 0           |           0.00 |
+|------|-------------|----------------|
+| COIN | 1380        |        1380.00 |
+|------|-------------|----------------|
+|          TOTALCASH |        1380.00 |
+|------|-------------|----------------|
+|          TOTAL SALE|        4704.10 |
+|------|-------------|----------------|
+|           BANK CARD|         424.60 |
+|              QR PAY|        2148.50 |
+|======|=============|================|
+|          BALANCE   |         751.00 |
+|======|=============|================|
+
+
+
+
+
+
+
+
+
+========================================
+           PURCHASE  DETAILS      
+TRNO  DESCRIPTION                AMOUNT
+========================================
+86110  PAY TO CILLI BOH            81.50
+86111  PAY TO NASILEMAK           163.20
+86112  PAY TO GAS                 189.00
+86113  PAY TO AIS                  90.00
+86114  PAY TO SANTAN               26.50
+86115  PAY TO SNS ALI              43.00
+86116  PAY TO SAYUR TOMYAM         64.00
+86117  PAY TO TEPUNG ROTI          84.00
+========================================
+     TOTAL PURCHASE :741.20
+========================================
+
+     TOTAL  PAYOUT :741.20
+
+========================================
+         GROUP WISE ITEM SALES
+SHIFTNO  ITEMNAME                  AMOUNT
+========================================
+9753      MAKANAN                2371.30
+9753      MINUMAN                 514.50
+9753      SOFT DRINKS              59.10
+9753      ROTI                    403.10
+9753      MAMAK GORENG            490.50
+9753      THAI FOOD               145.50
+9753      NAAN                     36.00
+9753      Morning Tosai           137.90
+9753      MINUM(T)                544.00
+========================================
+
+========================================
+     GROUP WISE ITEM SALES  (9753)
+ITEMNAME                 QTY    AMOUNT
+========================================
+AYAM                     163    1383.00
+DAGING                   3      26.00
+IKAN                     20     154.50
+KAMBING                  16     204.50
+Kari Lauk                110     174.50
+NASI BIRIYANI            20     247.00
+NASI LEMAK               64     140.80
+SOTONG                   6      41.00
+BIHUN n KUEY TEOW        9      58.50
+INDOMEE                  3      19.50
+MEE n MAGGIE             37     260.00
+NASI GORENG MAMAK        32     152.50
+FreshJuice Bungkus       6      31.80
+KopiBungkus              12      28.80
+Limau/Lemon Bungkus      10      28.50
+Nescafe/Milo Bungkus     31     104.50
+Packet Drinks Bungkus    8      28.00
+Sirap/Barli Bungkus      5      14.60
+Susu/Horlicks Bungkus    5      18.70
+Teh BUNGKUS              123     289.10
+FRESH JUICE              3      15.00
+KOPI                     11      18.30
+LEMON n ABC              2       8.50
+MILO                     11      33.50
+NESCAFE                  34      98.00
+PACKET DRINKS            2       6.00
+SIRAP                    20      35.40
+SUSU n CHAM              1       1.70
+TEH                      201     298.10
+CHAPPATI                 2       4.60
+IDLI APPAM               15      19.50
+MORNING TOSAI            48     113.80
+NAAN                     8      36.00
+ROTI BAKAR n MURTABAK    9      18.00
+ROTI CANAI               183     335.10
+ROTI SPECIAL             6      27.00
+TOSAI                    10      23.00
+AIR TIN                  8      15.10
+GULA GULA                22      44.00
+AYAM n DAGING            1       6.50
+KUEY TEOW THAI           1       7.00
+MAGGIE G THAI            2      14.00
+NASI GORENG THAI         12      99.50
+SUP THAI                 2      14.00
+TELUR THAI               3       4.50
+========================================
+
+========================================
+       SUB GROUP ITEMWISE  SALES
+========================================
+ITEMNAME                QTY        AMOUNT
+========================================
+          AIR TIN
+========================================
+100 Plus                  1          2.60
+Ais Batu                  1           .50
+Mineral Water Big         3          7.50
+Mineral WATER Small       3          4.50
+========================================
+                 Sub Group Total : 15.10
+========================================
+          AYAM
+Ayam Bawang               5         42.50
+Ayam Goreng               18        90.00
+Ayam Masak Kicap          2         17.00
+Nasi Ayam                 31       232.50
+Nasi Ayam Bawang          21       220.50
+Nasi Ayam Bawang Sayur    29       319.00
+Nasi Ayam Rendang         3         25.50
+Nasi Ayam Rendang Sayur   4         36.00
+Nasi Ayam Sayur           50       400.00
+========================================
+                 Sub Group Total : 1383.00
+========================================
+          AYAM n DAGING
+Ayam Goreng Kunyit        1          6.50
+========================================
+                 Sub Group Total : 6.50
+========================================
+          BIHUN n KUEY TEOW
+Bihun G Telur Mata        2         15.00
+Bihun Goreng Mamak        3         18.00
+Kuey Teow G Mamak         3         18.00
+Kuey Teow G Telur Mata    1          7.50
+========================================
+                 Sub Group Total : 58.50
+========================================
+          CHAPPATI
+CHAPPATHI A               2          4.60
+========================================
+                 Sub Group Total : 4.60
+========================================
+          DAGING
+Daging Mysur              1          7.00
+Nasi Daging               2         19.00
+========================================
+                 Sub Group Total : 26.00
+========================================
+          FRESH JUICE
+Apple Juice               1          5.00
+Fresh Orange              1          5.00
+Tembikai Juice            1          5.00
+========================================
+                 Sub Group Total : 15.00
+========================================
+          FreshJuice Bungkus
+Orange Juice( T )         5         26.50
+Tembikai Juice( T )       1          5.30
+========================================
+                 Sub Group Total : 31.80
+========================================
+          GULA GULA
+Choclate Cake             1          5.00
+Gula Gula                 3          7.00
+Kacang 1.00               3          3.00
+Kacang 1.50               2          3.00
+Kacang 2.00               13        26.00
+========================================
+                 Sub Group Total : 44.00
+========================================
+          IDLI APPAM
+Idly 1pc                  15        19.50
+========================================
+                 Sub Group Total : 19.50
+========================================
+          IKAN
+Ikan  Goreng              2         15.00
+Ikan Masak Kari           3         22.50
+Nasi Ikan Sayur           5         52.50
+Nasi Putih Ikan           4         40.00
+Telur Ikan Ikut Saiz      6         24.50
+========================================
+                 Sub Group Total : 154.50
+========================================
+          INDOMEE
+Indomee Goreng            2         11.00
+Indomee Goreng Double     1          8.50
+========================================
+                 Sub Group Total : 19.50
+========================================
+          KAMBING
+Kambing Mysur             3         31.50
+Nasi Kambing              5         65.00
+Nasi Kambing Sayur        8        108.00
+========================================
+                 Sub Group Total : 204.50
+========================================
+          Kari Lauk
+ Telur Dadar.             4          8.00
+Bendi                     7          7.00
+Chilli Hijau              4          4.00
+Extra Sayur               9          9.00
+Kari Bungkus              4          9.50
+Nasi Putih                14        35.00
+Nasi Sayur                6         21.00
+Papadom                   18        18.00
+Sayur                     1          1.50
+Tamba Nasi                8          8.00
+Telur Masin               13        19.50
+Telur Rebus               20        30.00
+Telur Sambal              2          4.00
+========================================
+                 Sub Group Total : 174.50
+========================================
+          KOPI
+ Kopi O Ais               3          5.70
+Kopi                      2          3.60
+Kopi O                    6          9.00
+========================================
+                 Sub Group Total : 18.30
+========================================
+          KopiBungkus
+Kopi Ais ( T )            5         13.00
+Kopi C Ais ( T )          1          2.60
+Kopi O ( T )              3          6.30
+Kopi O Ais ( T )          3          6.90
+========================================
+                 Sub Group Total : 28.80
+========================================
+          KUEY TEOW THAI
+Kueyteow Goreng Basa      1          7.00
+========================================
+                 Sub Group Total : 7.00
+========================================
+          LEMON n ABC
+Honey Lemon               2          8.50
+========================================
+                 Sub Group Total : 8.50
+========================================
+          Limau/Lemon Bungkus
+Honey Lemon Ais( T )      1          4.50
+Lemon Ais ( T )           1          4.00
+Limau Ais ( T )           8         20.00
+========================================
+                 Sub Group Total : 28.50
+========================================
+          MAGGIE G THAI
+Maggi Goreng Basa         2         14.00
+========================================
+                 Sub Group Total : 14.00
+========================================
+          MEE n MAGGIE
+Maggi G  Ayam Mamak       5         47.50
+Maggi G Pattaya           1          8.00
+Maggi Goreng              9         54.00
+Maggi Goreng Telur Mata   8         60.00
+Maggi Sup                 1          6.00
+Mee C Bihun               1          6.00
+Mee G Ayam Mamak          1         11.00
+Mee Goreng Mamak          10        60.00
+Mee Goreng Telur Mata     1          7.50
+========================================
+                 Sub Group Total : 260.00
+========================================
+          MILO
+Milo                      4         11.20
+Milo  O                   1          2.50
+Milo Ais                  6         19.80
+========================================
+                 Sub Group Total : 33.50
+========================================
+          MORNING TOSAI
+Tosai Bawang A            1          3.40
+TOSAI BIASA A             37        81.40
+Tosai Rawa A              5         16.00
+Tosai Rumah A             3          6.60
+Tosai Telur A             2          6.40
+========================================
+                 Sub Group Total : 113.80
+========================================
+          NAAN
+Naan  Mozzerala Cheese    2         16.00
+Naan Biasa                5         15.00
+Naan Cheese               1          5.00
+========================================
+                 Sub Group Total : 36.00
+========================================
+          NASI BIRIYANI
+Briyani Ayam              3         33.00
+Briyani Ayam Bawang Set   4         66.00
+Briyani Ayam Bawang Telur 1         16.00
+Briyani Ayam Set          5         65.00
+Briyani Kambing Set       2         37.00
+Briyani Separuh           1          3.50
+Briyani Telur             2         16.00
+Briyani Telur Sayur       1          8.50
+Nasi Biriyani Rm          1          2.00
+========================================
+                 Sub Group Total : 247.00
+========================================
+          NASI GORENG MAMAK
+Nasi  Goreng  Veg         1          5.50
+Nasi G Ayam  Mamak        6         57.00
+Nasi G Ayam Telur Mata    1         11.00
+Nasi G Kampung Mamak      5         33.50
+Nasi G Pathaya Mamak      1          7.00
+Nasi Goreng Mamak         2         12.00
+Telur Dadar.              5         10.00
+Telur Goreng              1          1.50
+Telur Mata                10        15.00
+========================================
+                 Sub Group Total : 152.50
+========================================
+          NASI GORENG THAI
+Nasi G Ayam Kunyit        1          9.50
+Nasi G Usa Daging         3         33.00
+Nasi Goreng Biasa         2         12.00
+Nasi Goreng Cina          3         19.50
+Nasi Goreng Daging        2         19.00
+Nasi Goreng Kampung       1          6.50
+========================================
+                 Sub Group Total : 99.50
+========================================
+          NASI LEMAK
+Nasi Lemak Bungkus        64       140.80
+========================================
+                 Sub Group Total : 140.80
+========================================
+          NESCAFE
+Bru Coffee                1          3.20
+Nescafe                   23        64.40
+Nescafe  O Ais            1          2.80
+Nescafe Ais               3         11.40
+Nescafe C                 2          5.60
+Nescafe C Ais             1          3.30
+Nescafe O                 2          5.00
+Nescafe O Besar           1          2.80
+========================================
+                 Sub Group Total : 98.50
+========================================
+          Nescafe/Milo Bungkus
+Milo Ais ( T )            13        45.50
+Nes Cafe Ais( T )         6         21.00
+Nescafe O Ais( T )        7         21.00
+Nescafe O( T )            1          3.00
+NesCafe( T )              4         14.00
+========================================
+                 Sub Group Total : 104.50
+========================================
+          PACKET DRINKS
+Extra Joss Angur          2          6.00
+========================================
+                 Sub Group Total : 6.00
+========================================
+          Packet Drinks Bungkus
+Extra Joss Angur( T )     4         14.00
+Extra Joss Mangga( T )    2          7.00
+Extra Joss Ori( T )       2          7.00
+========================================
+                 Sub Group Total : 28.00
+========================================
+          ROTI BAKAR n MURTABAK
+Roti Bakar                9         18.00
+========================================
+                 Sub Group Total : 18.00
+========================================
+          ROTI CANAI
+Roti Boom                 5         12.50
+Roti Canai                134      201.54
+Roti Khawin               3         12.90
+Roti Pisang               1          3.20
+Roti Planta               3          8.40
+Roti Telur                32        80.00
+Roti Telur Bawang         4         13.20
+Roti Telur Bawang Cilli   1          3.50
+========================================
+                 Sub Group Total : 335.24
+========================================
+          ROTI SPECIAL
+Roti Sardin               6         27.00
+========================================
+                 Sub Group Total : 27.00
+========================================
+          SIRAP
+Barli  Panas              3          6.00
+Halia Panas               4          5.20
+Limau  Ais                7         12.60
+Limau  Panas              2          3.60
+Sirap Ais                 4          8.00
+========================================
+                 Sub Group Total : 35.40
+========================================
+          Sirap/Barli Bungkus
+Barli ( T )               1          2.80
+Lychee Ais (t)            1          4.30
+Sirap Ais ( T )           3          7.50
+========================================
+                 Sub Group Total : 14.60
+========================================
+          SOTONG
+Nasi Sotong Sayur         1         12.00
+Sotong  Rm                5         29.00
+========================================
+                 Sub Group Total : 41.00
+========================================
+          SUP THAI
+BIHUN SUP                 2         14.00
+========================================
+                 Sub Group Total : 14.00
+========================================
+          SUSU n CHAM
+Cham  Tarik               1          1.70
+========================================
+                 Sub Group Total : 1.70
+========================================
+          Susu/Horlicks Bungkus
+Horlicks ( T )            1          3.50
+Horlicks Ais ( T )        4         15.20
+========================================
+                 Sub Group Total : 18.70
+========================================
+          TEH
+ Teh O Limau Ais          6         13.80
+Air Panas                 2           .60
+Air Suam                  14         4.20
+Ais Kosong                34        10.20
+Tea Masala                2          8.00
+Teh                       54        91.80
+Teh  Halia                7         17.50
+Teh  O                    28        42.00
+Teh Ais                   9         19.80
+Teh Besar                 1          2.20
+Teh C                     7         11.90
+Teh C Halia               1          2.50
+Teh O Ais                 21        39.90
+Teh O Besar               2          3.60
+Teh O Halia               1          1.70
+Teh O Limau               4          7.60
+Telur 1/2 Masak           8         20.80
+========================================
+                 Sub Group Total : 298.10
+========================================
+          Teh BUNGKUS
+Ais Kosong ( T )          8          4.00
+Teh  O Halia ( T )        2          5.00
+Teh ( T )                 21        54.60
+Teh Ais ( T )             34        88.40
+Teh Halia ( T )           1          2.80
+Teh O ( T )               3          6.30
+Teh O Ais ( T )           41        94.30
+Teh O Limau ( T )         1          2.50
+Teh O Limau Ais ( T )     12        31.20
+========================================
+                 Sub Group Total : 289.10
+========================================
+          TELUR THAI
+Telur  Mata               3          4.50
+========================================
+                 Sub Group Total : 4.50
+========================================
+          TOSAI
+Thosai Biasa              8         17.60
+Thosai Telur              1          3.20
+Tosai Ruma                1          2.20
+========================================
+            ITEMWISE  SALES
+========================================
+ITEMNAME              QTY        AMOUNT
+========================================
+          
+ Kopi O Ais               3          5.70
+ Teh O Limau Ais          6         13.80
+ Telur Dadar.             4          8.00
+100 Plus                  1          2.60
+Air Panas                 2           .60
+Air Suam                  14         4.20
+Ais Batu                  1           .50
+Ais Kosong                34        10.20
+Ais Kosong ( T )          8          4.00
+Apple Juice               1          5.00
+Ayam Bawang               5         42.50
+Ayam Goreng               18        90.00
+Ayam Goreng Kunyit        1          6.50
+Ayam Masak Kicap          2         17.00
+Barli  Panas              3          6.00
+Barli ( T )               1          2.80
+Bendi                     7          7.00
+Bihun G Telur Mata        2         15.00
+Bihun Goreng Mamak        3         18.00
+BIHUN SUP                 2         14.00
+Briyani Ayam              3         33.00
+Briyani Ayam Bawang Set   4         66.00
+Briyani Ayam Bawang Telur 1         16.00
+Briyani Ayam Set          5         65.00
+Briyani Kambing Set       2         37.00
+Briyani Separuh           1          3.50
+Briyani Telur             2         16.00
+Briyani Telur Sayur       1          8.50
+Bru Coffee                1          3.20
+Cham  Tarik               1          1.70
+CHAPPATHI A               2          4.60
+Chilli Hijau              4          4.00
+Choclate Cake             1          5.00
+Daging Mysur              1          7.00
+DISCOUNT                 -1         -.10
+Extra Joss Angur          2          6.00
+Extra Joss Angur( T )     4         14.00
+Extra Joss Mangga( T )    2          7.00
+Extra Joss Ori( T )       2          7.00
+Extra Sayur               9          9.00
+Fresh Orange              1          5.00
+Gula Gula                 3          7.00
+Halia Panas               4          5.20
+Honey Lemon               2          8.50
+Honey Lemon Ais( T )      1          4.50
+Horlicks ( T )            1          3.50
+Horlicks Ais ( T )        4         15.20
+Idly 1pc                  15        19.50
+Ikan  Goreng              2         15.00
+Ikan Masak Kari           3         22.50
+Indomee Goreng            2         11.00
+Indomee Goreng Double     1          8.50
+Kacang 1.00               3          3.00
+Kacang 1.50               2          3.00
+Kacang 2.00               13        26.00
+Kambing Mysur             3         31.50
+Kari Bungkus              4          9.50
+Kopi                      2          3.60
+Kopi Ais ( T )            5         13.00
+Kopi C Ais ( T )          1          2.60
+Kopi O                    6          9.00
+Kopi O ( T )              3          6.30
+Kopi O Ais ( T )          3          6.90
+Kuey Teow G Mamak         3         18.00
+Kuey Teow G Telur Mata    1          7.50
+Kueyteow Goreng Basa      1          7.00
+Lemon Ais ( T )           1          4.00
+Limau  Ais                7         12.60
+Limau  Panas              2          3.60
+Limau Ais ( T )           8         20.00
+Lychee Ais (t)            1          4.30
+Maggi G  Ayam Mamak       5         47.50
+Maggi G Pattaya           1          8.00
+Maggi Goreng              9         54.00
+Maggi Goreng Basa         2         14.00
+Maggi Goreng Telur Mata   8         60.00
+Maggi Sup                 1          6.00
+Mee C Bihun               1          6.00
+Mee G Ayam Mamak          1         11.00
+Mee Goreng Mamak          10        60.00
+Mee Goreng Telur Mata     1          7.50
+Milo                      4         11.20
+Milo  O                   1          2.50
+Milo Ais                  6         19.80
+Milo Ais ( T )            13        45.50
+Mineral Water Big         3          7.50
+Mineral WATER Small       3          4.50
+Naan  Mozzerala Cheese    2         16.00
+Naan Biasa                5         15.00
+Naan Cheese               1          5.00
+Nasi  Goreng  Veg         1          5.50
+Nasi Ayam                 31       232.50
+Nasi Ayam Bawang          21       220.50
+Nasi Ayam Bawang Sayur    29       319.00
+Nasi Ayam Rendang         3         25.50
+Nasi Ayam Rendang Sayur   4         36.00
+Nasi Ayam Sayur           50       400.00
+Nasi Biriyani Rm          1          2.00
+Nasi Daging               2         19.00
+Nasi G Ayam  Mamak        6         57.00
+Nasi G Ayam Kunyit        1          9.50
+Nasi G Ayam Telur Mata    1         11.00
+Nasi G Kampung Mamak      5         33.50
+Nasi G Pathaya Mamak      1          7.00
+Nasi G Usa Daging         3         33.00
+Nasi Goreng Biasa         2         12.00
+Nasi Goreng Cina          3         19.50
+Nasi Goreng Daging        2         19.00
+Nasi Goreng Kampung       1          6.50
+Nasi Goreng Mamak         2         12.00
+Nasi Ikan Sayur           5         52.50
+Nasi Kambing              5         65.00
+Nasi Kambing Sayur        8        108.00
+Nasi Lemak Bungkus        64       140.80
+Nasi Putih                14        35.00
+Nasi Putih Ikan           4         40.00
+Nasi Sayur                6         21.00
+Nasi Sotong Sayur         1         12.00
+Nes Cafe Ais( T )         6         21.00
+Nescafe                   23        64.40
+Nescafe  O Ais            1          2.80
+Nescafe Ais               3         10.90
+Nescafe C                 2          5.60
+Nescafe C Ais             1          3.30
+Nescafe O                 2          5.00
+Nescafe O Ais( T )        7         21.00
+Nescafe O Besar           1          2.80
+Nescafe O( T )            1          3.00
+NesCafe( T )              4         14.00
+Orange Juice( T )         5         26.50
+Papadom                   18        18.00
+Roti Bakar                9         18.00
+Roti Boom                 5         12.50
+Roti Canai                134      201.40
+Roti Khawin               3         12.90
+Roti Pisang               1          3.20
+Roti Planta               3          8.40
+Roti Sardin               6         27.00
+Roti Telur                32        80.00
+Roti Telur Bawang         4         13.20
+Roti Telur Bawang Cilli   1          3.50
+Sayur                     1          1.50
+Sirap Ais                 4          8.00
+Sirap Ais ( T )           3          7.50
+Sotong  Rm                5         29.00
+Tamba Nasi                8          8.00
+Tea Masala                2          8.00
+Teh                       54        91.80
+Teh  Halia                7         17.50
+Teh  O                    28        42.00
+Teh  O Halia ( T )        2          5.00
+Teh ( T )                 21        54.60
+Teh Ais                   9         19.80
+Teh Ais ( T )             34        88.40
+Teh Besar                 1          2.20
+Teh C                     7         11.90
+Teh C Halia               1          2.50
+Teh Halia ( T )           1          2.80
+Teh O ( T )               3          6.30
+Teh O Ais                 21        39.90
+Teh O Ais ( T )           41        94.30
+Teh O Besar               2          3.60
+Teh O Halia               1          1.70
+Teh O Limau               4          7.60
+Teh O Limau ( T )         1          2.50
+Teh O Limau Ais ( T )     12        31.20
+Telur  Mata               3          4.50
+Telur 1/2 Masak           8         20.80
+Telur Dadar.              5         10.00
+Telur Goreng              1          1.50
+Telur Ikan Ikut Saiz      6         24.50
+Telur Masin               13        19.50
+Telur Mata                10        15.00
+Telur Rebus               20        30.00
+Telur Sambal              2          4.00
+Tembikai Juice            1          5.00
+Tembikai Juice( T )       1          5.30
+Thosai Biasa              8         17.60
+Thosai Telur              1          3.20
+Tosai Bawang A            1          3.40
+TOSAI BIASA A             37        81.40
+Tosai Rawa A              5         16.00
+Tosai Ruma                1          2.20
+Tosai Rumah A             3          6.60
+Tosai Telur A             2          6.40
+========================================
+     TOTAL                       :4701.80
+=============================================
+
+
+========================================
+            MACHINE  SALES
+========================================
+SHIFTNO DAYNO  MACHINEID       AMOUNT
+========================================
+ 9753        4557      1          646.00
+ 9753        4557      2         1422.00
+ 9753        4557      3         2230.00
+ 9753        4557      5          166.00
+ 9753        4557      6          238.00
+========================================
+
+========================================
+        STAFF WISE SALES REPORT
+SHIFTNO  STAFFNAME              AMOUNT
+======================================
+ 9753    ABDULLAH                 26.70
+ 9753    ASHIF                     6.50
+ 9753    AZEES                    14.50
+ 9753    DAY CASHIER             644.10
+ 9753    DHABUROS                  1.80
+ 9753    HIRON                    16.00
+ 9753    IMRAN                     7.50
+ 9753    KANAGARAJ               518.20
+ 9753    KITCHEN                 960.00
+ 9753    N MOHAMED              1142.80
+ 9753    NAJUMUDEEN                8.50
+ 9753    NIGHT CASHIER            13.40
+ 9753    RAHMAN                   14.90
+ 9753    RAHUMAN KITCHEN           8.80
+ 9753    RAJA                    945.20
+ 9753    S SATHISH               372.90
+========================================
+
+
+========================================
+           TABLE WISE  SALES
+========================================
+SHIFTNO   DAYNO  TBCODE       AMOUNT
+========================================
+ 9753        4557     1             73.00
+ 9753        4557     10           157.00
+ 9753        4557     11            35.00
+ 9753        4557     12           198.00
+ 9753        4557     13           107.00
+ 9753        4557     14            58.00
+ 9753        4557     15            24.00
+ 9753        4557     16            96.00
+ 9753        4557     17            49.00
+ 9753        4557     18           158.00
+ 9753        4557     19            29.00
+ 9753        4557     2             32.00
+ 9753        4557     20           115.00
+ 9753        4557     21            90.00
+ 9753        4557     23            68.00
+ 9753        4557     24            16.00
+ 9753        4557     25            22.00
+ 9753        4557     26            32.00
+ 9753        4557     27            39.00
+ 9753        4557     28            49.00
+ 9753        4557     29            98.00
+ 9753        4557     3             27.00
+ 9753        4557     30           102.00
+ 9753        4557     31            70.00
+ 9753        4557     32            81.00
+ 9753        4557     33           107.00
+ 9753        4557     34            79.00
+ 9753        4557     35           113.00
+ 9753        4557     36            37.00
+ 9753        4557     37           103.00
+ 9753        4557     38            17.00
+ 9753        4557     39           122.00
+ 9753        4557     4            105.00
+ 9753        4557     40            14.00
+ 9753        4557     44             3.00
+ 9753        4557     5             19.00
+ 9753        4557     6             66.00
+ 9753        4557     7            162.00
+ 9753        4557     75            45.00
+ 9753        4557     8             77.00
+ 9753        4557     9            134.00
+ 9753        4557     CA            13.00
+ 9753        4557     T100         936.00
+ 9753        4557     TA1          522.00
+ 9753        4557     TA2           44.00
+ 9753        4557     TA3           41.00
+ 9753        4557     TA4           52.00
+ 9753        4557     TA5           49.00
+ 9753        4557     TA6           16.00
+========================================
+     TOTAL                       :
+=============================================
+
+          RESTORAN KHULAFA
+    STOCK ON 5/25/2026 7:00:06 PM
+ ITEM NAME          STOCK    AMOUNT 
+====================================
+Minaral Water Small    -1245  -1867.50
+Mineral Water Big      -3191  -7977.50
+Coke                   -533   -1332.50
+100 Plus               -1291  -3227.50
+Soya                   -211    -527.50
+Root Bear Can          0          0.00
+===================================
+TOTAL STOCK :-14932.50
+===================================
+
+
+
+
+
+V 
+ITEMNAME                   AMOUNT
+========================================
+ HOUR 08:00 TO 08:59
+========================================
+MAKANAN                  83.60
+MAMAK GORENG             32.00
+MINUM(T)                 29.20
+MINUMAN                  83.20
+Morning Tosai            43.80
+ROTI                    104.40
+SOFT DRINKS              15.10
+ TOTAL AMT :391.30
+========================================
+ HOUR 09:00 TO 09:59
+========================================
+MAKANAN                  90.20
+MAMAK GORENG             26.50
+MINUM(T)                 51.60
+MINUMAN                  89.70
+Morning Tosai            57.90
+ROTI                     82.20
+SOFT DRINKS               5.00
+ TOTAL AMT :403.10
+========================================
+ HOUR 10:00 TO 10:59
+========================================
+MAKANAN                 135.00
+MAMAK GORENG             45.00
+MINUM(T)                 46.60
+MINUMAN                  39.90
+Morning Tosai            11.20
+ROTI                     38.00
+SOFT DRINKS               6.50
+ TOTAL AMT :322.20
+========================================
+ HOUR 11:00 TO 11:59
+========================================
+MAKANAN                 167.00
+MAMAK GORENG             21.00
+MINUM(T)                 21.80
+MINUMAN                  27.90
+ROTI                     16.70
+ TOTAL AMT :254.40
+========================================
+ HOUR 12:00 TO 12:59
+========================================
+MAKANAN                 421.00
+MAMAK GORENG            115.50
+MINUM(T)                 77.80
+MINUMAN                  24.10
+SOFT DRINKS               1.00
+ TOTAL AMT :639.40
+========================================
+ HOUR 13:00 TO 13:59
+========================================
+MAKANAN                 455.00
+MAMAK GORENG             70.50
+MINUM(T)                 58.90
+MINUMAN                  37.00
+SOFT DRINKS               4.50
+ TOTAL AMT :625.90
+========================================
+ HOUR 14:00 TO 14:59
+========================================
+MAKANAN                 318.50
+MAMAK GORENG             37.00
+MINUM(T)                 31.20
+MINUMAN                  22.40
+SOFT DRINKS               7.50
+ TOTAL AMT :416.60
+========================================
+ HOUR 15:00 TO 15:59
+========================================
+MAKANAN                  96.00
+MAMAK GORENG             42.50
+MINUM(T)                 28.10
+MINUMAN                  22.40
+ROTI                     25.30
+ TOTAL AMT :214.30
+========================================
+ HOUR 16:00 TO 16:59
+========================================
+MAKANAN                 206.50
+MAMAK GORENG             30.00
+MINUM(T)                 27.00
+MINUMAN                  24.00
+Morning Tosai             2.20
+ROTI                      6.30
+SOFT DRINKS               2.00
+THAI FOOD                17.00
+ TOTAL AMT :315.00
+========================================
+ HOUR 17:00 TO 17:59
+========================================
+MAKANAN                 157.00
+MAMAK GORENG             14.00
+MINUM(T)                 69.40
+MINUMAN                  55.60
+NAAN                     31.00
+ROTI                     39.10
+SOFT DRINKS               7.00
+THAI FOOD                37.00
+ TOTAL AMT :410.10
+========================================
+ HOUR 18:00 TO 18:59
+========================================
+MAKANAN                 186.50
+MAMAK GORENG             47.50
+MINUM(T)                 55.60
+MINUMAN                  26.80
+NAAN                      5.00
+ROTI                     30.30
+SOFT DRINKS              10.50
+THAI FOOD                91.50
+ TOTAL AMT :453.70
+========================================
+ NET   AMT :4446.00
+========================================
+ITEMNAME                   AMOUNT
+========================================
+ HOUR 08:00 TO 08:59
+========================================
+MAKANAN                  83.60
+MAMAK GORENG             32.00
+MINUM(T)                 29.20
+MINUMAN                  83.20
+Morning Tosai            43.80
+ROTI                    104.40
+SOFT DRINKS              15.10
+ TOTAL AMT :391.30
+========================================
+ HOUR 07:00 TO 07:59
+========================================
+MAKANAN                  46.20
+MAMAK GORENG              7.50
+MINUM(T)                 44.70
+MINUMAN                  48.70
+Morning Tosai            18.40
+ROTI                     50.80
+ TOTAL AMT :216.30
+========================================
+ HOUR 06:00 TO 06:59
+========================================
+MAKANAN                   8.80
+MAMAK GORENG              1.50
+MINUM(T)                  2.10
+MINUMAN                  12.80
+Morning Tosai             4.40
+ROTI                     10.00
+ TOTAL AMT :39.60
+========================================
+ NET   AMT :647.20
+========================================
+========================================
+             MOBILE CASH      
+TRNO    DATETIME                AMOUNT
+========================================
+3344920 5/25/2026 7:04:44 AM         4.70
+3344907 5/25/2026 7:09:26 AM         3.90
+3344916 5/25/2026 7:18:01 AM         5.30
+3344926 5/25/2026 7:20:22 AM         3.90
+3344928 5/25/2026 7:23:59 AM         4.70
+3344940 5/25/2026 7:37:48 AM         3.00
+3344913 5/25/2026 7:40:23 AM         3.90
+3344952 5/25/2026 7:41:41 AM         2.60
+3344937 5/25/2026 7:45:33 AM        17.20
+3344908 5/25/2026 7:45:51 AM         1.70
+3344946 5/25/2026 7:51:12 AM         3.70
+3344961 5/25/2026 7:56:09 AM        22.00
+3344948 5/25/2026 7:59:55 AM        20.00
+3344954 5/25/2026 8:00:22 AM         4.70
+3344957 5/25/2026 8:00:38 AM         4.30
+3344945 5/25/2026 8:08:18 AM         4.80
+3344970 5/25/2026 8:08:55 AM         6.60
+3344972 5/25/2026 8:11:40 AM         6.50
+3344963 5/25/2026 8:15:48 AM         7.90
+3344965 5/25/2026 8:16:08 AM         5.30
+3344977 5/25/2026 8:16:44 AM        12.10
+3344973 5/25/2026 8:18:35 AM         8.30
+3344981 5/25/2026 8:20:40 AM         3.00
+3344985 5/25/2026 8:30:49 AM         5.40
+3344975 5/25/2026 8:34:46 AM         4.70
+3344964 5/25/2026 8:35:55 AM        17.30
+3344987 5/25/2026 8:39:07 AM        13.00
+3344976 5/25/2026 8:45:43 AM         7.50
+3344984 5/25/2026 8:49:48 AM        13.60
+3344968 5/25/2026 8:51:02 AM        11.10
+3344979 5/25/2026 8:54:36 AM         4.50
+3344995 5/25/2026 8:56:11 AM        15.70
+3344999 5/25/2026 9:06:03 AM         4.30
+3344997 5/25/2026 9:11:22 AM        35.50
+3345001 5/25/2026 9:12:26 AM         6.50
+3344998 5/25/2026 9:12:54 AM        10.80
+3345009 5/25/2026 9:14:13 AM        11.00
+3345013 5/25/2026 9:15:35 AM         2.60
+3345002 5/25/2026 9:18:32 AM         6.60
+3345006 5/25/2026 9:20:34 AM        18.70
+3345005 5/25/2026 9:21:34 AM         6.50
+3345012 5/25/2026 9:22:44 AM         4.10
+3345025 5/25/2026 9:37:17 AM        25.80
+3344992 5/25/2026 9:39:36 AM         6.50
+3345021 5/25/2026 9:47:05 AM        27.50
+3345045 5/25/2026 9:51:15 AM         6.90
+3345034 5/25/2026 9:55:18 AM        10.70
+3345022 5/25/2026 9:55:44 AM        15.00
+3345047 5/25/2026 9:57:03 AM        17.80
+3345017 5/25/2026 9:58:04 AM        41.10
+3345042 5/25/2026 9:58:21 AM         7.20
+3345051 5/25/2026 9:58:55 AM         3.00
+3345052 5/25/2026 9:59:40 AM         3.80
+3345030 5/25/2026 10:00:25 AM         3.20
+3345024 5/25/2026 10:05:43 AM        33.80
+3345041 5/25/2026 10:11:19 AM         3.20
+3345057 5/25/2026 10:19:02 AM         3.50
+3345063 5/25/2026 10:24:42 AM        29.80
+3345060 5/25/2026 10:25:23 AM         4.80
+3345056 5/25/2026 10:29:17 AM         9.20
+3345055 5/25/2026 10:37:43 AM         5.80
+3345082 5/25/2026 10:44:42 AM        20.00
+3345070 5/25/2026 10:48:38 AM         6.80
+3345074 5/25/2026 10:51:23 AM         4.30
+3345058 5/25/2026 11:00:00 AM         1.50
+3345088 5/25/2026 11:07:55 AM        18.60
+3345103 5/25/2026 11:29:26 AM         4.70
+3345102 5/25/2026 11:33:19 AM        11.00
+3345108 5/25/2026 11:39:54 AM        37.80
+3345124 5/25/2026 12:05:45 PM        14.50
+3345133 5/25/2026 12:11:10 PM        16.00
+3345128 5/25/2026 12:12:47 PM         8.00
+3345120 5/25/2026 12:13:55 PM        18.80
+3345134 5/25/2026 12:14:56 PM        14.00
+3345138 5/25/2026 12:16:15 PM         8.00
+3345144 5/25/2026 12:20:12 PM         2.60
+3345141 5/25/2026 12:21:15 PM         9.50
+3345155 5/25/2026 12:26:07 PM        15.00
+3345157 5/25/2026 12:27:49 PM        11.00
+3345142 5/25/2026 12:34:51 PM        21.60
+3345156 5/25/2026 12:37:37 PM        11.10
+3345153 5/25/2026 12:39:35 PM        12.50
+3345150 5/25/2026 12:41:33 PM        11.50
+3345154 5/25/2026 12:42:25 PM        10.80
+3345087 5/25/2026 12:54:26 PM        10.60
+3345202 5/25/2026 12:54:58 PM        65.50
+3345181 5/25/2026 1:00:17 PM        10.30
+3345201 5/25/2026 1:00:55 PM        17.10
+3345185 5/25/2026 1:01:08 PM        11.30
+3345173 5/25/2026 1:01:33 PM        11.70
+3345213 5/25/2026 1:02:36 PM        11.50
+3345221 5/25/2026 1:03:48 PM         8.00
+3345223 5/25/2026 1:05:54 PM        10.30
+3345208 5/25/2026 1:08:19 PM        15.00
+3345205 5/25/2026 1:09:15 PM        12.80
+3345194 5/25/2026 1:11:12 PM         6.50
+3345092 5/25/2026 1:12:39 PM        13.40
+3345190 5/25/2026 1:13:42 PM        24.70
+3345231 5/25/2026 1:14:01 PM         4.50
+3345232 5/25/2026 1:14:11 PM         8.10
+3345233 5/25/2026 1:14:59 PM        15.30
+3345235 5/25/2026 1:15:16 PM         9.80
+3345236 5/25/2026 1:15:32 PM         9.90
+3345170 5/25/2026 1:17:29 PM        24.00
+3345246 5/25/2026 1:21:20 PM         3.50
+3345177 5/25/2026 1:27:29 PM        33.40
+3345167 5/25/2026 1:29:13 PM        10.30
+3345260 5/25/2026 1:29:42 PM        14.00
+3345247 5/25/2026 1:34:38 PM        49.40
+3345241 5/25/2026 1:35:11 PM        12.80
+3345270 5/25/2026 1:35:35 PM        12.00
+3345230 5/25/2026 1:37:01 PM        13.60
+3345263 5/25/2026 1:42:11 PM        15.30
+3345250 5/25/2026 1:47:16 PM         9.80
+3345267 5/25/2026 1:50:07 PM        30.90
+3345276 5/25/2026 1:50:59 PM         7.80
+3345255 5/25/2026 1:51:22 PM        30.40
+3345274 5/25/2026 1:51:55 PM        17.30
+3345273 5/25/2026 1:52:25 PM        27.40
+3345227 5/25/2026 1:53:23 PM        14.80
+3345280 5/25/2026 2:02:08 PM         7.80
+3345281 5/25/2026 2:12:02 PM        41.70
+3345291 5/25/2026 2:13:04 PM         9.00
+3345292 5/25/2026 2:13:45 PM         2.30
+3345266 5/25/2026 2:17:16 PM         9.00
+3345289 5/25/2026 2:18:53 PM        20.50
+3345282 5/25/2026 2:38:56 PM        12.30
+3345312 5/25/2026 2:42:12 PM         9.00
+3345296 5/25/2026 2:43:35 PM        27.60
+3345261 5/25/2026 2:46:44 PM        11.00
+3345318 5/25/2026 2:48:35 PM        24.50
+3345311 5/25/2026 2:50:01 PM        12.80
+3345323 5/25/2026 2:55:26 PM        17.00
+3345320 5/25/2026 3:01:54 PM        15.30
+3345307 5/25/2026 3:04:34 PM        16.10
+3345333 5/25/2026 3:14:13 PM         2.30
+3345333 5/25/2026 3:14:30 PM        13.60
+3345302 5/25/2026 3:21:34 PM        10.30
+3345341 5/25/2026 3:31:51 PM        13.10
+3345342 5/25/2026 3:32:32 PM        23.50
+3345327 5/25/2026 3:33:21 PM        61.40
+3345325 5/25/2026 3:38:33 PM        11.10
+3345346 5/25/2026 3:40:01 PM         9.50
+3345310 5/25/2026 3:43:39 PM        28.30
+3345284 5/25/2026 3:44:10 PM        16.30
+3345332 5/25/2026 3:47:36 PM        10.80
+3345351 5/25/2026 3:50:30 PM         3.50
+3345359 5/25/2026 4:07:43 PM        14.50
+3345355 5/25/2026 4:14:52 PM        13.30
+3345373 5/25/2026 4:29:40 PM        43.20
+3345330 5/25/2026 4:31:18 PM        30.50
+3345375 5/25/2026 4:31:41 PM         1.50
+3345379 5/25/2026 4:40:46 PM        20.50
+3345382 5/25/2026 4:44:34 PM         7.50
+3345372 5/25/2026 4:45:20 PM        10.30
+3345387 5/25/2026 5:01:29 PM        28.20
+3345353 5/25/2026 5:04:35 PM        10.00
+3345383 5/25/2026 5:09:46 PM        24.50
+3345392 5/25/2026 5:13:05 PM        19.00
+3345380 5/25/2026 5:16:39 PM         8.90
+3345393 5/25/2026 5:20:40 PM         3.20
+3345402 5/25/2026 5:25:13 PM         5.20
+3345390 5/25/2026 5:29:09 PM        10.00
+3345400 5/25/2026 5:35:37 PM        10.00
+3345430 5/25/2026 5:47:54 PM        18.50
+3345440 5/25/2026 5:55:40 PM        13.50
+3345408 5/25/2026 5:56:18 PM        11.60
+3345424 5/25/2026 5:57:18 PM        19.70
+3345407 5/25/2026 5:57:42 PM         4.30
+3345414 5/25/2026 5:59:27 PM        45.90
+3345447 5/25/2026 6:02:34 PM        16.60
+3345409 5/25/2026 6:04:49 PM         6.10
+3345455 5/25/2026 6:08:57 PM         8.50
+3345413 5/25/2026 6:12:28 PM         3.20
+3345467 5/25/2026 6:15:37 PM        19.50
+3345459 5/25/2026 6:17:21 PM        13.80
+3345446 5/25/2026 6:18:13 PM        15.30
+3345477 5/25/2026 6:24:36 PM         6.50
+3345420 5/25/2026 6:25:17 PM         1.50
+3345437 5/25/2026 6:28:22 PM         8.70
+3345489 5/25/2026 6:33:21 PM        13.60
+3345492 5/25/2026 6:39:04 PM         8.60
+3345495 5/25/2026 6:43:50 PM         2.60
+3345385 5/25/2026 6:44:52 PM        12.10
+3345476 5/25/2026 6:46:18 PM        12.20
+3345501 5/25/2026 6:48:31 PM         6.30
+3345503 5/25/2026 6:50:32 PM        24.00
+3345506 5/25/2026 6:52:25 PM         5.20
+3345508 5/25/2026 6:57:48 PM        53.70
+3345466 5/25/2026 6:58:12 PM        11.00
+========================================
+     TOTAL :2573.10
+========================================
+
+
+
+
+====  DELETED ITEM BY ADMIN    ====
+ITEMNAME       QTY  RATE   TOTALAMT
+
+--------------------------------------
+Nescafe                 1    2.80    2.80
+          RAJA     09:12:01  WRONG ORDER BY WAITER
+ Telur Mata             1    1.50    1.50
+          RAJA     12:20:58  WRONG ORDER BY WAITER
+Telur Sambal            1    2.00    2.00
+       KITCHEN     12:30:21  
+Nasi Ayam Sayur         1    8.00    8.00
+       KITCHEN     13:22:39  
+Briyani Ayam Bawan      1   16.00   16.00
+       KITCHEN     13:26:27  
+Telur Ikan Ikut Sa      1    5.00    5.00
+       KITCHEN     13:26:27  
+Nasi Ayam Sayur         1    8.00    8.00
+       KITCHEN     13:29:15  
+Telur Ikan Ikut Sa      1    3.00    3.00
+       KITCHEN     14:28:44  
+Nasi Ayam Sayur         1    8.00    8.00
+       KITCHEN     15:30:45  
+Ayam Goreng             1    5.00    5.00
+       KITCHEN     17:57:25  
+Nasi Kambing            1   13.00   13.00
+       KITCHEN     18:34:11  
+Naan Cheese Garlic      1    6.00    6.00
+          RAJA     18:49:44  WRONG ORDER BY WAITER
+
+                END          
+-----------------------------------------
