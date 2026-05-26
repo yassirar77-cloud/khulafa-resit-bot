@@ -215,7 +215,8 @@ def parse_money(value) -> float | None:
         return None
     s = re.sub(r"(?i)rm", "", s)
     s = s.replace(",", "").replace(" ", "")
-    m = re.search(r"-?\d+(?:\.\d+)?", s)
+    # Accept leading-dot decimals like ".50" (POS prints small amounts that way).
+    m = re.search(r"-?(?:\d+(?:\.\d+)?|\.\d+)", s)
     if not m:
         return None
     try:
@@ -310,6 +311,19 @@ _SUMMARY_FIELD_BY_LABEL = {
     "TAX": "tax",
     "ROKOK TAX": "rokok_tax",
     "DISCOUNT": "discount",
+}
+
+# CASHDRAWER OPEN rows whose last column is one of these are transaction-driven
+# auto-opens, not manual drawer opens — drop them (PR #36).
+_CASHDRAWER_NONSTAFF = frozenset({"SALE", "SPLIT"})
+
+# Flat cash summary labels -> sales_payments aggregate method names (PR #36).
+_PAYMENT_LABEL_TO_METHOD = {
+    "QR PAY": "qr_pay_total",
+    "NET CASH": "cash",
+    "CASH ON HAND": "cash_on_hand",
+    "OPENING BALANCE": "opening_balance",
+    "CLOSING BALANCE": "closing_balance",
 }
 
 
@@ -461,7 +475,13 @@ def _parse_deleted(rows):
 
 def _parse_cashdrawer(lines, banner_idx):
     """CASHDRAWER OPEN log -> [{label, amount}]: the open count plus one entry
-    per drawer-open event (``<datetime> <operator>``, no amount)."""
+    per *manual* drawer-open (``{n} {datetime} {staff_name}``).
+
+    Transaction-triggered auto-opens (``{n} {datetime} SALE`` / ``... SPLIT``)
+    are NOT drawer events — they are emitted per cash/split sale and were
+    flooding sales_cashdrawer (PR #36). They are dropped here; the QR side of
+    those transactions is captured from MOBILE CASH into sales_payments instead.
+    """
     out = []
     # "TOTAL TIMES OPEN :2" sits between the banner and the first ruler.
     for j in range(banner_idx, min(banner_idx + 5, len(lines))):
@@ -471,30 +491,62 @@ def _parse_cashdrawer(lines, banner_idx):
             break
     for row in _section_rows(lines, banner_idx):
         cols = _columns(row)
-        if len(cols) >= 2:
-            out.append({"label": " ".join(cols[1:]).strip(), "amount": None})
+        if len(cols) < 3:
+            continue
+        if cols[-1].strip().upper() in _CASHDRAWER_NONSTAFF:
+            continue  # transaction auto-open, not a manual drawer open
+        out.append({"label": " ".join(cols[1:]).strip(), "amount": None})
     return out
 
 
-def _parse_tender_grid(lines):
-    """Pull the tender split (CASH / QR PAY) out of the denomination pipe grid:
-    rows like ``|   TOTALCASH | 1010.00 |`` and ``|     QR PAY| 2907.40 |``."""
-    found: dict = {}
+# A MOBILE CASH row: TRNO, a M/D/YYYY h:mm:ss AM/PM datetime, then the amount.
+# Matched by regex (not 2+-space columns) because the TRNO->datetime gap is a
+# single space when the TRNO is wide (e.g. SEK20's 7-digit ids).
+_MOBILE_ROW_RE = re.compile(
+    r"^(\d+)\s+(\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}:\d{2}\s*[AaPp][Mm])\s+(-?[\d,]*\.\d{2})\s*$"
+)
+
+
+def _parse_mobile_cash(rows):
+    """MOBILE CASH (QR Pay transactions) -> per-transaction payment rows.
+
+    ``TRNO  DATETIME  AMOUNT`` -> {method: 'qr_pay', transaction_id, transaction_at,
+    amount}. These previously had nowhere to go; they belong in sales_payments,
+    not sales_cashdrawer.
+    """
+    out = []
+    for row in rows:
+        m = _MOBILE_ROW_RE.match(row.strip())
+        if not m:
+            continue
+        out.append({
+            "method": "qr_pay",
+            "amount": parse_money(m.group(3)),
+            "transaction_id": m.group(1),
+            "transaction_at": parse_datetime(m.group(2)),
+        })
+    return out
+
+
+def _parse_payment_summary(lines):
+    """Flat ``LABEL : value`` cash lines -> aggregate payment rows (first per
+    method). Captures the tender/balance totals the per-transaction rows can't."""
+    out = []
+    seen = set()
     for line in lines:
-        if "|" not in line:
+        kv = _kv_split(line)
+        if not kv:
             continue
-        cells = [c.strip() for c in line.split("|") if c.strip()]
-        if len(cells) < 2 or not _looks_money(cells[-1]):
-            continue
-        label = _norm_label(cells[0])
-        if label in ("TOTALCASH", "QR PAY") and label not in found:
-            found[label] = parse_money(cells[-1])
-    payments = []
-    if "TOTALCASH" in found:
-        payments.append({"label": "CASH", "amount": found["TOTALCASH"]})
-    if "QR PAY" in found:
-        payments.append({"label": "QR PAY", "amount": found["QR PAY"]})
-    return payments
+        method = _PAYMENT_LABEL_TO_METHOD.get(_norm_label(kv[0]))
+        if method and method not in seen:
+            seen.add(method)
+            out.append({
+                "method": method,
+                "amount": parse_money(kv[1]),
+                "transaction_id": None,
+                "transaction_at": None,
+            })
+    return out
 
 
 # --- top-level parse ---------------------------------------------------------
@@ -542,7 +594,11 @@ def parse_shift_close(content: str) -> dict:
     if cashdrawer:
         sections_present.append("cashdrawer")
 
-    payments = _parse_tender_grid(lines)
+    # Payments: aggregate tender/balance rows from the flat summary labels, plus
+    # one row per QR transaction from MOBILE CASH (NOT the cashdrawer log).
+    mobile_idx = _find_banner(lines, r"MOBILE CASH")
+    qr_txns = _parse_mobile_cash(_section_rows(lines, mobile_idx)) if mobile_idx is not None else []
+    payments = _parse_payment_summary(lines) + qr_txns
     if payments:
         sections_present.append("payments")
 
