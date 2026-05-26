@@ -76,6 +76,27 @@ class OutletIdentificationTests(unittest.TestCase):
         # Stored under the raw code so the shift is not lost.
         self.assertEqual(store.saved[0]["parent"]["outlet_canonical"], "S-FOO")
 
+    def test_extracts_multi_word_outlet_code(self):
+        # Codes may contain a space (e.g. "S-ST KHU"); the old S-\w+ regex
+        # returned NULL for those. Internal whitespace is collapsed + uppercased.
+        cases = {
+            "S-BISTRO7  SHIFTCLOSE (1342)": "S-BISTRO7",
+            "S-VISTA  SHIFTCLOSE (2833)": "S-VISTA",
+            "S-ST KHU  SHIFTCLOSE (860)": "S-ST KHU",
+            "S-MB  SHIFTCLOSE (660)": "S-MB",
+            "S-Damansara  SHIFTCLOSE (2386)": "S-DAMANSARA",
+        }
+        for subject, expected in cases.items():
+            self.assertEqual(extract_outlet_from_subject(subject), expected, subject)
+
+    def test_outlet_S_ST_KHU_maps_to_placeholder(self):
+        with self.assertLogs("sales_parser", level="WARNING"):
+            self.assertEqual(canonical_outlet_for_code("S-ST KHU"), "ST Khulafa")
+
+    def test_outlet_S_MB_maps_to_placeholder(self):
+        with self.assertLogs("sales_parser", level="WARNING"):
+            self.assertEqual(canonical_outlet_for_code("S-MB"), "MB")
+
     def test_outlet_S_KLANG_maps_to_Klang_BEmas(self):
         self.assertEqual(canonical_outlet_for_code("S-KLANG"), "Klang B.Emas")
 

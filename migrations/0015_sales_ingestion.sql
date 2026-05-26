@@ -35,6 +35,8 @@ INSERT INTO public.outlet_canonical (code, canonical_name, confirmed, active) VA
     ('S-SEK20',     'SEK-20',       true,  true),
     ('S-SEK6',      'SEK-6',        true,  true),
     ('S-VISTA',     'Vista',        true,  true),
+    ('S-ST KHU',    'ST Khulafa',   false, true),   -- discovered in prod; name pending
+    ('S-MB',        'MB',           false, true),   -- discovered in prod; name pending
     ('S-RAZAK',     'K.L Razak',    false, false)   -- never received yet
 ON CONFLICT (code) DO NOTHING;
 

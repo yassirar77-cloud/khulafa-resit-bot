@@ -54,6 +54,10 @@ OUTLET_CANONICAL_BY_CODE: dict[str, str] = {
     "S-SEK20": "SEK-20",
     "S-SEK6": "SEK-6",
     "S-VISTA": "Vista",
+    # Discovered in production (PR #35 hotfix) — names are placeholders pending
+    # owner confirmation. Note S-ST KHU's subject code contains a space.
+    "S-ST KHU": "ST Khulafa",
+    "S-MB": "MB",
     # Not yet observed in production — handled with an info log if it appears.
     "S-RAZAK": "K.L Razak",
 }
@@ -75,7 +79,7 @@ RECEIPTS_CODE_TO_CANONICAL: dict[str, str] = {
 }
 
 # Codes whose canonical mapping is not yet confirmed against a real email.
-UNCONFIRMED_CODES = frozenset({"S-SBESI"})
+UNCONFIRMED_CODES = frozenset({"S-SBESI", "S-ST KHU", "S-MB"})
 # Codes we have never received yet (log info, don't warn) — see variance #7.
 FUTURE_CODES = frozenset({"S-RAZAK"})
 
@@ -85,19 +89,24 @@ FUTURE_CODES = frozenset({"S-RAZAK"})
 #   cashdrawer    : everyone EXCEPT SEK14, SEK20
 OPTIONAL_SECTIONS = frozenset({"deleted_items", "stock", "cashdrawer"})
 
-_SUBJECT_RE = re.compile(r"^\s*(S-\w+)\s+SHIFTCLOSE", re.IGNORECASE)
+# Codes can contain spaces (e.g. "S-ST KHU"), so capture everything up to the
+# SHIFTCLOSE token non-greedily, then collapse internal whitespace.
+_SUBJECT_RE = re.compile(r"^\s*(S-[\w\s]+?)\s+SHIFTCLOSE", re.IGNORECASE)
 
 
 def extract_outlet_from_subject(subject) -> str | None:
-    """Pull the ``S-XXX`` code out of a subject like ``S-KLANG SHIFTCLOSE (1499)``.
+    """Pull the ``S-XXX`` code out of a subject like ``S-KLANG SHIFTCLOSE (1499)``
+    or ``S-ST KHU  SHIFTCLOSE (860)``.
 
-    Returns the upper-cased code (``S-KLANG``) or ``None`` if the subject does
-    not match the expected shape.
+    Returns the upper-cased code with internal whitespace collapsed to a single
+    space (``S-ST KHU``), or ``None`` if the subject does not match.
     """
     if not isinstance(subject, str):
         return None
     m = _SUBJECT_RE.match(subject)
-    return m.group(1).upper() if m else None
+    if not m:
+        return None
+    return re.sub(r"\s+", " ", m.group(1)).strip().upper()
 
 
 def extract_shift_no_from_subject(subject) -> str | None:
@@ -133,8 +142,18 @@ def canonical_outlet_for_code(code) -> str | None:
 # --- file / bytes reading + normalisation -----------------------------------
 
 def normalize_content(content: str) -> str:
-    """Strip a leading BOM and normalise CRLF/CR to LF."""
-    return content.lstrip("﻿").replace("\r\n", "\n").replace("\r", "\n")
+    """Strip NUL bytes + a leading BOM and normalise CRLF/CR to LF.
+
+    NUL (U+0000) chars survive a correct UTF-16 decode when the POS pads fields
+    with them, and Postgres TEXT columns reject ``\\u0000`` — so drop them here,
+    at the single choke point every decode path runs through.
+    """
+    return (
+        content.replace("\x00", "")
+        .lstrip("﻿")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+    )
 
 
 def decode_shift_close_bytes(raw_bytes: bytes) -> str:

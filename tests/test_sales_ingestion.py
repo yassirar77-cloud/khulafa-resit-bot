@@ -17,8 +17,8 @@ from email.message import EmailMessage
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sales_email_fetcher import Mailbox  # noqa: E402
-from sales_ingest import run  # noqa: E402
-from sales_parser import read_shift_close_file  # noqa: E402
+from sales_ingest import build_sales_record, run  # noqa: E402
+from sales_parser import parse_shift_close, read_shift_close_file  # noqa: E402
 from tests.sales_fixtures import path_for_code  # noqa: E402
 
 
@@ -129,6 +129,22 @@ class IngestionRunTests(unittest.TestCase):
         store = FakeStore()
         run(store=store, mailbox=mailbox, now_my=NOW)
         self.assertNotIn(b"1", mailbox.seen)
+
+    def test_build_record_strips_null_bytes_before_insert(self):
+        # Defensive backstop: even if raw content carries NUL bytes, no string
+        # in the record (parent or children) reaches Postgres with U+0000.
+        content = _klang_content()
+        email_dict = {
+            "subject": "S-KLANG SHIFTCLOSE (1499)",
+            "outlet_code": "S-KLANG",
+            "content": content + "\x00\x00trailing\x00",
+            "message_id": "<n>",
+            "filename": "x.TXT",
+            "received_at": "Tue, 26 May 2026 19:30:00 +0800",
+        }
+        record = build_sales_record(email_dict, parse_shift_close(content), "Klang B.Emas", NOW)
+        self.assertNotIn("\x00", record["parent"]["raw_content"])
+        self.assertNotIn("\x00", repr(record))
 
     def test_handles_empty_attachment(self):
         mailbox = FakeMailbox([(b"1", make_email("S-KLANG SHIFTCLOSE (1499)", "", empty=True))])

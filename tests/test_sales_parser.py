@@ -104,6 +104,18 @@ class ParserTests(unittest.TestCase):
         kacang = next((q for name, q in stock.items() if name.startswith("Kacang")), None)
         self.assertEqual(kacang, -1218)
 
+    def test_strips_null_bytes_from_decoded_text(self):
+        # NUL chars survive a correct UTF-16 decode (POS field padding) and
+        # Postgres TEXT rejects U+0000 — it must be gone after decode + parse.
+        raw = "SHIFTNO : 1\x00499\nTODAY SALES :  4,758.20\n".encode("utf-16")
+        decoded = decode_shift_close_bytes(raw)
+        self.assertNotIn("\x00", decoded)
+        parsed = parse_shift_close(decoded)
+        self.assertEqual(parsed["shift_no"], "1499")
+        # No string field anywhere in the real KLANG parse retains a NUL byte.
+        klang = parse_shift_close(read_shift_close_file(path_for_code("S-KLANG")))
+        self.assertNotIn("\x00", repr(klang))
+
     def test_extracts_items_with_quantities(self):
         # The GROUP WISE ITEM SALES (<shiftno>) block yields item-level qty/amount.
         items = _parsed("S-KLANG")["items"]

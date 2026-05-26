@@ -45,6 +45,22 @@ CHILD_TABLES = (
 
 # --- record building (pure) --------------------------------------------------
 
+def _strip_nulls(value):
+    """Remove NUL (U+0000) chars from a string; Postgres TEXT rejects them.
+    Primary stripping happens in the parser, this is a defensive backstop."""
+    return value.replace("\x00", "") if isinstance(value, str) else value
+
+
+def _sanitize_record(record):
+    """Strip NUL bytes from every string in the parent row + child rows."""
+    record["parent"] = {k: _strip_nulls(v) for k, v in record["parent"].items()}
+    for rows in record["children"].values():
+        for row in rows:
+            for k, v in row.items():
+                row[k] = _strip_nulls(v)
+    return record
+
+
 def _iso(dt):
     return dt.isoformat() if dt is not None else None
 
@@ -133,11 +149,11 @@ def build_sales_record(email_dict, parsed, outlet_canonical, now_my) -> dict:
         ],
     }
 
-    return {
+    return _sanitize_record({
         "parent": parent,
         "children": children,
         "key": (outlet, shift_no, business_date.isoformat(), shift_type),
-    }
+    })
 
 
 # --- DB store (Supabase) -----------------------------------------------------
