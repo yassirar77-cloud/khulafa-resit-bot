@@ -88,7 +88,10 @@ from backfill_items import (
 )
 import analytics
 import digest
+import sales_analytics
 from digest_data import gather_digest_data, log_digest
+from sales_ingest import run_ingest_once
+from sales_parser import OUTLET_CANONICAL_BY_CODE, RECEIPTS_CODE_TO_CANONICAL
 from receipt_classifier import ReceiptType, classify_receipt
 
 logging.basicConfig(
@@ -121,6 +124,9 @@ FIXED_COSTS_TABLE = "fixed_costs"
 PETTY_CASH_TABLE = "petty_cash"
 PENDING_REVIEW_TABLE = "pending_review"
 REPARSE_AUDIT_TABLE = "reparse_audit"
+SALES_DAILY_TABLE = "sales_daily"
+SALES_ITEMS_TABLE = "sales_items"
+SALES_INGEST_LOG_TABLE = "sales_ingest_log"
 
 # Edit-flow conversation states (PR #29b manual review).
 REVIEW_EDIT_TOTAL, REVIEW_EDIT_MERCHANT, REVIEW_EDIT_DATE = range(3)
@@ -3161,6 +3167,263 @@ async def test_digest_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await message.reply_text(f"⚠️ Digest delivery {status} ({sent}/{len(messages)} sent). {error or ''}")
 
 
+# === PR #35: POS sales ingestion + analytics (owner-only) ====================
+
+def _my_today():
+    return datetime.now(MALAYSIA_TZ).date()
+
+
+def _business_date_list(n: int, end=None):
+    end = end or _my_today()
+    return [(end - timedelta(days=i)).isoformat() for i in range(n)]
+
+
+def _fetch_sales_rows(business_dates):
+    resp = (
+        supabase.table(SALES_DAILY_TABLE)
+        .select("outlet_canonical, total_sales, shift_type, shift_business_date")
+        .in_("shift_business_date", business_dates)
+        .execute()
+    )
+    return resp.data or []
+
+
+def _fetch_sales_outlet_rows(outlet, business_dates):
+    resp = (
+        supabase.table(SALES_DAILY_TABLE)
+        .select("outlet_canonical, total_sales, shift_type, shift_business_date")
+        .eq("outlet_canonical", outlet)
+        .in_("shift_business_date", business_dates)
+        .execute()
+    )
+    return resp.data or []
+
+
+def _fetch_sales_items_rows(business_dates):
+    daily = (
+        supabase.table(SALES_DAILY_TABLE)
+        .select("id")
+        .in_("shift_business_date", business_dates)
+        .execute()
+    )
+    ids = [r["id"] for r in (daily.data or [])]
+    if not ids:
+        return []
+    resp = (
+        supabase.table(SALES_ITEMS_TABLE)
+        .select("item_name, qty, amount")
+        .in_("sales_daily_id", ids)
+        .execute()
+    )
+    return resp.data or []
+
+
+def _fetch_purchase_rows(start_date, end_date):
+    resp = (
+        supabase.table(RECEIPTS_TABLE)
+        .select("outlet, total, receipt_date")
+        .eq("receipt_type", "SUPPLIER_PURCHASE")
+        .gte("receipt_date", start_date)
+        .lte("receipt_date", end_date)
+        .execute()
+    )
+    return resp.data or []
+
+
+def _purchases_by_outlet(rows):
+    out: dict = {}
+    for r in rows:
+        code = (r.get("outlet") or "").upper()
+        canonical = RECEIPTS_CODE_TO_CANONICAL.get(code, code or "UNKNOWN")
+        try:
+            total = float(r.get("total")) if r.get("total") is not None else 0.0
+        except (TypeError, ValueError):
+            total = 0.0
+        out[canonical] = out.get(canonical, 0.0) + total
+    return out
+
+
+def _fetch_ingest_log_rows(since_iso):
+    resp = (
+        supabase.table(SALES_INGEST_LOG_TABLE)
+        .select("*")
+        .gte("ran_at", since_iso)
+        .order("ran_at", desc=True)
+        .execute()
+    )
+    return resp.data or []
+
+
+def _resolve_outlet_name(query: str) -> str:
+    """Resolve a user-typed outlet (e.g. 'klang') to a canonical name
+    ('Klang B.Emas'). Falls back to the raw query if nothing matches."""
+    q = query.strip().lower()
+    names = sorted(set(OUTLET_CANONICAL_BY_CODE.values()))
+    for name in names:
+        if name.lower() == q:
+            return name
+    for name in names:
+        if q and (q in name.lower() or name.lower() in q):
+            return name
+    return query.strip()
+
+
+async def sales_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    today = _my_today().isoformat()
+    try:
+        rows = await asyncio.to_thread(_fetch_sales_rows, [today])
+    except Exception:
+        logger.exception("sales_today failed")
+        await message.reply_text("Failed to fetch today's sales.")
+        return
+    by_outlet = sales_analytics.aggregate_sales_by_outlet(rows)
+    await message.reply_text(
+        sales_analytics.format_sales_by_outlet(f"Sales today ({today}):", by_outlet)
+    )
+
+
+async def sales_yesterday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    yesterday = (_my_today() - timedelta(days=1)).isoformat()
+    try:
+        rows = await asyncio.to_thread(_fetch_sales_rows, [yesterday])
+    except Exception:
+        logger.exception("sales_yesterday failed")
+        await message.reply_text("Failed to fetch yesterday's sales.")
+        return
+    await message.reply_text(sales_analytics.format_yesterday_recap(yesterday, rows))
+
+
+async def sales_outlet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    if not context.args:
+        await message.reply_text("Usage: /sales_outlet <name>\nExample: /sales_outlet klang")
+        return
+    outlet = _resolve_outlet_name(" ".join(context.args))
+    dates = _business_date_list(7)
+    try:
+        rows = await asyncio.to_thread(_fetch_sales_outlet_rows, outlet, dates)
+    except Exception:
+        logger.exception("sales_outlet failed")
+        await message.reply_text("Failed to fetch outlet sales.")
+        return
+    await message.reply_text(sales_analytics.format_outlet_history(outlet, rows))
+
+
+async def sales_ingest_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    since_iso = (
+        datetime.now(MALAYSIA_TZ) - timedelta(hours=24)
+    ).astimezone(timezone.utc).isoformat()
+    try:
+        rows = await asyncio.to_thread(_fetch_ingest_log_rows, since_iso)
+    except Exception:
+        logger.exception("sales_ingest_status failed")
+        await message.reply_text("Failed to read ingest log.")
+        return
+    await message.reply_text(sales_analytics.format_ingest_status(rows))
+
+
+async def sales_ingest_manual_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    await message.reply_text("Fetching shift-close emails…")
+    try:
+        summary = await asyncio.to_thread(run_ingest_once, supabase)
+    except KeyError as exc:
+        await message.reply_text(
+            f"Missing env var {exc}. Set GMAIL_INBOX and GMAIL_APP_PASSWORD on the service."
+        )
+        return
+    except Exception as exc:  # noqa: BLE001 - surfaced to the owner
+        logger.exception("manual sales ingest failed")
+        await message.reply_text(f"Ingest failed: {exc}")
+        return
+    await message.reply_text(
+        "Sales ingest done — "
+        f"fetched {summary['fetched']}, inserted {summary['inserted']}, "
+        f"skipped {summary['skipped']}, errors {summary['errors']}."
+    )
+
+
+async def food_cost_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    today = _my_today().isoformat()
+    try:
+        sales_rows = await asyncio.to_thread(_fetch_sales_rows, [today])
+        purchase_rows = await asyncio.to_thread(_fetch_purchase_rows, today, today)
+    except Exception:
+        logger.exception("food_cost_today failed")
+        await message.reply_text("Failed to compute food cost.")
+        return
+    sales_by = sales_analytics.aggregate_sales_by_outlet(sales_rows)
+    purch_by = _purchases_by_outlet(purchase_rows)
+    await message.reply_text(
+        sales_analytics.format_food_cost(f"Food cost today ({today}):", sales_by, purch_by)
+    )
+
+
+async def food_cost_week_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    dates = _business_date_list(7)
+    start, end = dates[-1], dates[0]
+    try:
+        sales_rows = await asyncio.to_thread(_fetch_sales_rows, dates)
+        purchase_rows = await asyncio.to_thread(_fetch_purchase_rows, start, end)
+    except Exception:
+        logger.exception("food_cost_week failed")
+        await message.reply_text("Failed to compute food cost.")
+        return
+    sales_by = sales_analytics.aggregate_sales_by_outlet(sales_rows)
+    purch_by = _purchases_by_outlet(purchase_rows)
+    await message.reply_text(
+        sales_analytics.format_food_cost(f"Food cost {start} → {end}:", sales_by, purch_by)
+    )
+
+
+async def top_items_sold_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    n = _parse_reparse_n(context.args, 10, 50)
+    dates = _business_date_list(7)
+    try:
+        rows = await asyncio.to_thread(_fetch_sales_items_rows, dates)
+    except Exception:
+        logger.exception("top_items_sold failed")
+        await message.reply_text("Failed to read items sold.")
+        return
+    await message.reply_text(
+        sales_analytics.format_top_items_sold(sales_analytics.top_items_sold(rows, n), n)
+    )
+
+
+async def poll_sales_emails() -> None:
+    """APScheduler job: ingest unread shift-close emails (every 30 min, 24/7)."""
+    if not os.environ.get("GMAIL_INBOX") or not os.environ.get("GMAIL_APP_PASSWORD"):
+        logger.info("Sales ingest poll skipped: GMAIL_INBOX/GMAIL_APP_PASSWORD not set")
+        return
+    try:
+        summary = await asyncio.to_thread(run_ingest_once, supabase)
+        logger.info("Sales ingest poll: %s", summary)
+    except Exception:
+        logger.exception("Sales ingest poll failed")
+
+
 async def run_bot() -> None:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -3200,6 +3463,14 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("top_suppliers", top_suppliers_command))
     app.add_handler(CommandHandler("price_history", price_history_command))
     app.add_handler(CommandHandler("test_digest", test_digest_command))
+    app.add_handler(CommandHandler("sales_today", sales_today_command))
+    app.add_handler(CommandHandler("sales_yesterday", sales_yesterday_command))
+    app.add_handler(CommandHandler("sales_outlet", sales_outlet_command))
+    app.add_handler(CommandHandler("sales_ingest_status", sales_ingest_status_command))
+    app.add_handler(CommandHandler("sales_ingest_manual", sales_ingest_manual_command))
+    app.add_handler(CommandHandler("food_cost_today", food_cost_today_command))
+    app.add_handler(CommandHandler("food_cost_week", food_cost_week_command))
+    app.add_handler(CommandHandler("top_items_sold", top_items_sold_command))
     app.add_handler(
         CallbackQueryHandler(reparse_apply_all_callback, pattern=r"^reparse_applyall:(yes|no)$")
     )
@@ -3241,6 +3512,15 @@ async def run_bot() -> None:
         minute=0,
         args=[app],
         id="daily_summary",
+        replace_existing=True,
+    )
+    # PR #35: poll the master inbox for shift-close emails every 30 min, 24/7.
+    # In-process (no separate Render cron) — $0 extra.
+    scheduler.add_job(
+        poll_sales_emails,
+        trigger="cron",
+        minute="*/30",
+        id="sales_ingest",
         replace_existing=True,
     )
 
