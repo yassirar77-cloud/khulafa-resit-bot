@@ -1,27 +1,34 @@
 """POS shift-close TXT parser (PR #35).
 
-Pure functions that turn one POS "shift close" report (a UTF-16, CRLF text
-file emailed as an attachment from the master inbox) into a structured dict the
+Pure functions that turn one POS "shift close" report (a UTF-16, CRLF text file
+emailed as an attachment from the master inbox) into a structured dict the
 ingestion layer writes to ``sales_daily`` + child tables.
 
 Two hard rules from the production variance analysis (these OVERRIDE any
 assumption a header might suggest):
 
-  1. Outlet identity comes from the EMAIL SUBJECT only — never from the TXT
-     "Outlet" header, which is ambiguous/inconsistent across outlets. The
-     header value is kept as ``header_outlet_raw`` for debugging only.
+  1. Outlet identity comes from the EMAIL SUBJECT only — never from the report
+     header (which names the franchise, e.g. "NASI KANDAR HAJI SHARFUDDIN", and
+     is ambiguous/inconsistent across outlets). The header is kept as
+     ``header_outlet_raw`` for debugging only.
   2. Encoding is UTF-16 with a BOM and CRLF line endings, but some files slip
      through as UTF-8; decode defensively and normalise newlines.
 
-24/7 operation means two shifts per outlet per day (close ~07:00 and ~19:00
-MY). ``determine_shift_type_and_business_date`` assigns each close to a
+24/7 operation means two shifts per outlet per day (close ~07:00 and ~19:00 MY).
+``determine_shift_type_and_business_date`` assigns each close to a
 ``day``/``overnight``/``unknown`` shift and the business date it belongs to.
 
-NOTE (format provenance): the exact section headers / column layout below are
-modelled on the variance-analysis findings and the 10 fixture files in
-``tests/fixtures/sales/``. Section detection is label-anchored and tolerant, so
-adapting to the real POS output is a matter of tuning ``_SECTION_TITLES`` and
-the line regexes here — no structural change to the ingestion or schema.
+Report layout (validated against the 10 real 25-May-2026 files):
+  * A flat ``LABEL : value`` summary block at the top (TODAY SALES, TAX,
+    NET SALES, DISCOUNT, SHIFTNO, DATE, CASHIER, ...). ``DATE`` is US-style
+    ``M/D/YYYY h:mm:ss AM/PM``.
+  * ``GROUP WISE ITEM SALES`` (category totals: SHIFTNO ITEMNAME AMOUNT).
+  * ``GROUP WISE ITEM SALES (<shiftno>)`` (item totals: ITEMNAME QTY AMOUNT).
+  * Optional ``STOCK ON ...`` (ITEM NAME STOCK AMOUNT — STOCK may be negative).
+  * Optional ``==== DELETED ITEM BY ADMIN ====`` (ITEMNAME QTY RATE TOTALAMT).
+  * Optional ``===== CASHDRAWER OPEN =====`` (drawer-open event log; absent for
+    SEK14 / SEK20).
+  * A cash-denomination pipe grid (TOTALCASH / QR PAY tender split).
 """
 
 from __future__ import annotations
@@ -71,6 +78,12 @@ RECEIPTS_CODE_TO_CANONICAL: dict[str, str] = {
 UNCONFIRMED_CODES = frozenset({"S-SBESI"})
 # Codes we have never received yet (log info, don't warn) — see variance #7.
 FUTURE_CODES = frozenset({"S-RAZAK"})
+
+# Sections that may legitimately be absent for some outlets (variance #5):
+#   stock         : only D.U, KLANG, SEK20, SEK6
+#   deleted_items : only KLANG, SEK14, SEK20, VISTA
+#   cashdrawer    : everyone EXCEPT SEK14, SEK20
+OPTIONAL_SECTIONS = frozenset({"deleted_items", "stock", "cashdrawer"})
 
 _SUBJECT_RE = re.compile(r"^\s*(S-\w+)\s+SHIFTCLOSE", re.IGNORECASE)
 
@@ -124,28 +137,33 @@ def normalize_content(content: str) -> str:
     return content.lstrip("﻿").replace("\r\n", "\n").replace("\r", "\n")
 
 
-def read_shift_close_file(filepath) -> str:
-    """Read a shift-close TXT from disk: UTF-16 (with BOM) first, UTF-8 on
-    fallback, then normalise the BOM/newlines."""
-    try:
-        with open(filepath, "r", encoding="utf-16") as f:
-            content = f.read()
-    except UnicodeError:
-        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
-    return normalize_content(content)
-
-
 def decode_shift_close_bytes(raw_bytes: bytes) -> str:
-    """Decode raw attachment bytes: UTF-16 first, UTF-8 (replace) on fallback,
-    then normalise the BOM/newlines."""
-    if raw_bytes is None:
+    """Decode raw attachment bytes, then normalise the BOM/newlines.
+
+    Encoding is sniffed rather than assumed: production attachments are UTF-16
+    (the variance analysis says with a BOM), but a file can also arrive as UTF-8
+    (e.g. transcoded in transit). A blind ``decode('utf-16')`` would silently
+    turn an even-length UTF-8/ASCII file into garbage, so:
+      * UTF-16 BOM present              -> UTF-16
+      * NUL bytes present (UTF-16 sans BOM) -> UTF-16 (replace)
+      * otherwise                       -> UTF-8 (replace)
+    """
+    if not raw_bytes:
         return ""
-    try:
-        content = raw_bytes.decode("utf-16")
-    except UnicodeError:
+    if raw_bytes[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        content = raw_bytes.decode("utf-16", errors="replace")
+    elif b"\x00" in raw_bytes[:4096]:
+        content = raw_bytes.decode("utf-16", errors="replace")
+    else:
         content = raw_bytes.decode("utf-8", errors="replace")
     return normalize_content(content)
+
+
+def read_shift_close_file(filepath) -> str:
+    """Read a shift-close TXT from disk and decode it (see
+    ``decode_shift_close_bytes`` for the encoding sniffing)."""
+    with open(filepath, "rb") as f:
+        return decode_shift_close_bytes(f.read())
 
 
 # --- shift classification ----------------------------------------------------
@@ -153,9 +171,9 @@ def decode_shift_close_bytes(raw_bytes: bytes) -> str:
 def determine_shift_type_and_business_date(shift_close_datetime: datetime):
     """Classify a shift close into (shift_type, business_date).
 
-    24/7 outlets close around 19:00 (the "day" shift) and 07:00 (the
-    "overnight" shift that started the previous evening). Anything outside those
-    windows is ``unknown`` and keeps its own date so it is never silently merged.
+    24/7 outlets close around 19:00 (the "day" shift) and 07:00 (the "overnight"
+    shift that started the previous evening). Anything outside those windows is
+    ``unknown`` and keeps its own date so it is never silently merged.
     """
     hour = shift_close_datetime.hour
     if 17 <= hour <= 22:
@@ -202,18 +220,20 @@ def parse_int(value) -> int | None:
 
 
 _DATETIME_FORMATS = (
+    "%m/%d/%Y %I:%M:%S %p",   # 5/25/2026 7:00:04 PM  (POS DATE field)
+    "%m/%d/%Y %I:%M %p",
     "%d/%m/%Y %H:%M:%S",
     "%d/%m/%Y %H:%M",
-    "%d-%m-%Y %H:%M:%S",
-    "%d-%m-%Y %H:%M",
+    "%d/%b/%Y %H:%M:%S",      # 25/May/2026 19:00:04  (report header line)
     "%Y-%m-%d %H:%M:%S",
     "%Y-%m-%d %H:%M",
 )
 
 
 def parse_datetime(value) -> datetime | None:
-    """Parse a POS timestamp. Tries DD/MM/YYYY and ISO-ish forms (the POS prints
-    day-first). Returns a naive datetime (Malaysia local time) or ``None``."""
+    """Parse a POS timestamp. The summary ``DATE`` field is US-style
+    ``M/D/YYYY h:mm:ss AM/PM``; a few other shapes are tolerated. Returns a naive
+    datetime (Malaysia local time) or ``None``."""
     if value is None:
         return None
     s = str(value).strip()
@@ -227,212 +247,238 @@ def parse_datetime(value) -> datetime | None:
     return None
 
 
-# --- section detection -------------------------------------------------------
-
-# Canonical section titles -> internal key. Detection is case-insensitive on
-# the stripped line. Tune this set (and the per-section parsers) to match the
-# real POS output.
-_SECTION_TITLES: dict[str, str] = {
-    "SALES SUMMARY": "summary",
-    "SALES BY CATEGORY": "categories",
-    "TAX": "tax",
-    "TAX BREAKDOWN": "tax",
-    "DISCOUNTS": "discounts",
-    "DISCOUNT": "discounts",
-    "PAYMENT BREAKDOWN": "payments",
-    "PAYMENTS": "payments",
-    "ITEMS SOLD": "items",
-    "DELETED ITEMS": "deleted_items",
-    "STOCK REPORT": "stock",
-    "CASH DRAWER": "cashdrawer",
-    "CASH DRAWER OPEN": "cashdrawer",
-    "END OF REPORT": "_end",
-}
-
-# A line that is only separator punctuation (===, ---, ___) carries no data.
-_SEPARATOR_RE = re.compile(r"^[\s=\-_*]+$")
-
+# --- line helpers ------------------------------------------------------------
 
 def _is_separator(line: str) -> bool:
-    return bool(_SEPARATOR_RE.match(line)) and not any(c.isalnum() for c in line)
+    """True for a ruler line made only of =, -, _ or * (no letters/digits)."""
+    s = line.strip()
+    return bool(s) and set(s) <= set("=-_* ") and not any(c.isalnum() for c in s)
 
 
-def _split_sections(content: str):
-    """Return ``(meta_lines, {section_key: [lines]})``.
-
-    Everything before the first recognised section header is "meta" (the
-    Outlet/Terminal/Shift/Cashier/times block). Lines made only of separator
-    characters are dropped. The END OF REPORT marker terminates parsing.
-    """
-    meta: list[str] = []
-    sections: dict[str, list[str]] = {}
-    current: str | None = None
-    for raw in content.split("\n"):
-        line = raw.rstrip()
-        if not line.strip() or _is_separator(line):
-            continue
-        key = _SECTION_TITLES.get(line.strip().upper())
-        if key is not None:
-            if key == "_end":
-                break
-            current = key
-            sections.setdefault(current, [])
-            continue
-        if current is None:
-            meta.append(line)
-        else:
-            sections[current].append(line)
-    return meta, sections
+def _kv_split(line: str):
+    """Split ``Label : value`` on the FIRST colon. Returns (label, value) or
+    ``None`` (the value may itself contain colons, e.g. a time)."""
+    if ":" not in line:
+        return None
+    key, value = line.split(":", 1)
+    return key.strip(), value.strip()
 
 
-_KV_RE = re.compile(r"^(.*?):\s*(.+)$")
+def _norm_label(key: str) -> str:
+    """Normalise a summary label: drop non-letters (so ``CASH PAYMENT (-)`` ->
+    ``CASH PAYMENT``), upper-case, collapse spaces."""
+    return re.sub(r"\s+", " ", re.sub(r"[^A-Za-z ]", "", key)).strip().upper()
 
 
-def _parse_kv_lines(lines):
-    """Parse ``Key : value`` lines into an ordered list of (key, raw_value)."""
-    out = []
+def _columns(line: str):
+    """Split a data row on runs of 2+ spaces into trimmed columns."""
+    return [c for c in re.split(r"\s{2,}", line.strip()) if c != ""]
+
+
+def _looks_money(tok: str) -> bool:
+    return bool(re.fullmatch(r"-?[\d,]+(?:\.\d+)?", tok.strip()))
+
+
+def _looks_int(tok: str) -> bool:
+    return bool(re.fullmatch(r"-?[\d,]+", tok.strip()))
+
+
+# --- summary + meta ----------------------------------------------------------
+
+_SUMMARY_FIELD_BY_LABEL = {
+    "TODAY SALES": "total_sales",
+    "NET SALES": "net_sales",
+    "TAX": "tax",
+    "ROKOK TAX": "rokok_tax",
+    "DISCOUNT": "discount",
+}
+
+
+def _extract_summary(lines):
+    """Scan ``LABEL : value`` lines for the known money fields (first wins)."""
+    out: dict = {}
     for line in lines:
-        m = _KV_RE.match(line.strip())
-        if m:
-            out.append((m.group(1).strip(), m.group(2).strip()))
+        kv = _kv_split(line)
+        if not kv:
+            continue
+        field = _SUMMARY_FIELD_BY_LABEL.get(_norm_label(kv[0]))
+        if field and field not in out:
+            out[field] = parse_money(kv[1])
     return out
 
 
-def _parse_columnar(lines):
-    """Split each line on runs of 2+ spaces into columns. Header rows (no
-    numeric trailing column) are returned too; callers filter them."""
-    rows = []
-    for line in lines:
-        parts = re.split(r"\s{2,}", line.strip())
-        if parts:
-            rows.append(parts)
-    return rows
-
-
-# --- per-section parsers -----------------------------------------------------
-
-def _parse_meta(meta_lines):
+def _extract_meta(lines):
     info = {
         "header_outlet_raw": None,
-        "terminal": None,
         "shift_no": None,
         "cashier": None,
-        "open_time": None,
         "close_time": None,
     }
-    for key, value in _parse_kv_lines(meta_lines):
-        k = key.upper()
-        if k == "OUTLET":
-            info["header_outlet_raw"] = value
-        elif k == "TERMINAL":
-            info["terminal"] = value
-        elif k in ("SHIFT NO", "SHIFT", "SHIFT NUMBER", "SHIFT #"):
-            info["shift_no"] = value.strip()
-        elif k == "CASHIER":
-            info["cashier"] = value
-        elif k in ("OPEN TIME", "OPEN", "OPENED"):
-            info["open_time"] = parse_datetime(value)
-        elif k in ("CLOSE TIME", "CLOSE", "CLOSED"):
-            info["close_time"] = parse_datetime(value)
+    for line in lines:
+        kv = _kv_split(line)
+        if not kv:
+            continue
+        label = _norm_label(kv[0])
+        if label in ("SHIFTNO", "SHIFT NO", "SHIFT") and not info["shift_no"]:
+            info["shift_no"] = (re.sub(r"\D", "", kv[1]) or None)
+        elif label == "DATE" and not info["close_time"]:
+            info["close_time"] = parse_datetime(kv[1])
+        elif label == "CASHIER" and info["cashier"] is None:
+            v = kv[1].strip()
+            info["cashier"] = None if v.lower() in ("", "null") else v
+    for line in lines:
+        s = line.strip()
+        if s and not _is_separator(s):
+            info["header_outlet_raw"] = s
+            break
     return info
 
 
-def _parse_summary(lines):
-    summary = {
-        "gross_sales": None,
-        "discount": None,
-        "service_charge": None,
-        "tax": None,
-        "net_sales": None,
-        "total_sales": None,
-    }
-    total_collected = None
-    total_generic = None
-    for key, value in _parse_kv_lines(lines):
-        k = key.upper()
-        amount = parse_money(value)
-        if "GROSS" in k:
-            summary["gross_sales"] = amount
-        elif "SERVICE" in k:
-            summary["service_charge"] = amount
-        elif "DISCOUNT" in k:
-            summary["discount"] = amount
-        elif "TAX" in k or "SST" in k or "GST" in k:
-            summary["tax"] = amount
-        elif "NET" in k:
-            summary["net_sales"] = amount
-        elif "TOTAL COLLECTED" in k or "TOTAL COLLECT" in k:
-            total_collected = amount
-        elif k.startswith("TOTAL"):
-            total_generic = amount
-    # total_sales preference: explicit collected total -> net sales -> any total.
-    summary["total_sales"] = next(
-        (v for v in (total_collected, summary["net_sales"], total_generic) if v is not None),
-        None,
-    )
-    return summary
+# --- section location + row parsing -----------------------------------------
+
+def _section_rows(lines, banner_idx):
+    """Rows of the block that starts at ``banner_idx``: skip to the first ruler
+    after the banner (past the column header), then collect non-blank,
+    non-ruler lines until the next ruler."""
+    n = len(lines)
+    i = banner_idx + 1
+    while i < n and not _is_separator(lines[i]):
+        i += 1
+    i += 1  # past the first ruler
+    rows = []
+    while i < n and not _is_separator(lines[i]):
+        s = lines[i].strip()
+        if s:
+            rows.append(s)
+        i += 1
+    return rows
 
 
-def _parse_amount_kv_section(lines):
-    """Generic ``Label : amount`` section (categories / tax / discounts /
-    payments). Returns a list of {label, amount}."""
-    out = []
-    for key, value in _parse_kv_lines(lines):
-        out.append({"label": key.strip(), "amount": parse_money(value)})
-    return out
+def _find_item_banner(lines):
+    for i, l in enumerate(lines):
+        if re.search(r"GROUP WISE ITEM SALES\s*\(", l):
+            return i
+    return None
 
 
-def _looks_like_qty(token) -> bool:
-    return bool(re.fullmatch(r"\d+(?:\.\d+)?", token.strip()))
+def _find_category_banner(lines):
+    for i, l in enumerate(lines):
+        if "GROUP WISE ITEM SALES" in l and "(" not in l:
+            return i
+    return None
 
 
-def _looks_like_money(token) -> bool:
-    return bool(re.fullmatch(r"-?[\d,]+\.\d{2}", token.strip()))
+def _find_banner(lines, pattern):
+    for i, l in enumerate(lines):
+        if re.search(pattern, l):
+            return i
+    return None
 
 
-def _parse_items(lines):
-    """Parse ``Qty  Item name  Amount`` columnar rows. Skips the header row and
-    anything that does not have a leading qty and trailing money column."""
+def _parse_items(rows):
+    """ITEMNAME QTY AMOUNT rows -> [{qty, name, amount}]."""
     items = []
-    for parts in _parse_columnar(lines):
-        if len(parts) < 3:
+    for row in rows:
+        cols = _columns(row)
+        if len(cols) < 3:
             continue
-        qty_tok, amount_tok = parts[0], parts[-1]
-        if not (_looks_like_qty(qty_tok) and _looks_like_money(amount_tok)):
-            continue  # header row ("Qty Item Amount") or malformed
-        name = " ".join(parts[1:-1]).strip()
+        qty_tok, amt_tok = cols[-2], cols[-1]
+        if not (_looks_int(qty_tok) and _looks_money(amt_tok)):
+            continue
         items.append({
             "qty": parse_money(qty_tok),
-            "name": name,
-            "amount": parse_money(amount_tok),
+            "name": " ".join(cols[:-2]).strip(),
+            "amount": parse_money(amt_tok),
         })
     return items
 
 
-def _parse_stock(lines):
-    """Parse ``Item name  qty`` rows. Quantity is an integer and may be negative
-    (e.g. KLANG ``Kacang -1218``). Skips the header row."""
-    stock = []
-    for parts in _parse_columnar(lines):
-        if len(parts) < 2:
+def _parse_categories(rows):
+    """SHIFTNO ITEMNAME AMOUNT rows -> [{label, amount}] (drops the shiftno)."""
+    out = []
+    for row in rows:
+        cols = _columns(row)
+        if len(cols) < 3:
             continue
-        name, qty_tok = " ".join(parts[:-1]).strip(), parts[-1]
-        if not re.fullmatch(r"-?\d[\d,]*", qty_tok.strip()):
-            continue  # header ("Item Qty") or malformed
-        stock.append({"item": name, "qty": parse_int(qty_tok)})
+        if not (_looks_int(cols[0]) and _looks_money(cols[-1])):
+            continue
+        out.append({"label": " ".join(cols[1:-1]).strip(), "amount": parse_money(cols[-1])})
+    return out
+
+
+def _parse_stock(rows):
+    """ITEM NAME  STOCK  AMOUNT rows -> [{item, qty}]. STOCK is a signed integer
+    (e.g. KLANG ``Kacang 2.00  -1218  -2436.00`` -> qty -1218)."""
+    stock = []
+    for row in rows:
+        cols = _columns(row)
+        if len(cols) < 3:
+            continue
+        stock_tok, amt_tok = cols[-2], cols[-1]
+        if not (_looks_int(stock_tok) and _looks_money(amt_tok)):
+            continue
+        stock.append({"item": " ".join(cols[:-2]).strip(), "qty": parse_int(stock_tok)})
     return stock
 
 
-def _parse_cashdrawer(lines):
-    """Parse the cash-drawer block (``Label : amount`` lines)."""
-    return _parse_amount_kv_section(lines)
+def _parse_deleted(rows):
+    """ITEMNAME QTY RATE TOTALAMT rows -> [{qty, name, amount}]. The interleaved
+    operator/time lines (2 columns) are skipped."""
+    out = []
+    for row in rows:
+        cols = _columns(row)
+        if len(cols) < 4:
+            continue
+        qty_tok, total_tok = cols[-3], cols[-1]
+        if not (_looks_int(qty_tok) and _looks_money(total_tok)):
+            continue
+        out.append({
+            "qty": parse_money(qty_tok),
+            "name": " ".join(cols[:-3]).strip(),
+            "amount": parse_money(total_tok),
+        })
+    return out
+
+
+def _parse_cashdrawer(lines, banner_idx):
+    """CASHDRAWER OPEN log -> [{label, amount}]: the open count plus one entry
+    per drawer-open event (``<datetime> <operator>``, no amount)."""
+    out = []
+    # "TOTAL TIMES OPEN :2" sits between the banner and the first ruler.
+    for j in range(banner_idx, min(banner_idx + 5, len(lines))):
+        kv = _kv_split(lines[j])
+        if kv and _norm_label(kv[0]) == "TOTAL TIMES OPEN":
+            out.append({"label": "TOTAL TIMES OPEN", "amount": parse_money(kv[1])})
+            break
+    for row in _section_rows(lines, banner_idx):
+        cols = _columns(row)
+        if len(cols) >= 2:
+            out.append({"label": " ".join(cols[1:]).strip(), "amount": None})
+    return out
+
+
+def _parse_tender_grid(lines):
+    """Pull the tender split (CASH / QR PAY) out of the denomination pipe grid:
+    rows like ``|   TOTALCASH | 1010.00 |`` and ``|     QR PAY| 2907.40 |``."""
+    found: dict = {}
+    for line in lines:
+        if "|" not in line:
+            continue
+        cells = [c.strip() for c in line.split("|") if c.strip()]
+        if len(cells) < 2 or not _looks_money(cells[-1]):
+            continue
+        label = _norm_label(cells[0])
+        if label in ("TOTALCASH", "QR PAY") and label not in found:
+            found[label] = parse_money(cells[-1])
+    payments = []
+    if "TOTALCASH" in found:
+        payments.append({"label": "CASH", "amount": found["TOTALCASH"]})
+    if "QR PAY" in found:
+        payments.append({"label": "QR PAY", "amount": found["QR PAY"]})
+    return payments
 
 
 # --- top-level parse ---------------------------------------------------------
-
-# Sections that may legitimately be absent for some outlets (variance #5).
-OPTIONAL_SECTIONS = frozenset({"deleted_items", "stock", "cashdrawer"})
-
 
 def parse_shift_close(content: str) -> dict:
     """Parse one shift-close report body into a structured dict.
@@ -441,28 +487,60 @@ def parse_shift_close(content: str) -> dict:
     from the email subject. ``shift_type`` / ``shift_business_date`` are computed
     from the close time when available.
 
-    Optional sections (deleted items, stock report, cash drawer) are simply
-    absent from ``sections_present`` when the report omits them — never an error.
+    Optional sections (stock, deleted items, cashdrawer-open) are simply absent
+    from ``sections_present`` when the report omits them — never an error.
     """
     content = normalize_content(content or "")
-    meta_lines, sections = _split_sections(content)
+    lines = content.split("\n")
 
-    meta = _parse_meta(meta_lines)
-    summary = _parse_summary(sections.get("summary", []))
+    meta = _extract_meta(lines)
+    summary = _extract_summary(lines)
 
-    categories = _parse_amount_kv_section(sections.get("categories", []))
-    tax_breakdown = _parse_amount_kv_section(sections.get("tax", []))
-    discounts = _parse_amount_kv_section(sections.get("discounts", []))
-    payments = _parse_amount_kv_section(sections.get("payments", []))
-    items = _parse_items(sections.get("items", []))
-    deleted_items = _parse_items(sections.get("deleted_items", []))
-    stock = _parse_stock(sections.get("stock", []))
-    cashdrawer = _parse_cashdrawer(sections.get("cashdrawer", []))
+    sections_present = []
 
-    # Tax: prefer the summary line; fall back to the sum of a tax breakdown.
+    item_idx = _find_item_banner(lines)
+    items = _parse_items(_section_rows(lines, item_idx)) if item_idx is not None else []
+    if items:
+        sections_present.append("items")
+
+    cat_idx = _find_category_banner(lines)
+    categories = _parse_categories(_section_rows(lines, cat_idx)) if cat_idx is not None else []
+    if categories:
+        sections_present.append("categories")
+
+    stock_idx = _find_banner(lines, r"^\s*STOCK ON\b")
+    stock = _parse_stock(_section_rows(lines, stock_idx)) if stock_idx is not None else []
+    if stock:
+        sections_present.append("stock")
+
+    del_idx = _find_banner(lines, r"DELETED ITEM BY ADMIN")
+    deleted_items = _parse_deleted(_section_rows(lines, del_idx)) if del_idx is not None else []
+    if deleted_items:
+        sections_present.append("deleted_items")
+
+    cash_idx = _find_banner(lines, r"CASHDRAWER OPEN")
+    cashdrawer = _parse_cashdrawer(lines, cash_idx) if cash_idx is not None else []
+    if cashdrawer:
+        sections_present.append("cashdrawer")
+
+    payments = _parse_tender_grid(lines)
+    if payments:
+        sections_present.append("payments")
+
     tax = summary.get("tax")
-    if tax is None and tax_breakdown:
-        tax = sum(t["amount"] for t in tax_breakdown if t["amount"] is not None) or 0.0
+    tax_breakdown = []
+    if tax:
+        tax_breakdown.append({"label": "TAX", "amount": tax})
+    if summary.get("rokok_tax"):
+        tax_breakdown.append({"label": "ROKOK TAX", "amount": summary["rokok_tax"]})
+    if tax_breakdown:
+        sections_present.append("tax")
+
+    discount = summary.get("discount")
+    discounts = []
+    if discount:
+        discounts.append({"label": "DISCOUNT", "amount": discount})
+        sections_present.append("discounts")
 
     close_time = meta.get("close_time")
     if close_time is not None:
@@ -470,21 +548,19 @@ def parse_shift_close(content: str) -> dict:
     else:
         shift_type, business_date = "unknown", None
 
-    sections_present = sorted(sections.keys())
-
     return {
         "header_outlet_raw": meta.get("header_outlet_raw"),
-        "terminal": meta.get("terminal"),
+        "terminal": None,
         "shift_no": meta.get("shift_no"),
         "cashier": meta.get("cashier"),
-        "open_time": meta.get("open_time"),
+        "open_time": None,
         "close_time": close_time,
         "shift_type": shift_type,
         "shift_business_date": business_date,
-        "gross_sales": summary.get("gross_sales"),
-        "discount": summary.get("discount"),
-        "service_charge": summary.get("service_charge"),
-        "tax": tax,
+        "gross_sales": None,
+        "discount": discount,
+        "service_charge": None,
+        "tax": tax if tax is not None else (0.0 if summary else None),
         "net_sales": summary.get("net_sales"),
         "total_sales": summary.get("total_sales"),
         "categories": categories,
@@ -495,5 +571,5 @@ def parse_shift_close(content: str) -> dict:
         "deleted_items": deleted_items,
         "stock": stock,
         "cashdrawer": cashdrawer,
-        "sections_present": sections_present,
+        "sections_present": sorted(set(sections_present)),
     }

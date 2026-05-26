@@ -22,13 +22,8 @@ from sales_parser import (  # noqa: E402
     parse_shift_close,
     read_shift_close_file,
 )
-from tests.sales_fixtures import FIXTURE_DIR, by_code, write_all  # noqa: E402
+from tests.sales_fixtures import path_for_code  # noqa: E402
 from datetime import datetime  # noqa: E402
-
-
-def setUpModule():
-    if not os.path.isdir(FIXTURE_DIR) or not os.listdir(FIXTURE_DIR):
-        write_all()
 
 
 NOW = datetime(2026, 5, 26, 20, 0, 0)
@@ -49,20 +44,21 @@ class _FakeStore:
 
 
 def _klang_content():
-    return read_shift_close_file(os.path.join(FIXTURE_DIR, by_code("S-KLANG")["filename"]))
+    return read_shift_close_file(path_for_code("S-KLANG"))
 
 
 class OutletIdentificationTests(unittest.TestCase):
     def test_identifies_outlet_from_subject_not_header(self):
-        # BISTRO7 file (header says "BISTRO 7") delivered under a KLANG subject:
-        # identity must follow the subject, header is debug-only.
-        content = read_shift_close_file(os.path.join(FIXTURE_DIR, by_code("S-BISTRO7")["filename"]))
+        # The SEK6 report's header is "NASI KANDAR HAJI SHARFUDDIN" — the SAME
+        # header KLANG uses, which is exactly why the header can't identify the
+        # outlet. Delivered under an S-KLANG subject, identity must be KLANG.
+        content = read_shift_close_file(path_for_code("S-SEK6"))
         subject = "S-KLANG SHIFTCLOSE (1499)"
         code = extract_outlet_from_subject(subject)
         self.assertEqual(code, "S-KLANG")
         self.assertEqual(canonical_outlet_for_code(code), "Klang B.Emas")
         parsed = parse_shift_close(content)
-        self.assertEqual(parsed["header_outlet_raw"], "BISTRO 7")
+        self.assertIn("SHARFUDDIN", (parsed["header_outlet_raw"] or "").upper())
         self.assertNotEqual(parsed["header_outlet_raw"], "Klang B.Emas")
 
     def test_unknown_outlet_subject_logs_warning_continues_ingest(self):

@@ -19,19 +19,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sales_email_fetcher import Mailbox  # noqa: E402
 from sales_ingest import run  # noqa: E402
 from sales_parser import read_shift_close_file  # noqa: E402
-from tests.sales_fixtures import FIXTURE_DIR, by_code, write_all  # noqa: E402
-
-
-def setUpModule():
-    if not os.path.isdir(FIXTURE_DIR) or not os.listdir(FIXTURE_DIR):
-        write_all()
+from tests.sales_fixtures import path_for_code  # noqa: E402
 
 
 NOW = datetime(2026, 5, 26, 20, 0, 0)
 
 
 def _klang_content():
-    return read_shift_close_file(os.path.join(FIXTURE_DIR, by_code("S-KLANG")["filename"]))
+    return read_shift_close_file(path_for_code("S-KLANG"))
 
 
 def make_email(subject, content_str, *, filename="SHIFTCLOSE.TXT", message_id="<m1>", empty=False):
