@@ -23,7 +23,7 @@ from email.utils import parsedate_to_datetime
 from zoneinfo import ZoneInfo
 
 from sales_email_fetcher import Mailbox, extract_shift_close
-from sales_parser import canonical_outlet_for_code, parse_shift_close
+from sales_parser import parse_shift_close
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,7 @@ MALAYSIA_TZ = ZoneInfo("Asia/Kuala_Lumpur")
 
 SALES_DAILY_TABLE = "sales_daily"
 SALES_INGEST_LOG_TABLE = "sales_ingest_log"
+OUTLET_CANONICAL_TABLE = "outlet_canonical"
 CHILD_TABLES = (
     "sales_items",
     "sales_payments",
@@ -44,6 +45,22 @@ CHILD_TABLES = (
 
 
 # --- record building (pure) --------------------------------------------------
+
+def _strip_nulls(value):
+    """Remove NUL (U+0000) chars from a string; Postgres TEXT rejects them.
+    Primary stripping happens in the parser, this is a defensive backstop."""
+    return value.replace("\x00", "") if isinstance(value, str) else value
+
+
+def _sanitize_record(record):
+    """Strip NUL bytes from every string in the parent row + child rows."""
+    record["parent"] = {k: _strip_nulls(v) for k, v in record["parent"].items()}
+    for rows in record["children"].values():
+        for row in rows:
+            for k, v in row.items():
+                row[k] = _strip_nulls(v)
+    return record
+
 
 def _iso(dt):
     return dt.isoformat() if dt is not None else None
@@ -133,11 +150,11 @@ def build_sales_record(email_dict, parsed, outlet_canonical, now_my) -> dict:
         ],
     }
 
-    return {
+    return _sanitize_record({
         "parent": parent,
         "children": children,
         "key": (outlet, shift_no, business_date.isoformat(), shift_type),
-    }
+    })
 
 
 # --- DB store (Supabase) -----------------------------------------------------
@@ -148,6 +165,26 @@ class SupabaseSalesStore:
 
     def __init__(self, client):
         self.client = client
+
+    def load_outlets(self) -> dict:
+        """Load the outlet registry once: code -> {canonical_name, active,
+        confirmed}. Codes are upper-cased to match the parsed subject codes."""
+        resp = (
+            self.client.table(OUTLET_CANONICAL_TABLE)
+            .select("code, canonical_name, active, confirmed")
+            .execute()
+        )
+        out: dict = {}
+        for r in (resp.data or []):
+            code = (r.get("code") or "").upper()
+            if not code:
+                continue
+            out[code] = {
+                "canonical_name": r.get("canonical_name"),
+                "active": bool(r.get("active")),
+                "confirmed": bool(r.get("confirmed")),
+            }
+        return out
 
     def exists(self, outlet_canonical, shift_no, business_date, shift_type) -> bool:
         q = (
@@ -182,22 +219,46 @@ class SupabaseSalesStore:
 
 # --- per-email processing ----------------------------------------------------
 
-def process_email(store, email_dict, *, now_my, resolve_outlet=canonical_outlet_for_code):
-    """Ingest one shift-close email. Returns ``(status, detail)`` where status is
-    ``inserted`` / ``skipped`` (duplicate) / ``error``. Never raises for expected
-    data problems (empty attachment, unparseable total) — those return an error
-    status so the caller leaves the message unread."""
+def process_email(store, email_dict, *, now_my, outlets):
+    """Ingest one shift-close email, gated by the ``outlet_canonical`` registry
+    (``outlets``: code -> {canonical_name, active, confirmed}).
+
+    Returns ``(status, detail)``:
+      * ``inserted``         — stored
+      * ``skipped``          — duplicate (idempotency hit)
+      * ``skipped_inactive`` — outlet known but ``active=false`` (partnership
+                               outlets we deliberately don't track)
+      * ``skipped_unknown``  — outlet not in the registry (or unparseable code)
+      * ``error``            — empty attachment / no total parsed
+
+    An ``active`` outlet with ``confirmed=false`` (placeholder name) still
+    ingests — only logs a warning. Never raises for expected data problems.
+    """
     content = email_dict.get("content") or ""
     if not content.strip():
         return "error", "empty_attachment"
 
-    outlet_canonical = resolve_outlet(email_dict.get("outlet_code"))
-    parsed = parse_shift_close(content)
+    code = (email_dict.get("outlet_code") or "").upper() or None
+    if code is None:
+        return "skipped_unknown", "no outlet code (subject unparsed)"
+    info = outlets.get(code)
+    if info is None:
+        logger.warning("Outlet %r not in outlet_canonical — skipping", code)
+        return "skipped_unknown", f"{code} not in outlet_canonical"
+    if not info.get("active", False):
+        logger.info("Outlet %r is inactive — skipping", code)
+        return "skipped_inactive", f"{code} inactive"
+    if not info.get("confirmed", True):
+        logger.warning(
+            "Outlet %r canonical name %r is unconfirmed — ingesting anyway",
+            code, info.get("canonical_name"),
+        )
 
+    parsed = parse_shift_close(content)
     if parsed.get("total_sales") is None:
         return "error", "no_total_parsed"
 
-    record = build_sales_record(email_dict, parsed, outlet_canonical, now_my)
+    record = build_sales_record(email_dict, parsed, info.get("canonical_name") or code, now_my)
     if store.exists(*record["key"]):
         return "skipped", "duplicate"
     store.save(record)
@@ -221,12 +282,30 @@ def _maybe_log(store, entry):
         log(entry)
 
 
-def run(*, store, mailbox, now_my, since=None, resolve_outlet=canonical_outlet_for_code) -> dict:
+# Statuses whose email we flag \Seen (terminal decisions). skipped_unknown and
+# error are left UNREAD so they retry once the outlet is registered / fixed.
+_MARK_SEEN_STATUSES = frozenset({"inserted", "skipped", "skipped_inactive"})
+_COUNTER_BY_STATUS = {
+    "inserted": "inserted",
+    "skipped": "skipped",
+    "skipped_inactive": "skipped_inactive",
+    "skipped_unknown": "skipped_unknown",
+    "error": "errors",
+}
+
+
+def run(*, store, mailbox, now_my, since=None) -> dict:
     """Drive the mailbox end-to-end. Returns a summary dict.
 
-    Marks a message ``\\Seen`` only on ``inserted``/``skipped``; ``error`` leaves
-    it unread for retry/inspection."""
-    summary = {"fetched": 0, "inserted": 0, "skipped": 0, "errors": 0}
+    The ``outlet_canonical`` registry is loaded ONCE per run (no per-email
+    queries) and used to gate active/confirmed. A message is flagged ``\\Seen``
+    only on inserted / duplicate / inactive; unknown-outlet and error messages
+    stay unread for retry/inspection."""
+    summary = {
+        "fetched": 0, "inserted": 0, "skipped": 0,
+        "skipped_inactive": 0, "skipped_unknown": 0, "errors": 0,
+    }
+    outlets = store.load_outlets()  # one query, reused for the whole batch
     for msg_id in mailbox.search(since=since):
         try:
             msg = mailbox.fetch(msg_id)
@@ -242,24 +321,21 @@ def run(*, store, mailbox, now_my, since=None, resolve_outlet=canonical_outlet_f
             continue
 
         summary["fetched"] += 1
-        outlet_canonical = resolve_outlet(email_dict.get("outlet_code"))
+        code = (email_dict.get("outlet_code") or "").upper()
+        outlet_name = (outlets.get(code) or {}).get("canonical_name") or email_dict.get("outlet_code")
         try:
-            status, detail = process_email(
-                store, email_dict, now_my=now_my, resolve_outlet=resolve_outlet)
+            status, detail = process_email(store, email_dict, now_my=now_my, outlets=outlets)
         except Exception as exc:  # noqa: BLE001 - unexpected; record, leave unread
             logger.exception("Ingest failed for %r", email_dict.get("subject"))
             status, detail = "error", f"exception: {exc}"
 
-        _maybe_log(store, _log_entry(email_dict, status, detail, outlet_canonical))
-
-        if status in ("inserted", "skipped"):
-            summary[status] += 1
+        _maybe_log(store, _log_entry(email_dict, status, detail, outlet_name))
+        summary[_COUNTER_BY_STATUS.get(status, "errors")] += 1
+        if status in _MARK_SEEN_STATUSES:
             try:
                 mailbox.mark_seen(msg_id)
             except Exception:  # noqa: BLE001
                 logger.warning("Could not mark %r seen", msg_id, exc_info=True)
-        else:
-            summary["errors"] += 1
     return summary
 
 

@@ -15,7 +15,6 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sales_ingest import build_sales_record, process_email  # noqa: E402
 from sales_parser import (  # noqa: E402
     canonical_outlet_for_code,
     extract_outlet_from_subject,
@@ -23,28 +22,6 @@ from sales_parser import (  # noqa: E402
     read_shift_close_file,
 )
 from tests.sales_fixtures import path_for_code  # noqa: E402
-from datetime import datetime  # noqa: E402
-
-
-NOW = datetime(2026, 5, 26, 20, 0, 0)
-
-
-class _FakeStore:
-    def __init__(self):
-        self.saved = []
-        self._keys = set()
-
-    def exists(self, *key):
-        return key in self._keys
-
-    def save(self, record):
-        self.saved.append(record)
-        self._keys.add(record["key"])
-        return len(self.saved)
-
-
-def _klang_content():
-    return read_shift_close_file(path_for_code("S-KLANG"))
 
 
 class OutletIdentificationTests(unittest.TestCase):
@@ -61,20 +38,33 @@ class OutletIdentificationTests(unittest.TestCase):
         self.assertIn("SHARFUDDIN", (parsed["header_outlet_raw"] or "").upper())
         self.assertNotEqual(parsed["header_outlet_raw"], "Klang B.Emas")
 
-    def test_unknown_outlet_subject_logs_warning_continues_ingest(self):
-        store = _FakeStore()
-        email_dict = {
-            "subject": "S-FOO SHIFTCLOSE (1)",
-            "outlet_code": "S-FOO",
-            "content": _klang_content(),
-            "message_id": "<foo>",
-        }
+    def test_unknown_outlet_code_returns_none_and_warns(self):
+        # A code not in the in-code map resolves to None with a warning (the
+        # ingestion gate then records it as skipped_unknown — see ingestion tests).
         with self.assertLogs("sales_parser", level="WARNING") as cm:
-            status, _ = process_email(store, email_dict, now_my=NOW)
-        self.assertEqual(status, "inserted")
+            self.assertIsNone(canonical_outlet_for_code("S-FOO"))
         self.assertTrue(any("S-FOO" in m for m in cm.output))
-        # Stored under the raw code so the shift is not lost.
-        self.assertEqual(store.saved[0]["parent"]["outlet_canonical"], "S-FOO")
+
+    def test_extracts_multi_word_outlet_code(self):
+        # Codes may contain a space (e.g. "S-ST KHU"); the old S-\w+ regex
+        # returned NULL for those. Internal whitespace is collapsed + uppercased.
+        cases = {
+            "S-BISTRO7  SHIFTCLOSE (1342)": "S-BISTRO7",
+            "S-VISTA  SHIFTCLOSE (2833)": "S-VISTA",
+            "S-ST KHU  SHIFTCLOSE (860)": "S-ST KHU",
+            "S-MB  SHIFTCLOSE (660)": "S-MB",
+            "S-Damansara  SHIFTCLOSE (2386)": "S-DAMANSARA",
+        }
+        for subject, expected in cases.items():
+            self.assertEqual(extract_outlet_from_subject(subject), expected, subject)
+
+    def test_outlet_S_ST_KHU_maps_to_placeholder(self):
+        with self.assertLogs("sales_parser", level="WARNING"):
+            self.assertEqual(canonical_outlet_for_code("S-ST KHU"), "ST Khulafa")
+
+    def test_outlet_S_MB_maps_to_placeholder(self):
+        with self.assertLogs("sales_parser", level="WARNING"):
+            self.assertEqual(canonical_outlet_for_code("S-MB"), "MB")
 
     def test_outlet_S_KLANG_maps_to_Klang_BEmas(self):
         self.assertEqual(canonical_outlet_for_code("S-KLANG"), "Klang B.Emas")

@@ -162,20 +162,22 @@ def format_top_items_sold(items, n) -> str:
 
 def format_ingest_status(log_rows) -> str:
     """Summarise the last batch of sales_ingest_log rows: counts by status."""
-    fetched = len(log_rows)
-    inserted = sum(1 for r in log_rows if r.get("status") == "inserted")
-    skipped = sum(1 for r in log_rows if r.get("status") == "skipped")
-    errors = sum(1 for r in log_rows if r.get("status") == "error")
+    def n(*statuses):
+        return sum(1 for r in log_rows if r.get("status") in statuses)
+
     lines = [
         "Sales ingest — last 24h:",
-        f"• Emails processed: {fetched}",
-        f"• Inserted: {inserted}",
-        f"• Skipped (duplicates): {skipped}",
-        f"• Errors: {errors}",
+        f"• Fetched: {len(log_rows)}",
+        f"• Inserted: {n('inserted')}",
+        f"• Skipped (duplicate): {n('skipped')}",
+        f"• Skipped (inactive): {n('skipped_inactive')}",
+        f"• Skipped (unknown): {n('skipped_unknown')}",
+        f"• Errors: {n('error')}",
     ]
+    errors = [x for x in log_rows if x.get("status") == "error"]
     if errors:
         lines.append("Recent errors:")
-        for r in [x for x in log_rows if x.get("status") == "error"][:5]:
+        for r in errors[:5]:
             subj = r.get("source_subject") or r.get("source_message_id") or "?"
             lines.append(f"   - {subj}: {r.get('detail')}")
     return "\n".join(lines)

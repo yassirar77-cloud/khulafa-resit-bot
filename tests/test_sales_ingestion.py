@@ -17,9 +17,26 @@ from email.message import EmailMessage
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sales_email_fetcher import Mailbox  # noqa: E402
-from sales_ingest import run  # noqa: E402
-from sales_parser import read_shift_close_file  # noqa: E402
+from sales_ingest import build_sales_record, process_email, run  # noqa: E402
+from sales_parser import OUTLET_CANONICAL_BY_CODE, parse_shift_close, read_shift_close_file  # noqa: E402
 from tests.sales_fixtures import path_for_code  # noqa: E402
+
+
+_INACTIVE = {"S-ST KHU", "S-MB", "S-RAZAK"}
+_UNCONFIRMED = {"S-SBESI", "S-ST KHU", "S-MB", "S-RAZAK"}
+
+
+def _default_outlets():
+    """Registry mirroring the 0015/0016 seed: all real outlets active+confirmed,
+    S-ST KHU / S-MB / S-RAZAK inactive (placeholders)."""
+    return {
+        code.upper(): {
+            "canonical_name": name,
+            "active": code not in _INACTIVE,
+            "confirmed": code not in _UNCONFIRMED,
+        }
+        for code, name in OUTLET_CANONICAL_BY_CODE.items()
+    }
 
 
 NOW = datetime(2026, 5, 26, 20, 0, 0)
@@ -57,10 +74,16 @@ class FakeMailbox:
 
 
 class FakeStore:
-    def __init__(self):
+    def __init__(self, outlets=None):
         self.saved = []
         self.logs = []
         self._keys = set()
+        self._outlets = _default_outlets() if outlets is None else outlets
+        self.load_calls = 0
+
+    def load_outlets(self):
+        self.load_calls += 1
+        return dict(self._outlets)
 
     def exists(self, *key):
         return key in self._keys
@@ -129,6 +152,64 @@ class IngestionRunTests(unittest.TestCase):
         store = FakeStore()
         run(store=store, mailbox=mailbox, now_my=NOW)
         self.assertNotIn(b"1", mailbox.seen)
+
+    def test_ingestion_skips_inactive_outlets(self):
+        # S-ST KHU is active=false — must be skipped (not inserted) and marked read.
+        mailbox = FakeMailbox([(b"1", make_email("S-ST KHU  SHIFTCLOSE (860)", _klang_content()))])
+        store = FakeStore()
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["skipped_inactive"], 1)
+        self.assertEqual(summary["inserted"], 0)
+        self.assertEqual(store.saved, [])
+        self.assertIn(b"1", mailbox.seen)  # terminal decision -> mark read
+        self.assertTrue(any(e["status"] == "skipped_inactive" for e in store.logs))
+
+    def test_ingestion_skips_unknown_outlets(self):
+        # An outlet not in outlet_canonical is skipped and left UNREAD for retry.
+        mailbox = FakeMailbox([(b"1", make_email("S-FOO  SHIFTCLOSE (1)", _klang_content()))])
+        store = FakeStore()
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["skipped_unknown"], 1)
+        self.assertEqual(store.saved, [])
+        self.assertNotIn(b"1", mailbox.seen)  # unread so it retries once registered
+        self.assertTrue(any(e["status"] == "skipped_unknown" for e in store.logs))
+
+    def test_ingestion_proceeds_with_unconfirmed_active_outlets(self):
+        # S-SBESI is active=true, confirmed=false (placeholder name OK) -> ingest.
+        mailbox = FakeMailbox([(b"1", make_email("S-SBESI  SHIFTCLOSE (2019)", _klang_content()))])
+        store = FakeStore()
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["inserted"], 1)
+        self.assertEqual(len(store.saved), 1)
+        self.assertEqual(store.saved[0]["parent"]["outlet_canonical"], "SBESI")
+        self.assertIn(b"1", mailbox.seen)
+
+    def test_outlet_canonical_loaded_once_per_run(self):
+        # The registry is loaded ONCE per run, reused for every email (no N+1).
+        emails = [
+            (b"1", make_email("S-KLANG  SHIFTCLOSE (1499)", _klang_content(), message_id="<a>")),
+            (b"2", make_email("S-SBESI  SHIFTCLOSE (2019)", _klang_content(), message_id="<b>")),
+            (b"3", make_email("S-ST KHU  SHIFTCLOSE (860)", _klang_content(), message_id="<c>")),
+        ]
+        store = FakeStore()
+        run(store=store, mailbox=FakeMailbox(emails), now_my=NOW)
+        self.assertEqual(store.load_calls, 1)
+
+    def test_build_record_strips_null_bytes_before_insert(self):
+        # Defensive backstop: even if raw content carries NUL bytes, no string
+        # in the record (parent or children) reaches Postgres with U+0000.
+        content = _klang_content()
+        email_dict = {
+            "subject": "S-KLANG SHIFTCLOSE (1499)",
+            "outlet_code": "S-KLANG",
+            "content": content + "\x00\x00trailing\x00",
+            "message_id": "<n>",
+            "filename": "x.TXT",
+            "received_at": "Tue, 26 May 2026 19:30:00 +0800",
+        }
+        record = build_sales_record(email_dict, parse_shift_close(content), "Klang B.Emas", NOW)
+        self.assertNotIn("\x00", record["parent"]["raw_content"])
+        self.assertNotIn("\x00", repr(record))
 
     def test_handles_empty_attachment(self):
         mailbox = FakeMailbox([(b"1", make_email("S-KLANG SHIFTCLOSE (1499)", "", empty=True))])

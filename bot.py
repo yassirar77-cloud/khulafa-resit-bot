@@ -3350,9 +3350,13 @@ async def sales_ingest_manual_command(update: Update, context: ContextTypes.DEFA
         await message.reply_text(f"Ingest failed: {exc}")
         return
     await message.reply_text(
-        "Sales ingest done — "
-        f"fetched {summary['fetched']}, inserted {summary['inserted']}, "
-        f"skipped {summary['skipped']}, errors {summary['errors']}."
+        "Sales ingest done —\n"
+        f"• Fetched: {summary['fetched']}\n"
+        f"• Inserted: {summary['inserted']}\n"
+        f"• Skipped (duplicate): {summary['skipped']}\n"
+        f"• Skipped (inactive): {summary['skipped_inactive']}\n"
+        f"• Skipped (unknown): {summary['skipped_unknown']}\n"
+        f"• Errors: {summary['errors']}"
     )
 
 

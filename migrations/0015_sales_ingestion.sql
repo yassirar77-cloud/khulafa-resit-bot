@@ -35,6 +35,8 @@ INSERT INTO public.outlet_canonical (code, canonical_name, confirmed, active) VA
     ('S-SEK20',     'SEK-20',       true,  true),
     ('S-SEK6',      'SEK-6',        true,  true),
     ('S-VISTA',     'Vista',        true,  true),
+    ('S-ST KHU',    'ST Khulafa',   false, false),  -- partnership outlet — not tracked
+    ('S-MB',        'MB',           false, false),  -- partnership outlet — not tracked
     ('S-RAZAK',     'K.L Razak',    false, false)   -- never received yet
 ON CONFLICT (code) DO NOTHING;
 
@@ -185,7 +187,9 @@ CREATE TABLE IF NOT EXISTS public.sales_ingest_log (
     outlet_canonical text,
     source_subject  text,
     source_message_id text,
-    status          text NOT NULL CHECK (status IN ('inserted', 'skipped', 'error')),
+    status          text NOT NULL CHECK (status IN (
+                        'inserted', 'skipped', 'skipped_inactive', 'skipped_unknown', 'error'
+                    )),
     detail          text
 );
 CREATE INDEX IF NOT EXISTS sales_ingest_log_ran_at_idx
