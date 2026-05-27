@@ -268,7 +268,11 @@ def _food_cost_sections(client, now_my) -> dict:
         recon, recon_date = [], today
 
     if recon:
-        out["food_cost"] = {"label": recon_date.isoformat(), "rows": recon}
+        out["food_cost"] = {
+            "label": recon_date.isoformat(),
+            "rows": recon,
+            "unclassified": _unclassified_food_cost(client, recon),
+        }
         out["food_cost_anomalies"] = _food_cost_anomalies(client, recon, recon_date)
         out["cash_alerts"] = _cash_no_receipt_alerts(client, recon)
 
@@ -340,6 +344,31 @@ def _cash_no_receipt_alerts(client, recon_rows) -> list:
         for r in log_rows
     ]
     return sorted(alerts, key=lambda a: -(_to_float(a.get("amount"))))
+
+
+def _unclassified_food_cost(client, recon_rows) -> dict:
+    """How much of the food-cost figure came from UNKNOWN-merchant receipts
+    (receipt_classification='unknown_included'), so the digest can prompt
+    verification of high-value ones. {count, value}."""
+    recon_ids = [r.get("id") for r in recon_rows if r.get("id") is not None]
+    if not recon_ids:
+        return {"count": 0, "value": 0.0}
+    try:
+        log_rows = _rows(
+            client.table(MATCH_LOG_TABLE)
+            .select("amount, receipt_classification")
+            .in_("reconciliation_id", recon_ids)
+            .eq("receipt_classification", "unknown_included")
+            .execute()
+        )
+    except Exception:
+        # Column not migrated (0023) yet, or table missing — degrade silently.
+        logger.warning("digest: unclassified-merchant stat unavailable", exc_info=True)
+        return {"count": 0, "value": 0.0}
+    return {
+        "count": len(log_rows),
+        "value": round(sum(_to_float(r.get("amount")) for r in log_rows), 2),
+    }
 
 
 def _top_items_yesterday(client, now_my) -> dict:
