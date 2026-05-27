@@ -3450,60 +3450,72 @@ def _fetch_daily_top_items_rows(business_dates):
     return resp.data or []
 
 
+def _fetch_daily_with_fallback():
+    """Today's D-file rows, falling back to yesterday's when today is empty.
+
+    D-files land ~07:00 covering YESTERDAY's business, so today is empty until
+    the evening files arrive — the morning-after query should show the day that
+    just closed. Returns ``(rows, label)``; the yesterday label is flagged."""
+    today = _my_today()
+    yesterday = today - timedelta(days=1)
+    today_rows = _fetch_daily_summary_rows([today.isoformat()])
+    yesterday_rows = [] if today_rows else _fetch_daily_summary_rows([yesterday.isoformat()])
+    return sales_analytics.select_daily_dataset(
+        today_rows, yesterday_rows,
+        today.isoformat(), f"yesterday ({yesterday.isoformat()})",
+    )
+
+
 async def sales_summary_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message or not is_reviewer(_command_owner_id(update)):
         return
-    today = _my_today().isoformat()
     try:
-        rows = await asyncio.to_thread(_fetch_daily_summary_rows, [today])
+        rows, label = await asyncio.to_thread(_fetch_daily_with_fallback)
     except Exception:
         logger.exception("sales_summary_today failed")
         await message.reply_text("Failed to fetch daily summary.")
         return
-    await message.reply_text(sales_analytics.format_daily_summary(today, rows))
+    await message.reply_text(sales_analytics.format_daily_summary(label, rows))
 
 
 async def sales_customers_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message or not is_reviewer(_command_owner_id(update)):
         return
-    today = _my_today().isoformat()
     try:
-        rows = await asyncio.to_thread(_fetch_daily_summary_rows, [today])
+        rows, label = await asyncio.to_thread(_fetch_daily_with_fallback)
     except Exception:
         logger.exception("sales_customers_today failed")
         await message.reply_text("Failed to fetch customer counts.")
         return
-    await message.reply_text(sales_analytics.format_customers(today, rows))
+    await message.reply_text(sales_analytics.format_customers(label, rows))
 
 
 async def sales_avg_ticket_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message or not is_reviewer(_command_owner_id(update)):
         return
-    today = _my_today().isoformat()
     try:
-        rows = await asyncio.to_thread(_fetch_daily_summary_rows, [today])
+        rows, label = await asyncio.to_thread(_fetch_daily_with_fallback)
     except Exception:
         logger.exception("sales_avg_ticket failed")
         await message.reply_text("Failed to fetch average ticket.")
         return
-    await message.reply_text(sales_analytics.format_avg_ticket(today, rows))
+    await message.reply_text(sales_analytics.format_avg_ticket(label, rows))
 
 
 async def sales_takeaway_split_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message or not is_reviewer(_command_owner_id(update)):
         return
-    today = _my_today().isoformat()
     try:
-        rows = await asyncio.to_thread(_fetch_daily_summary_rows, [today])
+        rows, label = await asyncio.to_thread(_fetch_daily_with_fallback)
     except Exception:
         logger.exception("sales_takeaway_split failed")
         await message.reply_text("Failed to fetch takeaway split.")
         return
-    await message.reply_text(sales_analytics.format_takeaway_split(today, rows))
+    await message.reply_text(sales_analytics.format_takeaway_split(label, rows))
 
 
 async def top_items_yesterday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
