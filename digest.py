@@ -19,6 +19,11 @@ like "protein_seafood" opened an italic run Telegram couldn't close (400).
 
 from datetime import timedelta
 
+import food_cost_analytics as fca
+import sales_analytics
+from outlet_resolver import canonical_outlet
+from purchase_reconciliation import strip_pos_prefix
+
 OUTLIER_MAX = 5000.0
 NAME_MAX = 25
 PRICE_ALERT_MIN_PCT = 10.0
@@ -28,7 +33,9 @@ TOP_N = 5
 TG_LIMIT = 4096
 SECTION_SEP = "═══════════════════════"
 
-# The 8 section headers (used by tests to assert completeness). HTML bold.
+# The 8 original section headers (used by tests to assert completeness). The
+# PR #37 F&B-intelligence sections are listed separately in NEW_SECTION_HEADERS
+# so the historic "8 sections" contract stays intact. HTML bold.
 SECTION_HEADERS = (
     "📊 <b>TODAY'S RECEIPTS</b>",
     "🏪 <b>TOP SUPPLIERS TODAY</b>",
@@ -38,6 +45,15 @@ SECTION_HEADERS = (
     "⚠️ <b>DATA QUALITY ALERTS</b>",
     "🚫 <b>OUTLIER FILTER NOTICE</b>",
     "🛡️ <b>NEW SUPPLIERS DISCOVERED</b>",
+)
+
+# PR #37 sales/food-cost sections, inserted after TOP SUPPLIERS TODAY.
+NEW_SECTION_HEADERS = (
+    "💰 <b>SALES TODAY</b>",
+    "🍽️ <b>FOOD COST %</b>",
+    "📈 <b>FOOD COST TRENDS</b>",
+    "🚨 <b>CASH-NO-RECEIPT ALERTS</b>",
+    "🏆 <b>TOP ITEMS YESTERDAY</b>",
 )
 
 
@@ -124,9 +140,15 @@ def aggregate_items(rows, limit=TOP_N, outlier_max=OUTLIER_MAX):
 
 
 def aggregate_outlets(rows, limit=TOP_N):
+    # Bug 3: receipts.outlet arrives as free-form chat-title text ("SEK 20",
+    # "KHULAFA SEK-20", "Sek 6"), so grouping on the raw value splits one
+    # outlet's spend across several buckets and undercounts it. Normalise to the
+    # canonical outlet first; values that don't resolve keep their raw label so
+    # nothing silently vanishes.
     by: dict = {}
     for r in rows:
-        outlet = r.get("outlet") or "(no outlet)"
+        raw = r.get("outlet")
+        outlet = canonical_outlet(raw) or (raw if raw else "(no outlet)")
         receipts = by.setdefault(outlet, {})
         receipts[r.get("receipt_id")] = _num(r.get("receipt_total")) or 0.0
     out = [
@@ -267,6 +289,111 @@ def _new_suppliers_block(new_suppliers):
     return "\n".join(lines)
 
 
+# --- PR #37: sales + food-cost section builders -----------------------------
+
+def _pct(value, suffix="%"):
+    return f"{value:.1f}{suffix}" if value is not None else "n/a"
+
+
+def _sales_today_block(sales):
+    """``sales``: {label, outlets, revenue, customers, avg_per_customer,
+    takeaway_pct, dine_in_pct} (already computed in digest_data)."""
+    label = sales.get("label") if sales else None
+    header = f"{NEW_SECTION_HEADERS[0]} ({_html(label)})" if label else NEW_SECTION_HEADERS[0]
+    if not sales or not sales.get("outlets"):
+        return f"{header}\n- (no sales data yet)"
+    ta = sales.get("takeaway_pct")
+    di = sales.get("dine_in_pct")
+    return "\n".join([
+        header,
+        f"- {int(sales.get('outlets', 0))} outlets reporting",
+        f"- {format_rm(sales.get('revenue'))} total revenue",
+        f"- {int(sales.get('customers', 0))} customers served",
+        f"- Avg {format_rm(sales.get('avg_per_customer'))}/customer",
+        f"- Takeaway {_pct(ta)} | Dine-in {_pct(di)}",
+    ])
+
+
+def _food_cost_block(food_cost):
+    """``food_cost``: {label, rows} where rows are purchase_reconciliation
+    rows. Computes the group line + per-outlet ranking via food_cost_analytics."""
+    label = food_cost.get("label") if food_cost else None
+    header = f"{NEW_SECTION_HEADERS[1]} ({_html(label)})" if label else NEW_SECTION_HEADERS[1]
+    rows = (food_cost or {}).get("rows") or []
+    if not rows:
+        return f"{header}\n- (no reconciliation data — run /reconcile_now)"
+    _sales, _purch, group_pct = fca.group_food_cost(rows)
+    group_status = fca.food_cost_status(group_pct)
+    group_line = (
+        f"{fca.status_emoji(group_status)} {group_pct:.1f}%" if group_pct is not None else "⚪ n/a"
+    )
+    lines = [header, f"Khulafa Group: {group_line}", "", "Per outlet:"]
+    for o in fca.per_outlet_food_cost(rows):
+        emoji = fca.status_emoji(o["status"])
+        if o["pct"] is None:
+            lines.append(f"- {_name(o['outlet'])}: data incomplete {emoji}")
+        else:
+            flag = " INVESTIGATE" if o["status"] == "red" else ""
+            lines.append(f"- {_name(o['outlet'])}: {o['pct']:.1f}% {emoji}{flag}")
+    return "\n".join(lines)
+
+
+def _food_cost_trends_block(anomalies):
+    """``anomalies``: list of food_cost_analytics.Anomaly (today vs 7-day avg)."""
+    lines = [f"{NEW_SECTION_HEADERS[2]} (vs 7-day avg)"]
+    if not anomalies:
+        lines.append("- No significant food cost deviations.")
+        return "\n".join(lines)
+    sev_emoji = {"critical": "🚨", "warning": "⚠️", "info": "🟢"}
+    for a in anomalies:
+        emoji = sev_emoji.get(a.severity, "")
+        sign = "+" if a.delta_pct >= 0 else ""
+        lines.append(
+            f"- {_name(a.outlet)}: {a.today_pct:.1f}% vs {a.avg_pct:.1f}% avg "
+            f"({sign}{a.delta_pct:.1f}% {emoji})"
+        )
+    return "\n".join(lines)
+
+
+def _cash_no_receipt_block(alerts):
+    """``alerts``: list of {outlet, amount, description, paid_at?}."""
+    lines = [f"{NEW_SECTION_HEADERS[3]}"]
+    if not alerts:
+        lines.append("- None — every POS cash payout has a matching receipt.")
+        return "\n".join(lines)
+    lines.append("Cash paid via POS but no receipt uploaded:")
+    total = 0.0
+    for a in alerts:
+        amt = _num(a.get("amount")) or 0.0
+        total += amt
+        paid = a.get("paid_at")
+        when = f" (paid {_html(paid)})" if paid else ""
+        raw_desc = a.get("description") or ""
+        desc = _name(strip_pos_prefix(raw_desc) or raw_desc or "?")
+        lines.append(f"- {_name(a.get('outlet'))}: {format_rm(amt)} to {desc}{when}")
+    lines.append(f"Total {format_rm(total)} unaccounted — ask cashiers to upload photos")
+    return "\n".join(lines)
+
+
+def _top_items_yesterday_block(top_items):
+    """``top_items``: {label, items} where items are sales_daily_top_items rows."""
+    label = top_items.get("label") if top_items else None
+    header = (
+        f"{NEW_SECTION_HEADERS[4]} (top {TOP_N}, group-wide, {_html(label)})"
+        if label else f"{NEW_SECTION_HEADERS[4]} (top {TOP_N}, group-wide)"
+    )
+    rows = (top_items or {}).get("items") or []
+    items = sales_analytics.top_items_from_rankings(rows, TOP_N)
+    if not items:
+        return f"{header}\n- (no sales item data yet)"
+    lines = [header]
+    for i, it in enumerate(items, start=1):
+        lines.append(
+            f"{i}. {_name(it['item_name'])}: {it['qty']:g} sold ({format_rm(it['amount'])})"
+        )
+    return "\n".join(lines)
+
+
 def _footer_block(now_my):
     return "\n".join([
         SECTION_SEP,
@@ -288,14 +415,26 @@ def render_blocks(data, now_my):
 
     pm = data.get("pm_window_rows", []) or []
     suppliers = aggregate_suppliers(_slice(pm, iso, iso))
+    # Bug 1: price_movements only carries receipts with fully-resolved item
+    # lines, so "top suppliers today" came up empty despite dozens of receipts.
+    # Fall back to the receipts-derived suppliers gathered in digest_data.
+    if not suppliers:
+        suppliers = data.get("today_suppliers", []) or []
     items = aggregate_items(_slice(pm, week_start, iso))
-    outlets = aggregate_outlets(_slice(pm, week_start, iso))
+    # Bug 3: prefer the receipts-derived weekly outlet spend (true totals, not
+    # just resolved line items) when digest_data supplies it.
+    outlets = data.get("outlet_spending") or aggregate_outlets(_slice(pm, week_start, iso))
     alerts = price_alerts(_slice(pm, recent_start, iso), _slice(pm, prior_start, prior_end))
 
     return [
         _header_block(now_my),
         _today_block(data.get("today", {})),
         _suppliers_block(suppliers),
+        _sales_today_block(data.get("sales_today", {})),
+        _food_cost_block(data.get("food_cost", {})),
+        _food_cost_trends_block(data.get("food_cost_anomalies", [])),
+        _cash_no_receipt_block(data.get("cash_alerts", [])),
+        _top_items_yesterday_block(data.get("top_items_yesterday", {})),
         _items_block(items),
         _alerts_block(alerts),
         _outlets_block(outlets),

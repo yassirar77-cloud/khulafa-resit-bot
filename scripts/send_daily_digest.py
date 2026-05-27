@@ -24,6 +24,10 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import reconciliation_service  # noqa: E402
+
+from datetime import timedelta  # noqa: E402
+
 from digest import build_digest_messages, parse_mode_attempts  # noqa: E402
 from digest_data import MALAYSIA_TZ, gather_digest_data, log_digest  # noqa: E402
 
@@ -136,8 +140,25 @@ def main() -> None:
         return
     client = _build_client()
     now_my = datetime.now(MALAYSIA_TZ)
+    _reconcile_before_digest(client, now_my)
     summary = run(client, recipients=recipients, now_my=now_my, send_fn=_telegram_send, plain=args.plain)
     logger.info("Digest delivery: %s", summary)
+
+
+def _reconcile_before_digest(client, now_my) -> None:
+    """Refresh purchase_reconciliation for today + yesterday so the digest's
+    food-cost sections are current. Best-effort: a failure must not block the
+    digest itself."""
+    today = now_my.date()
+    dates = [today.isoformat(), (today - timedelta(days=1)).isoformat()]
+    try:
+        results = reconciliation_service.run_reconciliation_for_dates(client, dates)
+        logger.info(
+            "Reconciliation before digest: %s",
+            {r["business_date"]: r["outlets_processed"] for r in results},
+        )
+    except Exception:
+        logger.warning("Reconciliation before digest failed", exc_info=True)
 
 
 if __name__ == "__main__":

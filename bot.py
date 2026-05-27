@@ -88,6 +88,8 @@ from backfill_items import (
 )
 import analytics
 import digest
+import food_cost_analytics
+import reconciliation_service
 import sales_analytics
 from digest_data import gather_digest_data, log_digest
 from sales_ingest import run_ingest_once
@@ -3362,23 +3364,127 @@ async def sales_ingest_manual_command(update: Update, context: ContextTypes.DEFA
     )
 
 
+RECONCILIATION_TABLE = "purchase_reconciliation"
+MATCH_LOG_TABLE = "purchase_match_log"
+
+
+def _fetch_recon_rows(business_dates):
+    resp = (
+        supabase.table(RECONCILIATION_TABLE)
+        .select("id, outlet_canonical, business_date, sales_total, "
+                "total_food_purchases, food_cost_percent")
+        .in_("business_date", business_dates)
+        .execute()
+    )
+    return resp.data or []
+
+
+def _fetch_recon_with_fallback():
+    """Reconciliation rows for today, falling back to yesterday (sales D-files
+    for today land the next morning). Returns ``(rows, label)``."""
+    today = _my_today()
+    yesterday = today - timedelta(days=1)
+    rows = _fetch_recon_rows([today.isoformat()])
+    if rows:
+        return rows, today.isoformat()
+    rows = _fetch_recon_rows([yesterday.isoformat()])
+    return rows, f"yesterday ({yesterday.isoformat()})"
+
+
+def _fetch_cash_no_receipt_alerts(recon_rows):
+    """Type B (cash paid, no receipt) match-log entries for the given
+    reconciliation rows, mapped back to their outlet."""
+    id_to_outlet = {
+        r.get("id"): r.get("outlet_canonical") for r in recon_rows if r.get("id") is not None
+    }
+    if not id_to_outlet:
+        return []
+    resp = (
+        supabase.table(MATCH_LOG_TABLE)
+        .select("reconciliation_id, amount, merchant_or_description, match_type")
+        .in_("reconciliation_id", list(id_to_outlet))
+        .eq("match_type", "B_cash_no_receipt")
+        .execute()
+    )
+    alerts = [
+        {
+            "outlet": id_to_outlet.get(r.get("reconciliation_id")),
+            "amount": r.get("amount"),
+            "description": r.get("merchant_or_description"),
+        }
+        for r in (resp.data or [])
+    ]
+    return alerts
+
+
 async def food_cost_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message or not is_reviewer(_command_owner_id(update)):
         return
-    today = _my_today().isoformat()
     try:
-        sales_rows = await asyncio.to_thread(_fetch_sales_rows, [today])
-        purchase_rows = await asyncio.to_thread(_fetch_purchase_rows, today, today)
+        rows, label = await asyncio.to_thread(_fetch_recon_with_fallback)
     except Exception:
         logger.exception("food_cost_today failed")
         await message.reply_text("Failed to compute food cost.")
         return
-    sales_by = sales_analytics.aggregate_sales_by_outlet(sales_rows)
-    purch_by = _purchases_by_outlet(purchase_rows)
+    await message.reply_text(food_cost_analytics.format_food_cost_today(label, rows))
+
+
+async def food_cost_outlet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    if not context.args:
+        await message.reply_text("Usage: /food_cost_outlet <name>\nExample: /food_cost_outlet jakel")
+        return
+    outlet = _resolve_outlet_name(" ".join(context.args))
+    dates = _business_date_list(7)
+    try:
+        all_rows = await asyncio.to_thread(_fetch_recon_rows, dates)
+    except Exception:
+        logger.exception("food_cost_outlet failed")
+        await message.reply_text("Failed to read food cost trend.")
+        return
+    outlet_rows = [r for r in all_rows if r.get("outlet_canonical") == outlet]
+    _s, _p, group_pct = food_cost_analytics.group_food_cost(all_rows)
     await message.reply_text(
-        sales_analytics.format_food_cost(f"Food cost today ({today}):", sales_by, purch_by)
+        food_cost_analytics.format_outlet_trend(outlet, outlet_rows, group_pct)
     )
+
+
+async def cash_no_receipt_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    try:
+        rows, label = await asyncio.to_thread(_fetch_recon_with_fallback)
+        alerts = await asyncio.to_thread(_fetch_cash_no_receipt_alerts, rows)
+    except Exception:
+        logger.exception("cash_no_receipt_today failed")
+        await message.reply_text("Failed to read cash-no-receipt alerts.")
+        return
+    await message.reply_text(food_cost_analytics.format_cash_no_receipt(label, alerts))
+
+
+async def reconcile_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    today = _my_today()
+    dates = [today.isoformat(), (today - timedelta(days=1)).isoformat()]
+    await message.reply_text("Reconciling receipts against POS payouts…")
+    try:
+        results = await asyncio.to_thread(
+            reconciliation_service.run_reconciliation_for_dates, supabase, dates
+        )
+    except Exception as exc:  # noqa: BLE001 - surfaced to the owner
+        logger.exception("reconcile_now failed")
+        await message.reply_text(f"Reconciliation failed: {exc}")
+        return
+    lines = ["Reconciliation done —"]
+    for res in results:
+        lines.append(f"• {res['business_date']}: {res['outlets_processed']} outlets")
+    await message.reply_text("\n".join(lines))
 
 
 async def food_cost_week_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3590,6 +3696,9 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("sales_ingest_manual", sales_ingest_manual_command))
     app.add_handler(CommandHandler("food_cost_today", food_cost_today_command))
     app.add_handler(CommandHandler("food_cost_week", food_cost_week_command))
+    app.add_handler(CommandHandler("food_cost_outlet", food_cost_outlet_command))
+    app.add_handler(CommandHandler("cash_no_receipt_today", cash_no_receipt_today_command))
+    app.add_handler(CommandHandler("reconcile_now", reconcile_now_command))
     app.add_handler(CommandHandler("top_items_sold", top_items_sold_command))
     app.add_handler(CommandHandler("sales_summary_today", sales_summary_today_command))
     app.add_handler(CommandHandler("sales_customers_today", sales_customers_today_command))
