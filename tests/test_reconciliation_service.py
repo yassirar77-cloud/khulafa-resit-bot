@@ -158,6 +158,35 @@ class ReconciliationServiceTests(unittest.TestCase):
         self.assertEqual(types_seen, {"A_matched", "B_cash_no_receipt", "E_excluded_utility"})
         self.assertTrue(all(r.get("reconciliation_id") == row["id"] for r in log))
 
+    def test_production_outlet_variants_now_match(self):
+        # Hotfix regression: receipts arrive with messy outlet strings
+        # ("HJ SHARFUDDIN SEK 6") while sales key on the canonical "SEK-6".
+        # Before the resolver fix these receipts were dropped, leaving 0 matches
+        # and every payout misclassified as cash-no-receipt.
+        seed = {
+            "merchant_canonical": [{"id": 1, "display_name": "BABAS"}],
+            "receipts": [
+                {"id": 1001, "total": 60.0, "merchant": "BABAS PRODUCTS",
+                 "merchant_canonical_id": 1, "outlet": "HJ SHARFUDDIN SEK 6",
+                 "receipt_date": "2026-05-26", "receipt_type": "SUPPLIER_PURCHASE"},
+            ],
+            "sales_daily_summary": [
+                {"id": 5001, "outlet_canonical": "SEK-6", "business_date": "2026-05-26",
+                 "day_sales": 600.0},
+            ],
+            "sales_daily_payouts": [
+                {"id": 7001, "summary_id": 5001, "description": "PAY TO BABAS",
+                 "vendor_name": "BABAS", "amount": 60.0},
+            ],
+        }
+        client = FakeClient(seed)
+        rs.run_reconciliation(client, "2026-05-26")
+        row = client.store["purchase_reconciliation"][0]
+        self.assertEqual(row["outlet_canonical"], "SEK-6")
+        self.assertEqual(row["matched_count"], 1)            # was 0 before the fix
+        self.assertEqual(row["unmatched_pos_payouts"], 0)    # no false Type B
+        self.assertEqual(row["food_cost_percent"], 10.0)
+
     def test_idempotent_rerun_overwrites(self):
         client = FakeClient(self._seed())
         rs.run_reconciliation(client, "2026-05-29")
