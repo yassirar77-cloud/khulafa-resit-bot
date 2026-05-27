@@ -1,0 +1,188 @@
+"""DB glue for the smart receipt/POS-payout merge (PR #37).
+
+Fetches the day's receipts (supplier purchases), POS payouts
+(sales_daily_payouts) and sales (sales_daily_summary), runs the pure matcher in
+purchase_reconciliation.py, and UPSERTs the result into purchase_reconciliation
+plus a per-match purchase_match_log audit trail. Idempotent: re-running a date
+overwrites that date's rows.
+
+Called nightly before the digest and on-demand by /reconcile_now.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections import defaultdict
+
+import purchase_reconciliation as pr
+from outlet_resolver import canonical_outlet
+
+logger = logging.getLogger(__name__)
+
+RECEIPTS_TABLE = "receipts"
+MERCHANT_CANONICAL_TABLE = "merchant_canonical"
+SALES_DAILY_SUMMARY_TABLE = "sales_daily_summary"
+SALES_DAILY_PAYOUTS_TABLE = "sales_daily_payouts"
+RECONCILIATION_TABLE = "purchase_reconciliation"
+MATCH_LOG_TABLE = "purchase_match_log"
+
+SUPPLIER_PURCHASE = "SUPPLIER_PURCHASE"
+
+
+def _rows(resp):
+    return getattr(resp, "data", None) or []
+
+
+def _load_canonical_merchants(client) -> dict:
+    """{merchant_canonical_id: display_name}."""
+    rows = _rows(
+        client.table(MERCHANT_CANONICAL_TABLE).select("id, display_name").execute()
+    )
+    return {r["id"]: r.get("display_name") for r in rows if r.get("id") is not None}
+
+
+def _fetch_receipts(client, business_date):
+    return _rows(
+        client.table(RECEIPTS_TABLE)
+        .select("id, total, merchant, merchant_canonical_id, outlet, receipt_date")
+        .eq("receipt_type", SUPPLIER_PURCHASE)
+        .eq("receipt_date", str(business_date))
+        .execute()
+    )
+
+
+def _fetch_summaries(client, business_date):
+    return _rows(
+        client.table(SALES_DAILY_SUMMARY_TABLE)
+        .select("id, outlet_canonical, business_date, day_sales")
+        .eq("business_date", str(business_date))
+        .execute()
+    )
+
+
+def _fetch_payouts(client, summary_ids):
+    if not summary_ids:
+        return []
+    return _rows(
+        client.table(SALES_DAILY_PAYOUTS_TABLE)
+        .select("id, summary_id, description, vendor_name, amount")
+        .in_("summary_id", summary_ids)
+        .execute()
+    )
+
+
+def _float(value):
+    try:
+        return float(value) if value is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _receipts_by_outlet(receipt_rows, canonical_by_id) -> dict:
+    by_outlet: dict[str, list] = defaultdict(list)
+    for r in receipt_rows:
+        outlet = canonical_outlet(r.get("outlet"))
+        if outlet is None:
+            continue
+        by_outlet[outlet].append(pr.Receipt(
+            id=r.get("id"),
+            amount=_float(r.get("total")),
+            merchant_canonical=canonical_by_id.get(r.get("merchant_canonical_id")),
+            merchant=r.get("merchant"),
+        ))
+    return by_outlet
+
+
+def _payouts_by_outlet(summaries, payout_rows) -> dict:
+    summary_outlet = {s["id"]: s.get("outlet_canonical") for s in summaries}
+    by_outlet: dict[str, list] = defaultdict(list)
+    for p in payout_rows:
+        outlet = summary_outlet.get(p.get("summary_id"))
+        if outlet is None:
+            continue
+        by_outlet[outlet].append(pr.POSPayout(
+            id=p.get("id"),
+            description=p.get("description") or "",
+            vendor_name=p.get("vendor_name"),
+            amount=_float(p.get("amount")),
+        ))
+    return by_outlet
+
+
+def reconcile_outlet(client, outlet, business_date, receipts, payouts,
+                     canonical_names, sales_total):
+    """Run the pure matcher for one outlet/date and persist the result.
+    Returns the stored purchase_reconciliation row dict (with id)."""
+    result = pr.match_receipts_to_payouts(receipts, payouts, canonical_names)
+    row = pr.summarize(result, outlet, business_date, sales_total=sales_total)
+
+    upserted = _rows(
+        client.table(RECONCILIATION_TABLE)
+        .upsert(row, on_conflict="outlet_canonical,business_date")
+        .execute()
+    )
+    if not upserted:
+        # Some Supabase clients don't return rows on upsert; read it back.
+        upserted = _rows(
+            client.table(RECONCILIATION_TABLE)
+            .select("id")
+            .eq("outlet_canonical", outlet)
+            .eq("business_date", str(business_date))
+            .execute()
+        )
+    recon_id = upserted[0].get("id") if upserted else None
+
+    if recon_id is not None:
+        # Idempotent rewrite of the per-match audit trail for this run.
+        client.table(MATCH_LOG_TABLE).delete().eq("reconciliation_id", recon_id).execute()
+        log_rows = pr.build_match_log(result)
+        for lr in log_rows:
+            lr["reconciliation_id"] = recon_id
+        if log_rows:
+            client.table(MATCH_LOG_TABLE).insert(log_rows).execute()
+    stored = dict(row)
+    stored["id"] = recon_id
+    return stored
+
+
+def run_reconciliation(client, business_date) -> dict:
+    """Reconcile every outlet that has sales or receipts on ``business_date``.
+    Returns {outlets_processed, business_date, rows}."""
+    canonical_by_id = _load_canonical_merchants(client)
+    canonical_names = [n for n in canonical_by_id.values() if n]
+
+    receipt_rows = _fetch_receipts(client, business_date)
+    summaries = _fetch_summaries(client, business_date)
+    payout_rows = _fetch_payouts(client, [s["id"] for s in summaries])
+
+    receipts_by_outlet = _receipts_by_outlet(receipt_rows, canonical_by_id)
+    payouts_by_outlet = _payouts_by_outlet(summaries, payout_rows)
+    sales_by_outlet = {
+        s.get("outlet_canonical"): _float(s.get("day_sales")) for s in summaries
+    }
+
+    outlets = set(receipts_by_outlet) | set(payouts_by_outlet) | set(sales_by_outlet)
+    outlets.discard(None)
+
+    stored_rows = []
+    for outlet in sorted(outlets):
+        try:
+            stored = reconcile_outlet(
+                client, outlet, business_date,
+                receipts_by_outlet.get(outlet, []),
+                payouts_by_outlet.get(outlet, []),
+                canonical_names,
+                sales_by_outlet.get(outlet),
+            )
+            stored_rows.append(stored)
+        except Exception:
+            logger.exception("reconcile failed for %s on %s", outlet, business_date)
+    return {
+        "business_date": str(business_date),
+        "outlets_processed": len(stored_rows),
+        "rows": stored_rows,
+    }
+
+
+def run_reconciliation_for_dates(client, business_dates) -> list[dict]:
+    return [run_reconciliation(client, d) for d in business_dates]
