@@ -123,12 +123,22 @@ _BUSINESS_DATE_HOUR_CUTOFF = 17
 
 
 def business_date_for_printed(printed_at):
-    """The business day a D-file covers, from its print timestamp (PR #61).
+    """The business day a D-file covers, from its print timestamp (PR #61/#62).
 
     >=17:00 (evening close) -> the header date; <17:00 (post-midnight overnight
-    close) -> the previous day. Returns ``None`` if ``printed_at`` is missing."""
+    close) -> the previous day. Returns ``None`` if ``printed_at`` is missing.
+
+    ``printed_at`` is the POS wall-clock time parsed straight from the header and
+    is ALREADY Asia/Kuala_Lumpur local (not UTC). The hour is read directly — we
+    must NOT apply any timezone conversion, which would double-shift the time and
+    mis-date the post-midnight overnight files. As a safety net, an
+    accidentally-tz-aware value has its tzinfo dropped (no conversion) so the
+    wall-clock hour is preserved.
+    """
     if printed_at is None:
         return None
+    if printed_at.tzinfo is not None:
+        printed_at = printed_at.replace(tzinfo=None)
     day = printed_at.date()
     if printed_at.hour >= _BUSINESS_DATE_HOUR_CUTOFF:
         return day

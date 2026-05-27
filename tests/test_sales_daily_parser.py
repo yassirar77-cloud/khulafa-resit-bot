@@ -46,6 +46,23 @@ class BusinessDateTests(unittest.TestCase):
         # Real D-Damansara (printed 19:00) -> 2026-05-26.
         self.assertEqual(str(_parsed("D-DAMANSARA")["header"]["business_date"]), "2026-05-26")
 
+    def test_sek14_morning_print_is_previous_business_day(self):
+        # PR #62 regression: D-SEK14 header "ON 26/May/2026 07:00:02". The hour is
+        # read directly from the (naive, MY-local) timestamp — NO tz conversion —
+        # so the 07:00 overnight close belongs to 2026-05-25, NOT 2026-05-26.
+        self.assertEqual(str(_parsed("D-SEK14")["header"]["business_date"]), "2026-05-25")
+
+    def test_business_date_ignores_timezone_no_double_shift(self):
+        # A tz-aware value must read its wall-clock hour, never convert. 07:00 +08
+        # stays the 07:00 business day (previous day), not shifted to UTC 23:00.
+        from datetime import timedelta, timezone
+        my = timezone(timedelta(hours=8))
+        aware = datetime(2026, 5, 26, 7, 0, 0, tzinfo=my)
+        self.assertEqual(business_date_for_printed(aware), datetime(2026, 5, 25).date())
+        # And it matches the naive result for the same wall clock.
+        self.assertEqual(business_date_for_printed(aware),
+                         business_date_for_printed(datetime(2026, 5, 26, 7, 0, 0)))
+
 
 class DailyParserTests(unittest.TestCase):
     def test_parses_all_7_without_error(self):
