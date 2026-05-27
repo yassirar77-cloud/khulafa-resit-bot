@@ -315,26 +315,49 @@ def _sales_today_block(sales):
 
 
 def _food_cost_block(food_cost):
-    """``food_cost``: {label, rows} where rows are purchase_reconciliation
-    rows. Computes the group line + per-outlet ranking via food_cost_analytics."""
+    """``food_cost``: {label, rows, rolling?, rolling_group_pct?, rolling_days?}.
+
+    Shows BOTH the volatile daily food cost % and the smoothed 7-day rolling %
+    per outlet, so a burst-delivery day is visible but read in context. The
+    INVESTIGATE flag keys off the 7-day rolling when available (the stable
+    signal), else the daily %."""
     label = food_cost.get("label") if food_cost else None
     header = f"{NEW_SECTION_HEADERS[1]} ({_html(label)})" if label else NEW_SECTION_HEADERS[1]
     rows = (food_cost or {}).get("rows") or []
     if not rows:
         return f"{header}\n- (no reconciliation data — run /reconcile_now)"
+    rolling = (food_cost or {}).get("rolling") or {}
+    rolling_days = (food_cost or {}).get("rolling_days") or 7
+    rolling_group_pct = (food_cost or {}).get("rolling_group_pct")
+
     _sales, _purch, group_pct = fca.group_food_cost(rows)
-    group_status = fca.food_cost_status(group_pct)
-    group_line = (
-        f"{fca.status_emoji(group_status)} {group_pct:.1f}%" if group_pct is not None else "⚪ n/a"
+    daily_group = (
+        f"{fca.status_emoji(fca.food_cost_status(group_pct))} {group_pct:.1f}%"
+        if group_pct is not None else "⚪ n/a"
     )
-    lines = [header, f"Khulafa Group: {group_line}", "", "Per outlet:"]
+    if rolling_group_pct is not None:
+        roll_group = f"{fca.status_emoji(fca.food_cost_status(rolling_group_pct))} {rolling_group_pct:.1f}%"
+        group_line = f"Khulafa Group: {daily_group} today | {roll_group} ({rolling_days}-day)"
+    else:
+        group_line = f"Khulafa Group: {daily_group}"
+
+    lines = [header, group_line, "", f"Per outlet (today | {rolling_days}-day):"]
     for o in fca.per_outlet_food_cost(rows):
-        emoji = fca.status_emoji(o["status"])
-        if o["pct"] is None:
-            lines.append(f"- {_name(o['outlet'])}: data incomplete {emoji}")
-        else:
-            flag = " INVESTIGATE" if o["status"] == "red" else ""
-            lines.append(f"- {_name(o['outlet'])}: {o['pct']:.1f}% {emoji}{flag}")
+        outlet = o["outlet"]
+        daily_emoji = fca.status_emoji(o["status"])
+        roll = rolling.get(outlet) or {}
+        roll_pct = roll.get("pct")
+        roll_status = fca.food_cost_status(roll_pct)
+        flag_status = roll_status if roll_pct is not None else o["status"]
+        flag = " INVESTIGATE" if flag_status == "red" else ""
+        daily_part = (
+            "data incomplete " + daily_emoji if o["pct"] is None
+            else f"{o['pct']:.1f}% {daily_emoji}"
+        )
+        roll_part = (
+            f" | {roll_pct:.1f}% {fca.status_emoji(roll_status)}" if roll_pct is not None else ""
+        )
+        lines.append(f"- {_name(outlet)}: {daily_part}{roll_part}{flag}")
     unclassified = (food_cost or {}).get("unclassified") or {}
     if unclassified.get("count"):
         lines.append(
@@ -345,8 +368,9 @@ def _food_cost_block(food_cost):
 
 
 def _food_cost_trends_block(anomalies):
-    """``anomalies``: list of food_cost_analytics.Anomaly (today vs 7-day avg)."""
-    lines = [f"{NEW_SECTION_HEADERS[2]} (vs 7-day avg)"]
+    """``anomalies``: list of food_cost_analytics.Anomaly (current 7-day rolling
+    vs the prior 7-day rolling — smoothed, so burst deliveries don't trip it)."""
+    lines = [f"{NEW_SECTION_HEADERS[2]} (7-day vs prior 7-day)"]
     if not anomalies:
         lines.append("- No significant food cost deviations.")
         return "\n".join(lines)
@@ -355,7 +379,7 @@ def _food_cost_trends_block(anomalies):
         emoji = sev_emoji.get(a.severity, "")
         sign = "+" if a.delta_pct >= 0 else ""
         lines.append(
-            f"- {_name(a.outlet)}: {a.today_pct:.1f}% vs {a.avg_pct:.1f}% avg "
+            f"- {_name(a.outlet)}: {a.current_pct:.1f}% vs {a.baseline_pct:.1f}% prior "
             f"({sign}{a.delta_pct:.1f}% {emoji})"
         )
     return "\n".join(lines)

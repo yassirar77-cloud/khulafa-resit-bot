@@ -138,9 +138,9 @@ class NewSections(unittest.TestCase):
                 _recon("SBESI", None, 0.0, None),
             ],
         }
+        # Rolling-vs-rolling: this 7-day rolling vs the prior 7-day rolling.
         data["food_cost_anomalies"] = fca.compute_anomalies(
-            {"Jakel": 38.1},
-            [_recon("Jakel", None, None, 32.5, business_date="2026-05-28")],
+            {"Jakel": 39.0}, {"Jakel": 31.0},
         )
         data["cash_alerts"] = [
             {"outlet": "Klang B.Emas", "amount": 200.0, "description": "PAY TO BABAS"},
@@ -166,6 +166,21 @@ class NewSections(unittest.TestCase):
         self.assertIn("INVESTIGATE", joined)
         self.assertIn("🔴", joined)
         self.assertIn("data incomplete", joined)  # SBESI
+
+    def test_food_cost_shows_daily_and_rolling(self):
+        data = self._full_data()
+        data["food_cost"]["rolling"] = {
+            "Vista": {"sales": 80000.0, "purchases": 24000.0, "pct": 28.0, "days": 7},
+            "Jakel": {"sales": 28000.0, "purchases": 10080.0, "pct": 36.0, "days": 7},
+        }
+        data["food_cost"]["rolling_group_pct"] = 31.5
+        data["food_cost"]["rolling_days"] = 7
+        joined = "\n\n".join(digest.build_digest_messages(data, NOW))
+        self.assertIn("today | 7-day", joined)        # per-outlet dual columns
+        self.assertIn("38.1%", joined)                 # Jakel daily (volatile)
+        self.assertIn("36.0%", joined)                 # Jakel 7-day rolling
+        self.assertIn("INVESTIGATE", joined)           # rolling 36% is red
+        self.assertIn("31.5%", joined)                 # group 7-day rolling
 
     def test_cash_alerts_and_sales_render(self):
         joined = "\n\n".join(digest.build_digest_messages(self._full_data(), NOW))
