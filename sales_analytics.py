@@ -287,3 +287,17 @@ def format_top_items_group(date_label, item_rows, n) -> str:
     for i, it in enumerate(items, start=1):
         lines.append(f"  {i}. {it['item_name']} — {it['qty']:g} sold (RM{_money(it['amount'])})")
     return "\n".join(lines)
+
+
+def select_daily_dataset(today_rows, yesterday_rows, today_label, yesterday_label):
+    """Smart fallback for the /sales_*_today commands (PR #63).
+
+    D-files arrive ~07:00 covering YESTERDAY's business (business_date=yesterday),
+    so 'today' is empty until the evening files land. Prefer today's data; fall
+    back to yesterday's (flagged in the label) so the morning-after query shows
+    the day that just closed. Returns ``(rows, label)``."""
+    if today_rows:
+        return today_rows, today_label
+    if yesterday_rows:
+        return yesterday_rows, yesterday_label
+    return [], today_label
