@@ -124,6 +124,8 @@ FIXED_COSTS_TABLE = "fixed_costs"
 PETTY_CASH_TABLE = "petty_cash"
 PENDING_REVIEW_TABLE = "pending_review"
 REPARSE_AUDIT_TABLE = "reparse_audit"
+SALES_DAILY_SUMMARY_TABLE = "sales_daily_summary"
+SALES_DAILY_TOP_ITEMS_TABLE = "sales_daily_top_items"
 SALES_DAILY_TABLE = "sales_daily"
 SALES_ITEMS_TABLE = "sales_items"
 SALES_INGEST_LOG_TABLE = "sales_ingest_log"
@@ -3416,6 +3418,108 @@ async def top_items_sold_command(update: Update, context: ContextTypes.DEFAULT_T
     )
 
 
+# === PR #60: D-file (daily summary) analytics (owner-only) ===================
+
+def _fetch_daily_summary_rows(business_dates):
+    resp = (
+        supabase.table(SALES_DAILY_SUMMARY_TABLE)
+        .select("outlet_canonical, business_date, day_sales, customers, "
+                "average_spent, take_away, dine_in")
+        .in_("business_date", business_dates)
+        .execute()
+    )
+    return resp.data or []
+
+
+def _fetch_daily_top_items_rows(business_dates):
+    daily = (
+        supabase.table(SALES_DAILY_SUMMARY_TABLE)
+        .select("id")
+        .in_("business_date", business_dates)
+        .execute()
+    )
+    ids = [r["id"] for r in (daily.data or [])]
+    if not ids:
+        return []
+    resp = (
+        supabase.table(SALES_DAILY_TOP_ITEMS_TABLE)
+        .select("item_name, qty, amount")
+        .in_("summary_id", ids)
+        .execute()
+    )
+    return resp.data or []
+
+
+async def sales_summary_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    today = _my_today().isoformat()
+    try:
+        rows = await asyncio.to_thread(_fetch_daily_summary_rows, [today])
+    except Exception:
+        logger.exception("sales_summary_today failed")
+        await message.reply_text("Failed to fetch daily summary.")
+        return
+    await message.reply_text(sales_analytics.format_daily_summary(today, rows))
+
+
+async def sales_customers_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    today = _my_today().isoformat()
+    try:
+        rows = await asyncio.to_thread(_fetch_daily_summary_rows, [today])
+    except Exception:
+        logger.exception("sales_customers_today failed")
+        await message.reply_text("Failed to fetch customer counts.")
+        return
+    await message.reply_text(sales_analytics.format_customers(today, rows))
+
+
+async def sales_avg_ticket_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    today = _my_today().isoformat()
+    try:
+        rows = await asyncio.to_thread(_fetch_daily_summary_rows, [today])
+    except Exception:
+        logger.exception("sales_avg_ticket failed")
+        await message.reply_text("Failed to fetch average ticket.")
+        return
+    await message.reply_text(sales_analytics.format_avg_ticket(today, rows))
+
+
+async def sales_takeaway_split_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    today = _my_today().isoformat()
+    try:
+        rows = await asyncio.to_thread(_fetch_daily_summary_rows, [today])
+    except Exception:
+        logger.exception("sales_takeaway_split failed")
+        await message.reply_text("Failed to fetch takeaway split.")
+        return
+    await message.reply_text(sales_analytics.format_takeaway_split(today, rows))
+
+
+async def top_items_yesterday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    yesterday = (_my_today() - timedelta(days=1)).isoformat()
+    try:
+        rows = await asyncio.to_thread(_fetch_daily_top_items_rows, [yesterday])
+    except Exception:
+        logger.exception("top_items_yesterday failed")
+        await message.reply_text("Failed to read top items.")
+        return
+    await message.reply_text(sales_analytics.format_top_items_group(yesterday, rows, 5))
+
+
 async def poll_sales_emails() -> None:
     """APScheduler job: ingest unread shift-close emails (every 30 min, 24/7)."""
     if not os.environ.get("GMAIL_INBOX") or not os.environ.get("GMAIL_APP_PASSWORD"):
@@ -3475,6 +3579,11 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("food_cost_today", food_cost_today_command))
     app.add_handler(CommandHandler("food_cost_week", food_cost_week_command))
     app.add_handler(CommandHandler("top_items_sold", top_items_sold_command))
+    app.add_handler(CommandHandler("sales_summary_today", sales_summary_today_command))
+    app.add_handler(CommandHandler("sales_customers_today", sales_customers_today_command))
+    app.add_handler(CommandHandler("sales_avg_ticket", sales_avg_ticket_command))
+    app.add_handler(CommandHandler("sales_takeaway_split", sales_takeaway_split_command))
+    app.add_handler(CommandHandler("top_items_yesterday", top_items_yesterday_command))
     app.add_handler(
         CallbackQueryHandler(reparse_apply_all_callback, pattern=r"^reparse_applyall:(yes|no)$")
     )

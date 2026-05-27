@@ -18,12 +18,12 @@ import email
 import imaplib
 import logging
 import os
+import re
 from datetime import datetime
 from email import policy
 
 from sales_parser import (
     decode_shift_close_bytes,
-    extract_outlet_from_subject,
     extract_shift_no_from_subject,
 )
 
@@ -32,6 +32,28 @@ logger = logging.getLogger(__name__)
 IMAP_HOST = "imap.gmail.com"
 DEFAULT_SENDER = "myposkhulafa@gmail.com"
 DEFAULT_SUBJECT_TOKEN = "SHIFTCLOSE"
+
+_S_SUBJECT_RE = re.compile(r"^\s*(S-[\w\s]+?)\s+SHIFTCLOSE", re.IGNORECASE)
+_D_SUBJECT_RE = re.compile(r"^\s*(D-[\w\s]+?)\s+ON\s+\d", re.IGNORECASE)
+
+
+def detect_email_type(subject) -> tuple[str, str] | None:
+    """Classify a POS email subject. Returns ``(email_type, outlet_code)`` —
+    ``('S', 'S-KLANG')`` / ``('D', 'D-SEK20')`` — or ``None`` if it is neither.
+
+    S-files carry the word SHIFTCLOSE; D-files (daily summary) are ``D-OUTLET ON
+    {date}`` with no SHIFTCLOSE. Codes may contain spaces (``D-ST KHU``); internal
+    whitespace is collapsed and the code upper-cased.
+    """
+    if not isinstance(subject, str):
+        return None
+    m = _S_SUBJECT_RE.match(subject)
+    if m:
+        return "S", re.sub(r"\s+", " ", m.group(1)).strip().upper()
+    m = _D_SUBJECT_RE.match(subject)
+    if m:
+        return "D", re.sub(r"\s+", " ", m.group(1)).strip().upper()
+    return None
 
 
 def _imap_date(dt: datetime) -> str:
@@ -105,8 +127,10 @@ def _find_txt_attachment(msg):
 
 
 def extract_shift_close(msg) -> dict | None:
-    """Turn an email message into a shift-close dict, or ``None`` if it carries
-    no ``.TXT`` attachment. The outlet code is taken from the SUBJECT only.
+    """Turn a POS email message into an ingestion dict, or ``None`` if it carries
+    no ``.TXT`` attachment. ``email_type`` (S/D) and ``outlet_code`` come from the
+    SUBJECT only (``detect_email_type``); both are ``None`` for an unrecognised
+    subject so the ingestion layer can record it as skipped_unknown.
 
     An empty attachment yields ``content == ""`` (kept, not dropped) so the
     ingestion layer can record it as an error and leave it unread for inspection.
@@ -114,13 +138,15 @@ def extract_shift_close(msg) -> dict | None:
     subject = msg["subject"]
     filename, raw_bytes = _find_txt_attachment(msg)
     if filename is None:
-        logger.warning("Shift-close email %r has no .TXT attachment", subject)
+        logger.warning("POS email %r has no .TXT attachment", subject)
         return None
     content = decode_shift_close_bytes(raw_bytes) if raw_bytes else ""
+    detection = detect_email_type(subject)
     return {
         "message_id": msg["message-id"],
         "subject": subject,
-        "outlet_code": extract_outlet_from_subject(subject),
+        "email_type": detection[0] if detection else None,
+        "outlet_code": detection[1] if detection else None,
         "shift_no_from_subject": extract_shift_no_from_subject(subject),
         "filename": filename,
         "content": content,

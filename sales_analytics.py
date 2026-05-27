@@ -181,3 +181,109 @@ def format_ingest_status(log_rows) -> str:
             subj = r.get("source_subject") or r.get("source_message_id") or "?"
             lines.append(f"   - {subj}: {r.get('detail')}")
     return "\n".join(lines)
+
+
+# --- D-file (daily summary) formatters (PR #60) ------------------------------
+
+def _cust(row):
+    try:
+        return int(row.get("customers") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def format_daily_summary(date_label, rows) -> str:
+    """Per-outlet daily sales + customers + avg ticket + takeaway/dine-in,
+    sorted by sales desc, with a group footer."""
+    if not rows:
+        return f"Daily summary — {date_label}:\nNo D-file data yet."
+    ranked = sorted(rows, key=lambda r: -(_num(r.get("day_sales")) or 0.0))
+    lines = [f"Daily summary — {date_label}:"]
+    total_sales = 0.0
+    total_cust = 0
+    for r in ranked:
+        sales = _num(r.get("day_sales")) or 0.0
+        cust = _cust(r)
+        total_sales += sales
+        total_cust += cust
+        lines.append(
+            f"• {r.get('outlet_canonical')}: RM{_money(sales)} | {cust} cust | "
+            f"avg RM{_money(r.get('average_spent'))} | "
+            f"TA RM{_money(r.get('take_away'))} / DI RM{_money(r.get('dine_in'))}"
+        )
+    group_avg = (total_sales / total_cust) if total_cust else None
+    lines.append(
+        f"TOTAL: RM{_money(total_sales)} | {total_cust} customers | "
+        f"group avg RM{_money(group_avg)}"
+    )
+    return "\n".join(lines)
+
+
+def format_customers(date_label, rows) -> str:
+    if not rows:
+        return f"Customers — {date_label}:\nNo D-file data yet."
+    ranked = sorted(rows, key=_cust, reverse=True)
+    lines = [f"Customers — {date_label}:"]
+    total = 0
+    for r in ranked:
+        c = _cust(r)
+        total += c
+        lines.append(f"• {r.get('outlet_canonical')}: {c}")
+    lines.append(f"TOTAL: {total} customers")
+    return "\n".join(lines)
+
+
+def format_avg_ticket(date_label, rows) -> str:
+    if not rows:
+        return f"Average ticket — {date_label}:\nNo D-file data yet."
+    ranked = sorted(rows, key=lambda r: -(_num(r.get("average_spent")) or 0.0))
+    lines = [f"Average ticket — {date_label}:"]
+    for r in ranked:
+        lines.append(f"• {r.get('outlet_canonical')}: RM{_money(r.get('average_spent'))}")
+    return "\n".join(lines)
+
+
+def format_takeaway_split(date_label, rows) -> str:
+    if not rows:
+        return f"Takeaway vs dine-in — {date_label}:\nNo D-file data yet."
+    lines = [f"Takeaway vs dine-in — {date_label}:"]
+    rendered = []
+    for r in rows:
+        ta = _num(r.get("take_away")) or 0.0
+        di = _num(r.get("dine_in")) or 0.0
+        base = ta + di
+        if base <= 0:
+            rendered.append((r.get("outlet_canonical"), None, ta, di))
+        else:
+            rendered.append((r.get("outlet_canonical"), ta / base * 100.0, ta, di))
+    # Highest takeaway share first; unknown splits last.
+    rendered.sort(key=lambda x: (x[1] is None, -(x[1] or 0.0)))
+    for outlet, pct, ta, di in rendered:
+        pct_str = f"{pct:.0f}% TA / {100 - pct:.0f}% DI" if pct is not None else "n/a"
+        lines.append(f"• {outlet}: {pct_str} (TA RM{_money(ta)} / DI RM{_money(di)})")
+    return "\n".join(lines)
+
+
+def top_items_from_rankings(rows, n):
+    """Aggregate sales_daily_top_items rows by item_name (sum qty/amount),
+    most-sold first."""
+    agg = {}
+    for r in rows:
+        name = (r.get("item_name") or "").strip()
+        if not name:
+            continue
+        a = agg.setdefault(name, {"item_name": name, "qty": 0.0, "amount": 0.0})
+        a["qty"] += _num(r.get("qty")) or 0.0
+        a["amount"] += _num(r.get("amount")) or 0.0
+    ranked = sorted(agg.values(), key=lambda x: (-x["qty"], -x["amount"], x["item_name"]))
+    return ranked[: max(0, n)]
+
+
+def format_top_items_group(date_label, item_rows, n) -> str:
+    items = top_items_from_rankings(item_rows, n)
+    if not items:
+        return f"Top items — {date_label}:\nNo D-file data yet."
+    lines = [f"Top {n} items across the group — {date_label}:"]
+    for i, it in enumerate(items, start=1):
+        lines.append(f"  {i}. {it['item_name']} — {it['qty']:g} sold (RM{_money(it['amount'])})")
+    return "\n".join(lines)

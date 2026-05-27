@@ -17,9 +17,10 @@ from email.message import EmailMessage
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sales_email_fetcher import Mailbox  # noqa: E402
-from sales_ingest import build_sales_record, process_email, run  # noqa: E402
+from sales_ingest import _canonical_code, build_sales_record, process_email, run  # noqa: E402
 from sales_parser import OUTLET_CANONICAL_BY_CODE, parse_shift_close, read_shift_close_file  # noqa: E402
 from tests.sales_fixtures import path_for_code  # noqa: E402
+from tests.sales_daily_fixtures import path_for_code as d_path_for_code  # noqa: E402
 
 
 _INACTIVE = {"S-ST KHU", "S-MB", "S-RAZAK"}
@@ -73,11 +74,17 @@ class FakeMailbox:
         self.seen.append(msg_id)
 
 
+def _sek20_d_content():
+    return read_shift_close_file(d_path_for_code("D-SEK20"))
+
+
 class FakeStore:
     def __init__(self, outlets=None):
         self.saved = []
+        self.daily = []
         self.logs = []
         self._keys = set()
+        self._dkeys = set()
         self._outlets = _default_outlets() if outlets is None else outlets
         self.load_calls = 0
 
@@ -92,6 +99,14 @@ class FakeStore:
         self.saved.append(record)
         self._keys.add(record["key"])
         return len(self.saved)
+
+    def exists_daily(self, outlet_canonical, business_date):
+        return (outlet_canonical, business_date) in self._dkeys
+
+    def save_daily(self, record):
+        self.daily.append(record)
+        self._dkeys.add(record["key"])
+        return len(self.daily)
 
     def log(self, entry):
         self.logs.append(entry)
@@ -219,6 +234,46 @@ class IngestionRunTests(unittest.TestCase):
         self.assertEqual(len(store.saved), 0)
         self.assertNotIn(b"1", mailbox.seen)
         self.assertTrue(any(e["detail"] == "empty_attachment" for e in store.logs))
+
+
+class DailyRoutingTests(unittest.TestCase):
+    """PR #60: D-files route to the daily-summary parser/table; S-files unchanged."""
+
+    def test_d_file_routes_to_d_parser(self):
+        mailbox = FakeMailbox([(b"1", make_email("D-SEK20 ON 26/May/2026 00:09:19", _sek20_d_content()))])
+        store = FakeStore()
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["inserted"], 1)
+        self.assertEqual(len(store.daily), 1)
+        self.assertEqual(len(store.saved), 0)  # NOT written to the S-file table
+        self.assertAlmostEqual(store.daily[0]["parent"]["day_sales"], 8246.10, places=2)
+        self.assertEqual(store.daily[0]["parent"]["outlet_canonical"], "SEK-20")
+        self.assertIn(b"1", mailbox.seen)
+
+    def test_s_file_routes_to_s_parser(self):
+        mailbox = FakeMailbox([(b"1", make_email("S-KLANG SHIFTCLOSE (1499)", _klang_content()))])
+        store = FakeStore()
+        run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(len(store.saved), 1)
+        self.assertEqual(len(store.daily), 0)  # NOT written to the D-file table
+
+    def test_outlet_prefix_stripped_for_canonical_lookup(self):
+        self.assertEqual(_canonical_code("D-SEK20"), "S-SEK20")
+        self.assertEqual(_canonical_code("S-SEK20"), "S-SEK20")
+        mailbox = FakeMailbox([(b"1", make_email("D-SEK20 ON 26/May/2026 00:09:19", _sek20_d_content()))])
+        store = FakeStore()
+        run(store=store, mailbox=mailbox, now_my=NOW)
+        # D-SEK20 resolved through S-SEK20 -> canonical "SEK-20".
+        self.assertEqual(store.daily[0]["parent"]["outlet_canonical"], "SEK-20")
+
+    def test_d_file_inactive_outlet_skipped(self):
+        # D-ST KHU resolves to S-ST KHU (active=false) -> skipped, not parsed.
+        mailbox = FakeMailbox([(b"1", make_email("D-ST KHU ON 26/May/2026 00:09:19", _sek20_d_content()))])
+        store = FakeStore()
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["skipped_inactive"], 1)
+        self.assertEqual(len(store.daily), 0)
+        self.assertIn(b"1", mailbox.seen)
 
 
 if __name__ == "__main__":
