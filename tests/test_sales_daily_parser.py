@@ -11,13 +11,40 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sales_daily_parser import parse_daily_summary  # noqa: E402
+from datetime import datetime  # noqa: E402
+
+from sales_daily_parser import business_date_for_printed, parse_daily_summary  # noqa: E402
 from sales_parser import read_shift_close_file  # noqa: E402
 from tests.sales_daily_fixtures import EXPECTED, path_for_code  # noqa: E402
 
 
 def _parsed(code):
     return parse_daily_summary(read_shift_close_file(path_for_code(code)))
+
+
+class BusinessDateTests(unittest.TestCase):
+    """PR #61: a D-file's business day is the print date only for an evening
+    (>=17:00) close; post-midnight overnight prints belong to the previous day."""
+
+    def test_business_date_morning_returns_previous_day(self):
+        # Header date 26 May, printed 00:09 / 07:00 -> business day is 25 May.
+        self.assertEqual(business_date_for_printed(datetime(2026, 5, 26, 0, 9, 19)),
+                         datetime(2026, 5, 25).date())
+        self.assertEqual(business_date_for_printed(datetime(2026, 5, 26, 7, 0, 2)),
+                         datetime(2026, 5, 25).date())
+        self.assertEqual(business_date_for_printed(datetime(2026, 5, 26, 16, 59)),
+                         datetime(2026, 5, 25).date())
+        # Real D-SEK20 (printed 00:09) -> 2026-05-25.
+        self.assertEqual(str(_parsed("D-SEK20")["header"]["business_date"]), "2026-05-25")
+
+    def test_business_date_evening_returns_same_day(self):
+        # 17:00 cutoff inclusive; 19:00 close prints same-day.
+        self.assertEqual(business_date_for_printed(datetime(2026, 5, 26, 17, 0)),
+                         datetime(2026, 5, 26).date())
+        self.assertEqual(business_date_for_printed(datetime(2026, 5, 26, 19, 0, 4)),
+                         datetime(2026, 5, 26).date())
+        # Real D-Damansara (printed 19:00) -> 2026-05-26.
+        self.assertEqual(str(_parsed("D-DAMANSARA")["header"]["business_date"]), "2026-05-26")
 
 
 class DailyParserTests(unittest.TestCase):

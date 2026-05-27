@@ -34,6 +34,7 @@ sales_email_fetcher.detect_email_type.
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 
 from sales_parser import (
     _columns,
@@ -114,6 +115,26 @@ def _first_trailing_idx(lines, after=0):
 
 # --- header + label/value blocks --------------------------------------------
 
+# D-files are emitted at the end of the business day. A normal day shift closes
+# ~19:00 and prints same-day; the overnight shift closes ~00:00-07:00 and prints
+# AFTER midnight, so its print date is one day AHEAD of the business day it
+# summarises. Split on 17:00 (5pm): >=17:00 -> header date; earlier -> day before.
+_BUSINESS_DATE_HOUR_CUTOFF = 17
+
+
+def business_date_for_printed(printed_at):
+    """The business day a D-file covers, from its print timestamp (PR #61).
+
+    >=17:00 (evening close) -> the header date; <17:00 (post-midnight overnight
+    close) -> the previous day. Returns ``None`` if ``printed_at`` is missing."""
+    if printed_at is None:
+        return None
+    day = printed_at.date()
+    if printed_at.hour >= _BUSINESS_DATE_HOUR_CUTOFF:
+        return day
+    return day - timedelta(days=1)
+
+
 def _parse_header(lines):
     outlet_code = printed_at = business_date = None
     business_name = address = None
@@ -123,8 +144,7 @@ def _parse_header(lines):
         if m and outlet_code is None:
             outlet_code = re.sub(r"\s+", " ", m.group(1)).strip().upper()
             printed_at = parse_datetime(m.group(2))
-            if printed_at is not None:
-                business_date = printed_at.date()
+            business_date = business_date_for_printed(printed_at)
             # next two non-empty, non-(TOTAL SHIFTS) lines are name + address
             extras = [
                 x.strip() for x in lines[i + 1:i + 5]
