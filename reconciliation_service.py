@@ -12,12 +12,17 @@ Called nightly before the digest and on-demand by /reconcile_now.
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
+from collections import Counter, defaultdict
+from datetime import date as _date_type
+from datetime import datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import purchase_reconciliation as pr
 from outlet_resolver import canonical_outlet
 
 logger = logging.getLogger(__name__)
+
+MALAYSIA_TZ = ZoneInfo("Asia/Kuala_Lumpur")
 
 RECEIPTS_TABLE = "receipts"
 MERCHANT_CANONICAL_TABLE = "merchant_canonical"
@@ -28,9 +33,25 @@ MATCH_LOG_TABLE = "purchase_match_log"
 
 SUPPLIER_PURCHASE = "SUPPLIER_PURCHASE"
 
+# Food cost = food/supplies spend only. We include SUPPLIER_PURCHASE + PETTY_CASH
+# + UNKNOWN (unresolved-merchant receipts are still real food spend) and exclude
+# only the clearly-non-food types — mirroring the POS side, which already drops
+# utility (Type E) and staff (Type D) payouts. Whitelisting SUPPLIER_PURCHASE
+# alone dropped ~95% of receipts that hadn't been merchant-canonicalised yet.
+NON_FOOD_RECEIPT_TYPES = ["STAFF_ADVANCE", "UTILITY", "RENT_LICENSE", "INTERNAL_TRANSFER"]
+
+# Sanity bounds: receipts outside (RM5, RM5000] are almost always OCR errors
+# (RM/Sen split-column phantoms, stray decimals) and shouldn't move food cost %.
+MIN_RECEIPT_AMOUNT = 5.0
+MAX_RECEIPT_AMOUNT = 5000.0
+
 
 def _rows(resp):
     return getattr(resp, "data", None) or []
+
+
+def _parse_date(value):
+    return _date_type.fromisoformat(str(value)[:10])
 
 
 def _load_canonical_merchants(client) -> dict:
@@ -41,14 +62,54 @@ def _load_canonical_merchants(client) -> dict:
     return {r["id"]: r.get("display_name") for r in rows if r.get("id") is not None}
 
 
+_RECEIPT_COLUMNS = (
+    "id, total, merchant, merchant_canonical_id, outlet, receipt_date, "
+    "receipt_type, created_at"
+)
+
+
 def _fetch_receipts(client, business_date):
-    return _rows(
+    """All food-relevant receipts for the business day.
+
+    Two sources, deduped by id:
+    1. receipt_date == business_date (the normal case).
+    2. receipt_date IS NULL but uploaded (created_at) on that day in MY local
+       time — OCR sometimes fails to read a date, and previously the strict
+       ``.eq("receipt_date", ...)`` filter dropped these silently. We fall back
+       to the upload day so the spend still counts (consistent with how the
+       digest's "today's receipts" stat reads created_at)."""
+    dated = _rows(
         client.table(RECEIPTS_TABLE)
-        .select("id, total, merchant, merchant_canonical_id, outlet, receipt_date")
-        .eq("receipt_type", SUPPLIER_PURCHASE)
+        .select(_RECEIPT_COLUMNS)
+        .not_.in_("receipt_type", NON_FOOD_RECEIPT_TYPES)
         .eq("receipt_date", str(business_date))
         .execute()
     )
+    undated = _fetch_undated_receipts(client, business_date)
+    seen = {r.get("id") for r in dated}
+    return dated + [r for r in undated if r.get("id") not in seen]
+
+
+def _fetch_undated_receipts(client, business_date):
+    """Receipts with no OCR'd date, uploaded on ``business_date`` (MY local)."""
+    try:
+        day = business_date if isinstance(business_date, _date_type) else _parse_date(business_date)
+        start_local = datetime.combine(day, time.min, tzinfo=MALAYSIA_TZ)
+        end_local = start_local + timedelta(days=1)
+        return _rows(
+            client.table(RECEIPTS_TABLE)
+            .select(_RECEIPT_COLUMNS)
+            .not_.in_("receipt_type", NON_FOOD_RECEIPT_TYPES)
+            .is_("receipt_date", "null")
+            .gte("created_at", start_local.astimezone(timezone.utc).isoformat())
+            .lt("created_at", end_local.astimezone(timezone.utc).isoformat())
+            .execute()
+        )
+    except Exception:
+        logger.warning("reconcile: NULL receipt_date fallback failed for %s", business_date,
+                       exc_info=True)
+        return []
+
 
 
 def _fetch_summaries(client, business_date):
@@ -80,16 +141,38 @@ def _float(value):
 
 def _receipts_by_outlet(receipt_rows, canonical_by_id) -> dict:
     by_outlet: dict[str, list] = defaultdict(list)
+    unresolved: Counter = Counter()
+    skipped_amount = 0
     for r in receipt_rows:
+        amount = _float(r.get("total"))
+        if amount < MIN_RECEIPT_AMOUNT or amount > MAX_RECEIPT_AMOUNT:
+            skipped_amount += 1
+            continue
         outlet = canonical_outlet(r.get("outlet"))
         if outlet is None:
+            raw = (r.get("outlet") or "").strip()
+            if raw and raw.upper() != "UNKNOWN":
+                unresolved[raw] += 1
             continue
         by_outlet[outlet].append(pr.Receipt(
             id=r.get("id"),
-            amount=_float(r.get("total")),
+            amount=amount,
             merchant_canonical=canonical_by_id.get(r.get("merchant_canonical_id")),
             merchant=r.get("merchant"),
+            receipt_type=r.get("receipt_type"),
         ))
+    if skipped_amount:
+        logger.info("reconcile: skipped %d receipt(s) outside (RM%.0f, RM%.0f]",
+                    skipped_amount, MIN_RECEIPT_AMOUNT, MAX_RECEIPT_AMOUNT)
+    if unresolved:
+        # Surface so the variants can be added to outlet_resolver rather than
+        # silently dropping real spend (the second drop point from the audit).
+        logger.warning(
+            "reconcile: %d receipt(s) dropped — outlet did not resolve to a "
+            "canonical outlet: %s",
+            sum(unresolved.values()),
+            ", ".join(f"{name!r}x{n}" for name, n in unresolved.most_common(10)),
+        )
     return by_outlet
 
 
@@ -139,10 +222,25 @@ def reconcile_outlet(client, outlet, business_date, receipts, payouts,
         for lr in log_rows:
             lr["reconciliation_id"] = recon_id
         if log_rows:
-            client.table(MATCH_LOG_TABLE).insert(log_rows).execute()
+            _insert_match_log(client, log_rows)
     stored = dict(row)
     stored["id"] = recon_id
     return stored
+
+
+def _insert_match_log(client, log_rows) -> None:
+    """Insert the audit rows; if the receipt_classification column (migration
+    0023) isn't applied yet, retry without it so the rest of the trail still
+    writes (mirrors digest_data.log_digest's message_bytes fallback)."""
+    try:
+        client.table(MATCH_LOG_TABLE).insert(log_rows).execute()
+    except Exception:
+        stripped = [{k: v for k, v in r.items() if k != "receipt_classification"}
+                    for r in log_rows]
+        try:
+            client.table(MATCH_LOG_TABLE).insert(stripped).execute()
+        except Exception:
+            logger.warning("reconcile: could not write purchase_match_log", exc_info=True)
 
 
 def run_reconciliation(client, business_date) -> dict:

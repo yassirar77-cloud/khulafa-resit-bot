@@ -29,6 +29,21 @@ class Receipt:
     amount: float = 0.0
     merchant_canonical: str | None = None   # canonical display name, if resolved
     merchant: str | None = None             # raw merchant string
+    receipt_type: str | None = None         # SUPPLIER_PURCHASE | PETTY_CASH | UNKNOWN | ...
+
+
+# Classification flag stored per receipt-bearing match-log row, so the digest
+# can call out how much food cost came from un-canonicalised merchants.
+_CLASSIFICATION = {
+    "SUPPLIER_PURCHASE": "classified_supplier",
+    "PETTY_CASH": "petty_cash",
+    "UNKNOWN": "unknown_included",
+}
+
+
+def classify_receipt_status(receipt_type) -> str:
+    """Map a receipt_type to its food-cost classification flag."""
+    return _CLASSIFICATION.get(receipt_type or "UNKNOWN", "unknown_included")
 
 
 @dataclass(frozen=True)
@@ -330,6 +345,7 @@ def build_match_log(result: ReconciliationResult) -> list[dict]:
             "merchant_or_description": m.receipt.merchant_canonical or m.payout.description,
             "match_confidence": m.confidence,
             "match_method": m.method,
+            "receipt_classification": classify_receipt_status(m.receipt.receipt_type),
         })
     for p in result.cash_no_receipt:
         rows.append({
@@ -340,6 +356,7 @@ def build_match_log(result: ReconciliationResult) -> list[dict]:
             "merchant_or_description": p.description,
             "match_confidence": None,
             "match_method": None,
+            "receipt_classification": None,
         })
     for r in result.account_only_receipts:
         rows.append({
@@ -350,6 +367,7 @@ def build_match_log(result: ReconciliationResult) -> list[dict]:
             "merchant_or_description": r.merchant_canonical or r.merchant,
             "match_confidence": None,
             "match_method": None,
+            "receipt_classification": classify_receipt_status(r.receipt_type),
         })
     for p in result.excluded_staff:
         rows.append({
@@ -360,6 +378,7 @@ def build_match_log(result: ReconciliationResult) -> list[dict]:
             "merchant_or_description": p.description,
             "match_confidence": None,
             "match_method": None,
+            "receipt_classification": None,
         })
     for p in result.excluded_utility:
         rows.append({
@@ -370,5 +389,6 @@ def build_match_log(result: ReconciliationResult) -> list[dict]:
             "merchant_or_description": p.description,
             "match_confidence": None,
             "match_method": None,
+            "receipt_classification": None,
         })
     return rows

@@ -335,6 +335,12 @@ def _food_cost_block(food_cost):
         else:
             flag = " INVESTIGATE" if o["status"] == "red" else ""
             lines.append(f"- {_name(o['outlet'])}: {o['pct']:.1f}% {emoji}{flag}")
+    unclassified = (food_cost or {}).get("unclassified") or {}
+    if unclassified.get("count"):
+        lines.append(
+            f"⚠️ {int(unclassified['count'])} receipts with unclassified merchants "
+            f"({format_rm(unclassified.get('value'))} in this calc — verify high-value ones)"
+        )
     return "\n".join(lines)
 
 
