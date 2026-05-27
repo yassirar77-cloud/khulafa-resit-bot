@@ -127,7 +127,13 @@ def build_sales_record(email_dict, parsed, outlet_canonical, now_my) -> dict:
             for i in parsed.get("items", [])
         ],
         "sales_payments": [
-            {"method": p["label"], "amount": p["amount"]} for p in parsed.get("payments", [])
+            {
+                "method": p["method"],
+                "amount": p["amount"],
+                "transaction_id": p.get("transaction_id"),
+                "transaction_at": _iso(p.get("transaction_at")),
+            }
+            for p in parsed.get("payments", [])
         ],
         "sales_categories": [
             {"category": c["label"], "amount": c["amount"]} for c in parsed.get("categories", [])
