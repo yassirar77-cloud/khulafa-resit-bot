@@ -85,7 +85,11 @@ def per_outlet_food_cost(recon_rows) -> list[dict]:
 
 def group_food_cost(recon_rows):
     """(total_sales, total_purchases, group_food_cost_pct). Pct is over the
-    outlets that have sales; ``None`` if there are none."""
+    outlets that have sales; ``None`` if there are none.
+
+    Summing purchases and sales across the rows first (then dividing) makes this
+    sales-weighted: pass a single day's rows for the daily group %, or a 7-day
+    window for the rolling group %."""
     total_sales = 0.0
     total_purchases = 0.0
     have_sales = False
@@ -103,13 +107,48 @@ def group_food_cost(recon_rows):
     )
 
 
+def rolling_food_cost_by_outlet(recon_rows) -> dict:
+    """Per-outlet rolling food cost % over whatever window of
+    purchase_reconciliation rows is passed (the caller fetches e.g. 7 days).
+
+    Sales-weighted — sum the window's purchases and sales per outlet, THEN
+    divide — so a single burst-delivery day (RM6,000 in, RM200 the next) can't
+    swing the figure the way a simple mean of daily %s would. This is the
+    smoothing that handles the natural mamak supplier delivery pattern.
+
+    Returns ``{outlet: {sales, purchases, pct, days}}``; ``pct`` is ``None`` when
+    the outlet had no sales in the window. ``days`` counts the rows that
+    contributed (one per business date)."""
+    agg: dict = {}
+    for r in recon_rows:
+        outlet = r.get("outlet_canonical")
+        if not outlet:
+            continue
+        a = agg.setdefault(outlet, {"sales": 0.0, "purchases": 0.0, "days": 0})
+        s = _num(r.get("sales_total"))
+        if s is not None:
+            a["sales"] += s
+        a["purchases"] += _num(r.get("total_food_purchases")) or 0.0
+        a["days"] += 1
+    out: dict = {}
+    for outlet, a in agg.items():
+        pct = (a["purchases"] / a["sales"] * 100.0) if a["sales"] > 0 else None
+        out[outlet] = {
+            "sales": round(a["sales"], 2),
+            "purchases": round(a["purchases"], 2),
+            "pct": round(pct, 2) if pct is not None else None,
+            "days": a["days"],
+        }
+    return out
+
+
 # --- anomaly detection -------------------------------------------------------
 
 @dataclass(frozen=True)
 class Anomaly:
     outlet: str
-    today_pct: float
-    avg_pct: float
+    current_pct: float   # this window's 7-day rolling food cost %
+    baseline_pct: float  # prior window's 7-day rolling food cost %
     delta_pct: float
     severity: str
 
@@ -126,32 +165,26 @@ def anomaly_severity(delta_pct: float) -> str | None:
     return None
 
 
-def compute_anomalies(today_by_outlet, history_rows, lookback_days: int = 7) -> list[Anomaly]:
-    """Compare today's food cost % per outlet vs its lookback average.
+def compute_anomalies(current_rolling, prior_rolling) -> list[Anomaly]:
+    """Flag outlets whose 7-day rolling food cost % shifted vs the prior 7 days.
 
-    ``today_by_outlet``: {outlet: pct}. ``history_rows``: prior
-    purchase_reconciliation rows ({outlet_canonical, food_cost_percent}),
-    EXCLUDING today. Returns anomalies (deviation over the info floor),
-    largest deviation first."""
-    history: dict[str, list[float]] = defaultdict(list)
-    for r in history_rows:
-        pct = _num(r.get("food_cost_percent"))
-        outlet = r.get("outlet_canonical")
-        if pct is not None and outlet:
-            history[outlet].append(pct)
-
+    Both inputs are ``{outlet: pct}`` rolling (sales-weighted) figures — the
+    current window vs the window before it — NOT single days. Comparing rolling
+    against rolling is the point: a one-off burst supplier delivery spikes a
+    single day's % but barely moves the 7-day rolling, so it no longer fires a
+    false anomaly. An outlet is skipped unless it has a rolling % in BOTH
+    windows. Returns anomalies over the info floor, largest deviation first."""
     anomalies: list[Anomaly] = []
-    for outlet, today_pct in today_by_outlet.items():
-        tp = _num(today_pct)
-        prior = history.get(outlet, [])
-        if tp is None or not prior:
+    for outlet, current in current_rolling.items():
+        cur = _num(current)
+        base = _num(prior_rolling.get(outlet))
+        if cur is None or base is None:
             continue
-        avg = sum(prior) / len(prior)
-        delta = tp - avg
+        delta = cur - base
         severity = anomaly_severity(delta)
         if severity is None:
             continue
-        anomalies.append(Anomaly(outlet, round(tp, 1), round(avg, 1),
+        anomalies.append(Anomaly(outlet, round(cur, 1), round(base, 1),
                                  round(delta, 1), severity))
     anomalies.sort(key=lambda a: -abs(a.delta_pct))
     return anomalies
@@ -219,6 +252,52 @@ def format_food_cost_today(date_label, recon_rows) -> str:
     return "\n".join(lines)
 
 
+def _rolling_sort_key(item):
+    outlet, v = item
+    pct = v.get("pct")
+    return (pct is None, pct if pct is not None else 0.0, outlet or "")
+
+
+def format_food_cost_week(date_label, recon_rows) -> str:
+    """7-day rolling food cost % per outlet over ``recon_rows`` (a 7-day window of
+    purchase_reconciliation rows). Sales-weighted, so burst deliveries don't
+    distort it — the stable read of the week that /food_cost_today can't give."""
+    if not recon_rows:
+        return (
+            f"7-day rolling food cost — {date_label}:\n"
+            "No reconciliation data yet. Try /reconcile_now."
+        )
+    sales, purchases, group_pct = group_food_cost(recon_rows)
+    group_line = (
+        f"{status_emoji(food_cost_status(group_pct))} {group_pct:.1f}%"
+        if group_pct is not None else "⚪ —"
+    )
+    lines = [
+        f"7-day rolling food cost — {date_label}:",
+        "",
+        f"Khulafa Group: {group_line}",
+        f"(RM{_money(purchases)} purchases / RM{_money(sales)} sales over 7 days)",
+        "",
+        "Per outlet (7-day rolling):",
+    ]
+    by_outlet = rolling_food_cost_by_outlet(recon_rows)
+    for outlet, v in sorted(by_outlet.items(), key=_rolling_sort_key):
+        emoji = status_emoji(food_cost_status(v["pct"]))
+        if v["pct"] is None:
+            lines.append(f"{emoji} {outlet:<12} —      ({v['days']}d, no sales)")
+        else:
+            lines.append(
+                f"{emoji} {outlet:<12} {v['pct']:>5.1f}%  "
+                f"(RM{_money(v['purchases'])} / RM{_money(v['sales'])}, {v['days']}d)"
+            )
+    lines += [
+        "",
+        "🟢 Excellent (under 30%)  🟡 Healthy (30-35%)",
+        "🔴 Investigate (over 35%)  ⚪ Data incomplete",
+    ]
+    return "\n".join(lines)
+
+
 def format_outlet_trend(outlet, daily_rows, group_pct=None) -> str:
     """7-day food cost trend for one outlet. ``daily_rows``:
     purchase_reconciliation rows ({business_date, sales_total,
@@ -226,28 +305,28 @@ def format_outlet_trend(outlet, daily_rows, group_pct=None) -> str:
     if not daily_rows:
         return f"No reconciliation data for {outlet} in the last 7 days."
     lines = [f"{outlet} — Food Cost Trend (7 days):"]
-    pcts = []
     for r in sorted(daily_rows, key=lambda x: str(x.get("business_date"))):
         pct = _num(r.get("food_cost_percent"))
         date = str(r.get("business_date"))
         if pct is None:
             lines.append(f"{date}  (no sales / data incomplete)")
             continue
-        pcts.append(pct)
         lines.append(
             f"{date}  RM{_money(r.get('sales_total'))} sales  "
             f"RM{_money(r.get('total_food_purchases'))} purch  "
             f"{pct:.1f}% {status_emoji(food_cost_status(pct))}"
         )
-    if pcts:
-        avg = sum(pcts) / len(pcts)
+    # 7-day figure is the sales-weighted rolling % (not a mean of daily %s), so
+    # burst-delivery days don't distort it — consistent with /food_cost_week.
+    _s, _p, rolling = group_food_cost(daily_rows)
+    if rolling is not None:
         lines.append("")
-        lines.append(f"7-day average: {avg:.1f}% {status_emoji(food_cost_status(avg))}")
+        lines.append(f"7-day rolling: {rolling:.1f}% {status_emoji(food_cost_status(rolling))}")
         if group_pct is not None:
-            lines.append(f"Group average: {group_pct:.1f}% {status_emoji(food_cost_status(group_pct))}")
-            delta = avg - group_pct
+            lines.append(f"Group 7-day: {group_pct:.1f}% {status_emoji(food_cost_status(group_pct))}")
+            delta = rolling - group_pct
             sign = "+" if delta >= 0 else ""
-            lines.append(f"{outlet} is {sign}{delta:.1f}% vs group average.")
+            lines.append(f"{outlet} is {sign}{delta:.1f}% vs group.")
     return "\n".join(lines)
 
 

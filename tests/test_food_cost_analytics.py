@@ -79,26 +79,42 @@ class AnomalyDetection(unittest.TestCase):
         self.assertEqual(fca.anomaly_severity(6.5), "critical")
         self.assertEqual(fca.anomaly_severity(-6.5), "critical")  # absolute
 
-    def test_uses_lookback_average(self):
-        today = {"Jakel": 38.1, "Vista": 26.1}
-        history = [
-            _recon("Jakel", None, None, 32.0),
-            _recon("Jakel", None, None, 33.0),
-            _recon("Vista", None, None, 27.0),
-            _recon("Vista", None, None, 28.0),
-        ]
-        anomalies = fca.compute_anomalies(today, history)
-        # Jakel: 38.1 vs 32.5 avg = +5.6 (warning). Vista: 26.1 vs 27.5 = -1.4 (none).
+    def test_compares_rolling_vs_prior_rolling(self):
+        # Both inputs are 7-day rolling (sales-weighted) figures, not single days.
+        current = {"Jakel": 38.1, "Vista": 26.1}
+        prior = {"Jakel": 32.5, "Vista": 27.5}
+        anomalies = fca.compute_anomalies(current, prior)
+        # Jakel: 38.1 vs 32.5 = +5.6 (warning). Vista: 26.1 vs 27.5 = -1.4 (none).
         self.assertEqual(len(anomalies), 1)
         a = anomalies[0]
         self.assertEqual(a.outlet, "Jakel")
-        self.assertEqual(a.avg_pct, 32.5)
+        self.assertEqual(a.current_pct, 38.1)
+        self.assertEqual(a.baseline_pct, 32.5)
         self.assertEqual(a.delta_pct, 5.6)
         self.assertEqual(a.severity, "warning")
 
-    def test_no_history_skips_outlet(self):
-        anomalies = fca.compute_anomalies({"New": 40.0}, [])
-        self.assertEqual(anomalies, [])
+    def test_no_prior_window_skips_outlet(self):
+        self.assertEqual(fca.compute_anomalies({"New": 40.0}, {}), [])
+
+
+class Rolling(unittest.TestCase):
+    def test_rolling_is_sales_weighted_not_mean_of_daily(self):
+        # Burst day RM6,000 in / RM2,000 sales (300%!) then RM200 / RM3,000 — the
+        # natural mamak delivery pattern. The rolling % must weight by sales.
+        rows = [
+            _recon("Vista", 2000.0, 6000.0, 300.0),
+            _recon("Vista", 3000.0, 200.0, 6.7),
+        ]
+        v = fca.rolling_food_cost_by_outlet(rows)["Vista"]
+        self.assertEqual(v["sales"], 5000.0)
+        self.assertEqual(v["purchases"], 6200.0)
+        self.assertEqual(v["pct"], 124.0)   # 6200/5000, NOT the 153.4 mean of dailies
+        self.assertEqual(v["days"], 2)
+
+    def test_rolling_none_pct_when_no_sales(self):
+        v = fca.rolling_food_cost_by_outlet([_recon("SBESI", None, 500.0, None)])["SBESI"]
+        self.assertIsNone(v["pct"])
+        self.assertEqual(v["purchases"], 500.0)
 
 
 class SalesSummary(unittest.TestCase):
@@ -152,7 +168,7 @@ class Formatters(unittest.TestCase):
         self.assertIn("BABAS", out)
         self.assertIn("13:42", out)
 
-    def test_outlet_trend_includes_average(self):
+    def test_outlet_trend_includes_rolling(self):
         rows = [
             _recon("Jakel", 3950.0, 1420.0, 35.9),
             _recon("Jakel", 4200.0, 1510.0, 35.9),
@@ -160,8 +176,24 @@ class Formatters(unittest.TestCase):
         for i, r in enumerate(rows):
             r["business_date"] = f"2026-05-2{3 + i}"
         out = fca.format_outlet_trend("Jakel", rows, group_pct=28.3)
-        self.assertIn("7-day average", out)
-        self.assertIn("Group average", out)
+        self.assertIn("7-day rolling", out)
+        self.assertIn("Group 7-day", out)
+
+    def test_food_cost_week_renders_rolling_per_outlet(self):
+        rows = [
+            _recon("Vista", 2000.0, 6000.0, 300.0),
+            _recon("Vista", 3000.0, 200.0, 6.7),
+            _recon("Jakel", 4000.0, 1400.0, 35.0),
+        ]
+        out = fca.format_food_cost_week("2026-05-21 → 2026-05-27", rows)
+        self.assertIn("7-day rolling", out)
+        self.assertIn("Khulafa Group", out)
+        self.assertIn("Vista", out)
+        self.assertIn("Jakel", out)
+
+    def test_food_cost_week_empty(self):
+        out = fca.format_food_cost_week("2026-05-21 → 2026-05-27", [])
+        self.assertIn("/reconcile_now", out)
 
 
 if __name__ == "__main__":

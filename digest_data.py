@@ -235,20 +235,43 @@ def _outlet_spending_week(client, now_my, limit=TOP_N) -> list:
     return sorted(by.values(), key=lambda x: (-x["amount"], x["outlet"]))[:limit]
 
 
+_RECON_COLUMNS = (
+    "id, outlet_canonical, business_date, sales_total, "
+    "total_food_purchases, food_cost_percent"
+)
+
+
 def _recon_rows_for(client, date_iso) -> list:
     return _rows(
         client.table(RECONCILIATION_TABLE)
-        .select("id, outlet_canonical, business_date, sales_total, "
-                "total_food_purchases, food_cost_percent")
+        .select(_RECON_COLUMNS)
         .eq("business_date", date_iso)
         .execute()
     )
 
 
+def _recon_window(client, start_iso, end_iso) -> list:
+    """All purchase_reconciliation rows with business_date in
+    ``[start_iso, end_iso]`` — one fetch backing both rolling windows."""
+    return _rows(
+        client.table(RECONCILIATION_TABLE)
+        .select(_RECON_COLUMNS)
+        .gte("business_date", start_iso)
+        .lte("business_date", end_iso)
+        .execute()
+    )
+
+
+def _window_slice(rows, start, end) -> list:
+    s, e = start.isoformat(), end.isoformat()
+    return [r for r in rows if s <= str(r.get("business_date"))[:10] <= e]
+
+
 def _food_cost_sections(client, now_my) -> dict:
-    """Gather the four PR #37 sections: sales today, food cost %, food-cost
-    anomalies, cash-no-receipt alerts. Resilient: any failure degrades to an
-    empty section rather than breaking the whole digest."""
+    """Gather the food-cost digest sections: sales today, food cost % (daily +
+    7-day rolling), food-cost anomalies (rolling vs prior rolling) and
+    cash-no-receipt alerts. Resilient: any failure degrades to an empty section
+    rather than breaking the whole digest."""
     out = {
         "sales_today": {}, "food_cost": {}, "food_cost_anomalies": [], "cash_alerts": [],
     }
@@ -268,12 +291,9 @@ def _food_cost_sections(client, now_my) -> dict:
         recon, recon_date = [], today
 
     if recon:
-        out["food_cost"] = {
-            "label": recon_date.isoformat(),
-            "rows": recon,
-            "unclassified": _unclassified_food_cost(client, recon),
-        }
-        out["food_cost_anomalies"] = _food_cost_anomalies(client, recon, recon_date)
+        out["food_cost"] = _food_cost_payload(client, recon, recon_date)
+        out["food_cost"]["unclassified"] = _unclassified_food_cost(client, recon)
+        out["food_cost_anomalies"] = _food_cost_anomalies(client, recon_date)
         out["cash_alerts"] = _cash_no_receipt_alerts(client, recon)
 
     try:
@@ -281,6 +301,21 @@ def _food_cost_sections(client, now_my) -> dict:
     except Exception:
         logger.warning("digest: sales summary unavailable", exc_info=True)
     return out
+
+
+def _food_cost_payload(client, recon, recon_date) -> dict:
+    """Daily rows + the 7-day rolling (sales-weighted) per-outlet figures for the
+    FOOD COST % section. Rolling degrades to empty if the window read fails."""
+    payload = {"label": recon_date.isoformat(), "rows": recon, "rolling_days": FOOD_COST_LOOKBACK_DAYS}
+    start = recon_date - timedelta(days=FOOD_COST_LOOKBACK_DAYS - 1)
+    try:
+        window = _recon_window(client, start.isoformat(), recon_date.isoformat())
+    except Exception:
+        logger.warning("digest: food-cost rolling window unavailable", exc_info=True)
+        return payload
+    payload["rolling"] = fca.rolling_food_cost_by_outlet(window)
+    payload["rolling_group_pct"] = fca.group_food_cost(window)[2]
+    return payload
 
 
 def _sales_today(client, date) -> dict:
@@ -295,25 +330,22 @@ def _sales_today(client, date) -> dict:
     return summary
 
 
-def _food_cost_anomalies(client, recon_rows, recon_date) -> list:
-    today_by_outlet = {
-        r.get("outlet_canonical"): r.get("food_cost_percent")
-        for r in recon_rows if r.get("outlet_canonical")
-    }
-    start = (recon_date - timedelta(days=FOOD_COST_LOOKBACK_DAYS)).isoformat()
-    end = (recon_date - timedelta(days=1)).isoformat()
+def _food_cost_anomalies(client, recon_date) -> list:
+    """Compare each outlet's current 7-day rolling food cost % against the prior
+    7-day rolling %. Rolling-vs-rolling (not single days) so a burst supplier
+    delivery doesn't fire a false alarm — the natural mamak delivery pattern."""
+    cur_start = recon_date - timedelta(days=FOOD_COST_LOOKBACK_DAYS - 1)
+    prior_start = recon_date - timedelta(days=2 * FOOD_COST_LOOKBACK_DAYS - 1)
     try:
-        history = _rows(
-            client.table(RECONCILIATION_TABLE)
-            .select("outlet_canonical, food_cost_percent, business_date")
-            .gte("business_date", start)
-            .lte("business_date", end)
-            .execute()
-        )
+        window = _recon_window(client, prior_start.isoformat(), recon_date.isoformat())
     except Exception:
         logger.warning("digest: food-cost history unavailable", exc_info=True)
         return []
-    return fca.compute_anomalies(today_by_outlet, history, FOOD_COST_LOOKBACK_DAYS)
+    cur_rows = _window_slice(window, cur_start, recon_date)
+    prior_rows = _window_slice(window, prior_start, cur_start - timedelta(days=1))
+    cur = {o: v["pct"] for o, v in fca.rolling_food_cost_by_outlet(cur_rows).items()}
+    prior = {o: v["pct"] for o, v in fca.rolling_food_cost_by_outlet(prior_rows).items()}
+    return fca.compute_anomalies(cur, prior)
 
 
 def _cash_no_receipt_alerts(client, recon_rows) -> list:

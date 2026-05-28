@@ -93,7 +93,7 @@ import reconciliation_service
 import sales_analytics
 from digest_data import gather_digest_data, log_digest
 from sales_ingest import run_ingest_once
-from sales_parser import OUTLET_CANONICAL_BY_CODE, RECEIPTS_CODE_TO_CANONICAL
+from sales_parser import OUTLET_CANONICAL_BY_CODE
 from receipt_classifier import ReceiptType, classify_receipt
 
 logging.basicConfig(
@@ -3222,31 +3222,6 @@ def _fetch_sales_items_rows(business_dates):
     return resp.data or []
 
 
-def _fetch_purchase_rows(start_date, end_date):
-    resp = (
-        supabase.table(RECEIPTS_TABLE)
-        .select("outlet, total, receipt_date")
-        .eq("receipt_type", "SUPPLIER_PURCHASE")
-        .gte("receipt_date", start_date)
-        .lte("receipt_date", end_date)
-        .execute()
-    )
-    return resp.data or []
-
-
-def _purchases_by_outlet(rows):
-    out: dict = {}
-    for r in rows:
-        code = (r.get("outlet") or "").upper()
-        canonical = RECEIPTS_CODE_TO_CANONICAL.get(code, code or "UNKNOWN")
-        try:
-            total = float(r.get("total")) if r.get("total") is not None else 0.0
-        except (TypeError, ValueError):
-            total = 0.0
-        out[canonical] = out.get(canonical, 0.0) + total
-    return out
-
-
 def _fetch_ingest_log_rows(since_iso):
     resp = (
         supabase.table(SALES_INGEST_LOG_TABLE)
@@ -3494,16 +3469,13 @@ async def food_cost_week_command(update: Update, context: ContextTypes.DEFAULT_T
     dates = _business_date_list(7)
     start, end = dates[-1], dates[0]
     try:
-        sales_rows = await asyncio.to_thread(_fetch_sales_rows, dates)
-        purchase_rows = await asyncio.to_thread(_fetch_purchase_rows, start, end)
+        rows = await asyncio.to_thread(_fetch_recon_rows, dates)
     except Exception:
         logger.exception("food_cost_week failed")
         await message.reply_text("Failed to compute food cost.")
         return
-    sales_by = sales_analytics.aggregate_sales_by_outlet(sales_rows)
-    purch_by = _purchases_by_outlet(purchase_rows)
     await message.reply_text(
-        sales_analytics.format_food_cost(f"Food cost {start} → {end}:", sales_by, purch_by)
+        food_cost_analytics.format_food_cost_week(f"{start} → {end}", rows)
     )
 
 
