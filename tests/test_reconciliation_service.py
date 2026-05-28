@@ -318,6 +318,7 @@ class BotWiring(unittest.TestCase):
             ("food_cost_outlet", "food_cost_outlet_command"),
             ("cash_no_receipt_today", "cash_no_receipt_today_command"),
             ("reconcile_now", "reconcile_now_command"),
+            ("reconcile_date", "reconcile_date_command"),
         ]:
             self.assertIn(f'CommandHandler("{cmd}", {handler})', self.src)
 

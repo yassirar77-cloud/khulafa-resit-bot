@@ -3462,6 +3462,40 @@ async def reconcile_now_command(update: Update, context: ContextTypes.DEFAULT_TY
     await message.reply_text("\n".join(lines))
 
 
+async def reconcile_date_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Force a reconciliation re-run for one historical business date. Needed
+    because /reconcile_now only refreshes today + yesterday, so a big sales day
+    reconciled by old code (or before later receipts arrived) keeps its stale
+    row and skews the 7-day rolling window."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    if not context.args:
+        await message.reply_text(
+            "Usage: /reconcile_date YYYY-MM-DD\nExample: /reconcile_date 2026-05-25"
+        )
+        return
+    raw = context.args[0].strip()
+    try:
+        target = datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError:
+        await message.reply_text(f"Bad date {raw!r}. Use YYYY-MM-DD (e.g. 2026-05-25).")
+        return
+    await message.reply_text(f"Reconciling {target.isoformat()}…")
+    try:
+        result = await asyncio.to_thread(
+            reconciliation_service.run_reconciliation, supabase, target.isoformat()
+        )
+    except Exception as exc:  # noqa: BLE001 - surfaced to the owner
+        logger.exception("reconcile_date failed")
+        await message.reply_text(f"Reconciliation failed: {exc}")
+        return
+    await message.reply_text(
+        f"Reconciliation done — {result['business_date']}: "
+        f"{result['outlets_processed']} outlets"
+    )
+
+
 async def food_cost_week_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message or not is_reviewer(_command_owner_id(update)):
@@ -3671,6 +3705,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("food_cost_outlet", food_cost_outlet_command))
     app.add_handler(CommandHandler("cash_no_receipt_today", cash_no_receipt_today_command))
     app.add_handler(CommandHandler("reconcile_now", reconcile_now_command))
+    app.add_handler(CommandHandler("reconcile_date", reconcile_date_command))
     app.add_handler(CommandHandler("top_items_sold", top_items_sold_command))
     app.add_handler(CommandHandler("sales_summary_today", sales_summary_today_command))
     app.add_handler(CommandHandler("sales_customers_today", sales_customers_today_command))
