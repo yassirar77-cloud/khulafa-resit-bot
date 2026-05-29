@@ -107,6 +107,18 @@ def week_before_range(today: date) -> tuple[date, date]:
     return pm - timedelta(days=7), ps - timedelta(days=7)
 
 
+def window_ending(end_date: date) -> tuple[date, date, date, date]:
+    """A 7-day window ENDING on ``end_date`` (inclusive), plus the 7 days before
+    it as the "Last week: Z%" baseline. Returns
+    (prior_start, prior_end, before_start, before_end). Used by the on-demand
+    preview (``recent`` / a date arg) where the window isn't a clean Mon–Sun."""
+    ps = end_date
+    pm = end_date - timedelta(days=6)
+    bps = pm - timedelta(days=1)
+    bpm = bps - timedelta(days=6)
+    return pm, ps, bpm, bps
+
+
 def dates_in_range(start: date, end: date) -> list[str]:
     """Inclusive ISO date strings from ``start`` to ``end``."""
     n = (end - start).days

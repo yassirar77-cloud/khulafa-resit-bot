@@ -34,6 +34,14 @@ class DateMath(unittest.TestCase):
         pm, ps = wmr.prior_week_range(date(2026, 6, 1))
         self.assertEqual(len(wmr.dates_in_range(pm, ps)), 7)
 
+    def test_window_ending_on_date(self):
+        # /weekly_report_now 2026-05-27 -> 7 days ending 27 May (21–27),
+        # baseline the 7 before (14–20).
+        pm, ps, bpm, bps = wmr.window_ending(date(2026, 5, 27))
+        self.assertEqual((pm, ps), (date(2026, 5, 21), date(2026, 5, 27)))
+        self.assertEqual((bpm, bps), (date(2026, 5, 14), date(2026, 5, 20)))
+        self.assertEqual(len(wmr.dates_in_range(pm, ps)), 7)
+
 
 class Content(unittest.TestCase):
     def test_message_has_exact_benchmark_line(self):

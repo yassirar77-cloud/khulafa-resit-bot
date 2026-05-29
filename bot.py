@@ -1676,7 +1676,26 @@ HELP_TEXT = (
     "/advances <outlet> — open advances at one outlet\n"
     "/advances <staff> repaid [amount] — mark repaid (Y/N confirm)\n"
     "/dashboard — open the Mini App dashboard\n"
-    "/help — show this message"
+    "/help — show this message\n"
+    "\n"
+    "Food cost:\n"
+    "/food_cost_today — today's raw sales & purchases\n"
+    "/food_cost_week — 7-day rolling food cost % per outlet\n"
+    "/food_cost_month — month-to-date food cost % per outlet\n"
+    "/food_cost_outlet <name> — one outlet's food cost trend\n"
+    "/cash_no_receipt_today — POS cash payouts with no receipt\n"
+    "/reconcile_now — re-run today/yesterday reconciliation\n"
+    "/reconcile_date YYYY-MM-DD — re-run one historical date\n"
+    "\n"
+    "Sales:\n"
+    "/sales_today, /sales_yesterday — sales by outlet\n"
+    "/sales_summary_today, /sales_customers_today, /sales_avg_ticket\n"
+    "/top_items_sold — top items sold (last 7 days)\n"
+    "\n"
+    "Weekly manager reports:\n"
+    "/gen_codes — generate one-time outlet registration codes\n"
+    "/register <CODE> — register as an outlet's manager\n"
+    "/weekly_report_now [recent | YYYY-MM-DD] — preview the weekly report"
 )
 
 
@@ -3633,33 +3652,37 @@ def _weekly_window_for_anchor(anchor: date):
 
 
 def _latest_recon_date():
-    """The most recent business_date present in purchase_reconciliation, or
-    ``None`` if the table is empty."""
+    """The most recent business_date in purchase_reconciliation that actually
+    has sales (sales_total not null), or ``None`` if there's none. A freshly
+    reconciled day whose sales D-file hasn't landed yet (sales_total null) is
+    skipped — e.g. 28 May with no sales falls back to 27 May.
+
+    Filtering in Python (rather than a NOT-NULL server filter) keeps this on the
+    query surface the rest of the bot already uses. 200 most-recent outlet-day
+    rows is ~20 business dates — comfortably more than enough to find one with
+    sales."""
     resp = (
         supabase.table(RECONCILIATION_TABLE)
-        .select("business_date")
+        .select("business_date, sales_total")
         .order("business_date", desc=True)
-        .limit(1)
+        .limit(200)
         .execute()
     )
-    rows = resp.data or []
-    if not rows:
-        return None
-    return datetime.fromisoformat(str(rows[0]["business_date"])).date()
+    for r in resp.data or []:
+        bd = r.get("business_date")
+        if r.get("sales_total") is not None and bd:
+            return datetime.fromisoformat(str(bd)).date()
+    return None
 
 
 def _recent_data_window():
-    """A 7-day window ending on the latest reconciled date (newest data), plus
-    the 7 days before it as the baseline. ``None`` if there's no data at all.
-    Lets the owner preview against real data before a clean Mon–Sun exists."""
+    """The 7-day window ending on the latest date that HAS sales data, so the
+    owner can preview real manager messages before a clean Mon–Sun exists.
+    ``None`` if no reconciled day has sales yet."""
     latest = _latest_recon_date()
     if latest is None:
         return None
-    ps = latest
-    pm = latest - timedelta(days=6)
-    bps = pm - timedelta(days=1)
-    bpm = bps - timedelta(days=6)
-    return pm, ps, bpm, bps
+    return wmr.window_ending(latest)
 
 
 def _gather_weekly_report(today=None, *, window=None) -> dict:
@@ -3791,8 +3814,8 @@ async def weekly_report_now_command(update: Update, context: ContextTypes.DEFAUL
 
     Usage:
       /weekly_report_now              -> last full Mon–Sun (the live schedule)
-      /weekly_report_now recent       -> most recent 7 days that have data
-      /weekly_report_now YYYY-MM-DD   -> the full week before that date
+      /weekly_report_now recent       -> most recent 7 days that have sales data
+      /weekly_report_now YYYY-MM-DD   -> the 7-day week ending on that date
     """
     message = update.effective_message
     if not message or not is_reviewer(_command_owner_id(update)):
@@ -3803,9 +3826,9 @@ async def weekly_report_now_command(update: Update, context: ContextTypes.DEFAUL
     if arg in ("recent", "latest"):
         window = await asyncio.to_thread(_recent_data_window)
         if window is None:
-            await message.reply_text("No reconciliation data exists yet to preview.")
+            await message.reply_text("No reconciliation data with sales exists yet to preview.")
             return
-        hint = "most recent 7 days with data"
+        hint = f"most recent 7 days with data (ending {window[1].isoformat()})"
     elif arg:
         try:
             anchor = datetime.strptime(arg, "%Y-%m-%d").date()
@@ -3814,8 +3837,8 @@ async def weekly_report_now_command(update: Update, context: ContextTypes.DEFAUL
                 "Usage: /weekly_report_now [recent | YYYY-MM-DD]"
             )
             return
-        window = _weekly_window_for_anchor(anchor)
-        hint = f"week before {anchor.isoformat()}"
+        window = wmr.window_ending(anchor)
+        hint = f"week ending {anchor.isoformat()}"
     await message.reply_text(f"Building weekly manager report ({hint})…")
     await post_weekly_manager_reports(
         context.application, notify_chat_id=_command_owner_id(update), window=window
