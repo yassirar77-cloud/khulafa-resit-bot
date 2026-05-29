@@ -54,37 +54,59 @@ class Outlet:
     canonical: str   # matches purchase_reconciliation.outlet_canonical
 
 
-# The nine outlets that have a March-2026 food-cost baseline (data/outlet_
-# benchmarks.json). ``canonical`` ties each to the name reconciliation rows use,
-# so a manager's weekly food cost can be looked up. SEK 15 / ST Khulafa / MB /
-# Razak are intentionally absent (no baseline -> no benchmark message).
-OUTLETS: tuple[Outlet, ...] = (
-    Outlet("SEK6", "SEK 6", "SEK-6"),
-    Outlet("SEK14", "SEK 14", "Signature"),
-    Outlet("SEK20", "SEK 20", "SEK-20"),
-    Outlet("KLANG", "Klang", "Klang B.Emas"),
-    Outlet("VISTA", "Vista", "Vista"),
-    Outlet("JAKEL", "Jakel", "Jakel"),
-    Outlet("BISTRO7", "Bistro", "Bistro"),
-    Outlet("SBESI", "S.Besi", "SBESI"),
-    Outlet("DU", "Damansara", "D.U"),
-)
-
-_BY_CODE = {o.code: o for o in OUTLETS}
-_BY_CANONICAL = {o.canonical: o for o in OUTLETS}
+    code: str        # short prefix used in registration codes, e.g. "SEK20"
+    display: str     # human label (the canonical name), e.g. "SEK-20"
+    canonical: str   # matches purchase_reconciliation.outlet_canonical
 
 
-def outlet_by_code(code) -> Outlet | None:
-    return _BY_CODE.get((code or "").strip().upper())
+# Single source of truth for which outlets exist: the outlet_canonical table
+# (code, canonical_name, active), the same registry sales ingestion and
+# reconciliation read. We NEVER hardcode the list — an outlet added/retired
+# there flows through to codes and weekly reports automatically.
+OUTLET_CANONICAL_TABLE = "outlet_canonical"
+
+# Sales codes are stored as "S-SEK20"; the registration-code prefix drops the
+# "S-" so codes read SEK20-7K2A as specified.
+_SALES_CODE_PREFIX = "S-"
 
 
-def outlet_by_canonical(canonical) -> Outlet | None:
-    return _BY_CANONICAL.get(canonical)
+def _to_outlet_code(sales_code) -> str:
+    c = (sales_code or "").strip().upper()
+    if c.startswith(_SALES_CODE_PREFIX):
+        c = c[len(_SALES_CODE_PREFIX):]
+    return c.strip()
 
 
-def display_name(outlet_code) -> str:
-    o = outlet_by_code(outlet_code)
-    return o.display if o else (outlet_code or "?")
+def load_active_outlets(supabase) -> list[Outlet]:
+    """Every active outlet from outlet_canonical (WHERE active=true), the single
+    source of truth. ``canonical`` is the name reconciliation rows use, so a
+    manager's weekly food cost can be looked up; ``code`` is the short prefix
+    for registration codes. Sorted by code for a stable hand-out order."""
+    resp = (
+        supabase.table(OUTLET_CANONICAL_TABLE)
+        .select("code, canonical_name, active")
+        .eq("active", True)
+        .execute()
+    )
+    outlets: list[Outlet] = []
+    for r in resp.data or []:
+        canonical = r.get("canonical_name")
+        code = _to_outlet_code(r.get("code"))
+        if not canonical or not code:
+            continue
+        outlets.append(Outlet(code=code, display=canonical, canonical=canonical))
+    outlets.sort(key=lambda o: o.code)
+    return outlets
+
+
+def display_name(supabase, outlet_code) -> str:
+    """Canonical name for an outlet code, via the live registry. Falls back to
+    the code itself if the outlet is no longer active/known."""
+    norm = (outlet_code or "").strip().upper()
+    for o in load_active_outlets(supabase):
+        if o.code == norm:
+            return o.display
+    return norm or "?"
 
 
 def _now_iso() -> str:
@@ -111,12 +133,12 @@ def normalize_code(code) -> str:
 # --- persistence (take the supabase client) ----------------------------------
 
 def create_registration_codes(supabase, *, rng=None) -> list[dict]:
-    """Generate and persist one fresh code per outlet, invalidating any prior
-    *unused* code for that outlet first. Returns
-    ``[{outlet_code, display, code}]`` in OUTLETS order for the owner to hand
+    """Generate and persist one fresh code per ACTIVE outlet (sourced live from
+    outlet_canonical), invalidating any prior *unused* code for that outlet
+    first. Returns ``[{outlet_code, display, code}]`` for the owner to hand
     out."""
     out: list[dict] = []
-    for o in OUTLETS:
+    for o in load_active_outlets(supabase):
         # Drop superseded, still-unused codes so only the newest is live.
         supabase.table(CODES_TABLE).delete().eq("outlet_code", o.code).eq(
             "used", False
@@ -161,7 +183,7 @@ def register_manager(supabase, code, manager_name, chat_id) -> dict:
         return {"ok": False, "error": USED_CODE_MESSAGE}
 
     outlet_code = row.get("outlet_code")
-    display = display_name(outlet_code)
+    display = display_name(supabase, outlet_code)
 
     # Staff turnover: a fresh registration REPLACES the prior manager for the
     # outlet rather than stacking, so an outlet always has exactly one manager.

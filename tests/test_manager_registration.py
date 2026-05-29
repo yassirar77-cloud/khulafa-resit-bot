@@ -2,7 +2,6 @@
 
 import os
 import random
-import re
 import sys
 import unittest
 
@@ -10,6 +9,33 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import manager_registration as mr
 from tests.fake_supabase import FakeSupabase
+
+# Mirror of the outlet_canonical registry: 10 active outlets (incl. One Bistro /
+# S-SEK15) + 3 inactive partnership outlets that must be excluded from codes.
+_OUTLET_REGISTRY = [
+    ("S-BISTRO7", "Bistro", True),
+    ("S-DAMANSARA", "D.U", True),
+    ("S-JAKEL", "Jakel", True),
+    ("S-KLANG", "Klang B.Emas", True),
+    ("S-SBESI", "SBESI", True),
+    ("S-SEK14", "Signature", True),
+    ("S-SEK15", "One Bistro", True),
+    ("S-SEK20", "SEK-20", True),
+    ("S-SEK6", "SEK-6", True),
+    ("S-VISTA", "Vista", True),
+    ("S-ST KHU", "ST Khulafa", False),
+    ("S-MB", "MB", False),
+    ("S-RAZAK", "K.L Razak", False),
+]
+_ACTIVE_COUNT = sum(1 for _c, _n, active in _OUTLET_REGISTRY if active)
+
+
+def _seed_outlets(sb):
+    sb.table(mr.OUTLET_CANONICAL_TABLE).insert(
+        [{"code": c, "canonical_name": n, "active": active}
+         for c, n, active in _OUTLET_REGISTRY]
+    ).execute()
+    return sb
 
 
 class CodeGeneration(unittest.TestCase):
@@ -24,29 +50,44 @@ class CodeGeneration(unittest.TestCase):
             suffix = mr.generate_registration_code("VISTA", rng=rng).split("-")[1]
             self.assertFalse(set(suffix) & set("01OIL"))
 
-    def test_gen_codes_one_per_outlet_all_unique(self):
-        sb = FakeSupabase()
+    def test_only_active_outlets_are_sourced(self):
+        # Single source of truth: outlet_canonical WHERE active=true. Inactive
+        # partnership outlets must NOT get codes.
+        sb = _seed_outlets(FakeSupabase())
+        outlets = mr.load_active_outlets(sb)
+        self.assertEqual(len(outlets), _ACTIVE_COUNT)
+        self.assertNotIn("ST KHU", {o.code for o in outlets})
+
+    def test_gen_codes_one_per_active_outlet_includes_one_bistro(self):
+        sb = _seed_outlets(FakeSupabase())
         codes = mr.create_registration_codes(sb, rng=random.Random(42))
-        self.assertEqual(len(codes), len(mr.OUTLETS))
-        self.assertEqual(
-            {c["outlet_code"] for c in codes},
-            {o.code for o in mr.OUTLETS},
-        )
+        self.assertEqual(len(codes), _ACTIVE_COUNT)  # all 10, not 9
+        outlet_codes = {c["outlet_code"] for c in codes}
+        # One Bistro (S-SEK15 -> SEK15) was the dropped 10th outlet — now present.
+        self.assertIn("SEK15", outlet_codes)
+        self.assertIn("One Bistro", {c["display"] for c in codes})
         all_codes = [c["code"] for c in codes]
         self.assertEqual(len(all_codes), len(set(all_codes)))
 
+    def test_sales_code_prefix_is_stripped(self):
+        # S-SEK20 -> SEK20 so codes read SEK20-7K2A.
+        sb = _seed_outlets(FakeSupabase())
+        codes = {c["outlet_code"]: c["code"]
+                 for c in mr.create_registration_codes(sb, rng=random.Random(1))}
+        self.assertTrue(codes["SEK20"].startswith("SEK20-"))
+
     def test_regenerating_invalidates_prior_unused_codes(self):
-        sb = FakeSupabase()
+        sb = _seed_outlets(FakeSupabase())
         mr.create_registration_codes(sb, rng=random.Random(1))
         mr.create_registration_codes(sb, rng=random.Random(2))
-        # Only one unused code per outlet should survive.
+        # Only one unused code per active outlet should survive.
         unused = [r for r in sb.rows(mr.CODES_TABLE) if not r["used"]]
-        self.assertEqual(len(unused), len(mr.OUTLETS))
+        self.assertEqual(len(unused), _ACTIVE_COUNT)
 
 
 class Registration(unittest.TestCase):
     def setUp(self):
-        self.sb = FakeSupabase()
+        self.sb = _seed_outlets(FakeSupabase())
         self.codes = {
             c["outlet_code"]: c["code"]
             for c in mr.create_registration_codes(self.sb, rng=random.Random(7))
@@ -56,6 +97,7 @@ class Registration(unittest.TestCase):
         code = self.codes["SEK20"]
         res = mr.register_manager(self.sb, code, "Aiman", 111)
         self.assertTrue(res["ok"])
+        self.assertEqual(res["outlet_display"], "SEK-20")
         self.assertEqual(res["outlet_code"], "SEK20")
         mgr = mr.get_manager(self.sb, "SEK20")
         self.assertEqual(mgr["chat_id"], 111)
@@ -96,7 +138,7 @@ class Registration(unittest.TestCase):
         self.assertEqual(res["error"], mr.INVALID_CODE_MESSAGE)
         # The error must not leak any outlet name or code.
         low = res["error"].lower()
-        for o in mr.OUTLETS:
+        for o in mr.load_active_outlets(self.sb):
             self.assertNotIn(o.code.lower(), low)
             self.assertNotIn(o.display.lower(), low)
         self.assertIsNone(mr.get_manager(self.sb, "SEK20"))
