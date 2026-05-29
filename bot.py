@@ -8,7 +8,7 @@ import re
 import signal
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -3624,16 +3624,58 @@ async def register_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
 
-def _gather_weekly_report(today=None) -> dict:
-    """Build every per-outlet message + the HQ summary for the prior full week.
+def _weekly_window_for_anchor(anchor: date):
+    """(prior_start, prior_end, before_start, before_end) for the full week
+    before the week containing ``anchor``, plus the week before that."""
+    pm, ps = wmr.prior_week_range(anchor)
+    bpm, bps = wmr.week_before_range(anchor)
+    return pm, ps, bpm, bps
 
-    Reuses PR #63's sales-weighted rolling food cost over the prior Mon–Sun, and
-    the week before that for the "Last week: Z%" baseline. Returns a bundle of
-    routed messages (target chat + text) and the owner HQ summary. No Telegram
-    I/O here — that keeps this testable and the send loop dumb."""
-    today = today or _my_today()
-    pm, ps = wmr.prior_week_range(today)
-    bpm, bps = wmr.week_before_range(today)
+
+def _latest_recon_date():
+    """The most recent business_date present in purchase_reconciliation, or
+    ``None`` if the table is empty."""
+    resp = (
+        supabase.table(RECONCILIATION_TABLE)
+        .select("business_date")
+        .order("business_date", desc=True)
+        .limit(1)
+        .execute()
+    )
+    rows = resp.data or []
+    if not rows:
+        return None
+    return datetime.fromisoformat(str(rows[0]["business_date"])).date()
+
+
+def _recent_data_window():
+    """A 7-day window ending on the latest reconciled date (newest data), plus
+    the 7 days before it as the baseline. ``None`` if there's no data at all.
+    Lets the owner preview against real data before a clean Mon–Sun exists."""
+    latest = _latest_recon_date()
+    if latest is None:
+        return None
+    ps = latest
+    pm = latest - timedelta(days=6)
+    bps = pm - timedelta(days=1)
+    bpm = bps - timedelta(days=6)
+    return pm, ps, bpm, bps
+
+
+def _gather_weekly_report(today=None, *, window=None) -> dict:
+    """Build every per-outlet message + the HQ summary for a 7-day window.
+
+    Default window is the prior full Mon–Sun (the Monday-09:00 schedule);
+    ``window`` overrides it as (prior_start, prior_end, before_start,
+    before_end) for on-demand previews. Reuses PR #63's sales-weighted rolling
+    food cost; the week before is the "Last week: Z%" baseline. Outlets are
+    sourced live from outlet_canonical (active=true). No Telegram I/O here —
+    that keeps it testable and the send loop dumb."""
+    if window is not None:
+        pm, ps, bpm, bps = window
+    else:
+        today = today or _my_today()
+        pm, ps, bpm, bps = _weekly_window_for_anchor(today)
     period_label = f"{pm.isoformat()} → {ps.isoformat()}"
 
     prior_dates = wmr.dates_in_range(pm, ps)
@@ -3647,12 +3689,13 @@ def _gather_weekly_report(today=None) -> dict:
     incomplete = {
         d["outlet"] for d in food_cost_analytics.incomplete_period_dates(prior_rows)
     }
+    outlets = manager_registration.load_active_outlets(supabase)
     managers = manager_registration.get_all_managers(supabase)
     enabled = wmr.delivery_enabled()
 
     messages: list[dict] = []
     hq_rows: list[dict] = []
-    for outlet in manager_registration.OUTLETS:
+    for outlet in outlets:
         this_pct = (prior_by_outlet.get(outlet.canonical) or {}).get("pct")
         last_pct = (before_by_outlet.get(outlet.canonical) or {}).get("pct")
         mgr = managers.get(outlet.code)
@@ -3689,15 +3732,18 @@ def _gather_weekly_report(today=None) -> dict:
         "messages": messages,
         "hq_summary": hq_summary,
         "enabled": enabled,
+        "has_data": bool(prior_rows),
     }
 
 
-async def post_weekly_manager_reports(application: Application, *, notify_chat_id=None) -> None:
+async def post_weekly_manager_reports(application: Application, *, notify_chat_id=None,
+                                      window=None) -> None:
     """Monday 09:00 MY job. Sends each per-outlet message to its routed target
     (owner while delivery is gated off), then ALWAYS sends the owner the
-    consolidated HQ summary."""
+    consolidated HQ summary. ``window`` lets /weekly_report_now preview a
+    different 7-day window."""
     try:
-        bundle = await asyncio.to_thread(_gather_weekly_report)
+        bundle = await asyncio.to_thread(_gather_weekly_report, window=window)
     except Exception:
         logger.exception("weekly manager report: gather failed")
         if notify_chat_id is not None:
@@ -3706,6 +3752,20 @@ async def post_weekly_manager_reports(application: Application, *, notify_chat_i
                     chat_id=notify_chat_id,
                     text="Failed to build the weekly manager report.",
                 )
+        return
+
+    # Graceful empty-window handling: say so plainly instead of going silent or
+    # sending a blank summary. The owner (and the on-demand caller) are told.
+    if not bundle["has_data"]:
+        note = (
+            f"📭 No reconciliation data for {bundle['period_label']} — nothing "
+            "to report for that week yet.\n\nTip: /weekly_report_now recent "
+            "previews the most recent 7 days that DO have data."
+        )
+        for chat in {ALERT_CHAT_ID, notify_chat_id} - {None}:
+            with contextlib.suppress(Exception):
+                await application.bot.send_message(chat_id=chat, text=note)
+        logger.info("Weekly manager report: no data for %s", bundle["period_label"])
         return
 
     sent = 0
@@ -3727,13 +3787,38 @@ async def post_weekly_manager_reports(application: Application, *, notify_chat_i
 
 
 async def weekly_report_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Owner-only: trigger the weekly report on demand (for testing)."""
+    """Owner-only: trigger the weekly report on demand (for testing).
+
+    Usage:
+      /weekly_report_now              -> last full Mon–Sun (the live schedule)
+      /weekly_report_now recent       -> most recent 7 days that have data
+      /weekly_report_now YYYY-MM-DD   -> the full week before that date
+    """
     message = update.effective_message
     if not message or not is_reviewer(_command_owner_id(update)):
         return
-    await message.reply_text("Building weekly manager report…")
+    arg = context.args[0].strip().lower() if context.args else ""
+    window = None
+    hint = "last full week"
+    if arg in ("recent", "latest"):
+        window = await asyncio.to_thread(_recent_data_window)
+        if window is None:
+            await message.reply_text("No reconciliation data exists yet to preview.")
+            return
+        hint = "most recent 7 days with data"
+    elif arg:
+        try:
+            anchor = datetime.strptime(arg, "%Y-%m-%d").date()
+        except ValueError:
+            await message.reply_text(
+                "Usage: /weekly_report_now [recent | YYYY-MM-DD]"
+            )
+            return
+        window = _weekly_window_for_anchor(anchor)
+        hint = f"week before {anchor.isoformat()}"
+    await message.reply_text(f"Building weekly manager report ({hint})…")
     await post_weekly_manager_reports(
-        context.application, notify_chat_id=_command_owner_id(update)
+        context.application, notify_chat_id=_command_owner_id(update), window=window
     )
 
 
