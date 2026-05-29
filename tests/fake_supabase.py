@@ -1,0 +1,99 @@
+"""Minimal in-memory Supabase double for tests.
+
+Supports just the fluent subset the bot uses against simple tables:
+``table(name).select(...).eq(col, val).limit(n).execute()`` and the matching
+``insert`` / ``update().eq()`` / ``delete().eq()`` chains. ``execute()`` returns
+an object with a ``.data`` list, like supabase-py.
+"""
+
+from __future__ import annotations
+
+import itertools
+
+
+class _Result:
+    def __init__(self, data):
+        self.data = data
+
+
+class _Query:
+    def __init__(self, store, table):
+        self._store = store
+        self._table = table
+        self._op = "select"
+        self._payload = None
+        self._filters: list[tuple[str, object]] = []
+        self._limit = None
+
+    # --- builders ---
+    def select(self, *_cols):
+        self._op = "select"
+        return self
+
+    def insert(self, payload):
+        self._op = "insert"
+        self._payload = payload
+        return self
+
+    def update(self, payload):
+        self._op = "update"
+        self._payload = payload
+        return self
+
+    def delete(self):
+        self._op = "delete"
+        return self
+
+    def eq(self, col, val):
+        self._filters.append((col, val))
+        return self
+
+    def limit(self, n):
+        self._limit = n
+        return self
+
+    # --- helpers ---
+    def _matches(self, row):
+        return all(row.get(c) == v for c, v in self._filters)
+
+    def execute(self):
+        rows = self._store.setdefault(self._table, [])
+        if self._op == "select":
+            out = [r for r in rows if self._matches(r)]
+            if self._limit is not None:
+                out = out[: self._limit]
+            return _Result([dict(r) for r in out])
+        if self._op == "insert":
+            payloads = self._payload if isinstance(self._payload, list) else [self._payload]
+            inserted = []
+            for p in payloads:
+                row = dict(p)
+                row.setdefault("id", next(self._store["_ids"]))
+                rows.append(row)
+                inserted.append(dict(row))
+            return _Result(inserted)
+        if self._op == "update":
+            changed = []
+            for r in rows:
+                if self._matches(r):
+                    r.update(self._payload)
+                    changed.append(dict(r))
+            return _Result(changed)
+        if self._op == "delete":
+            kept = [r for r in rows if not self._matches(r)]
+            removed = [r for r in rows if self._matches(r)]
+            self._store[self._table] = kept
+            return _Result([dict(r) for r in removed])
+        raise AssertionError(f"unsupported op {self._op}")
+
+
+class FakeSupabase:
+    def __init__(self):
+        self._store = {"_ids": itertools.count(1)}
+
+    def table(self, name):
+        return _Query(self._store, name)
+
+    # test-only inspection helper
+    def rows(self, name):
+        return [dict(r) for r in self._store.get(name, [])]
