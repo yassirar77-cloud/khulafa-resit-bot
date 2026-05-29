@@ -32,6 +32,7 @@ RECONCILIATION_TABLE = "purchase_reconciliation"
 MATCH_LOG_TABLE = "purchase_match_log"
 SALES_DAILY_SUMMARY_TABLE = "sales_daily_summary"
 SALES_DAILY_TOP_ITEMS_TABLE = "sales_daily_top_items"
+SALES_INGEST_LOG_TABLE = "sales_ingest_log"
 
 LOW_CONFIDENCE_FLOOR = 60
 OUTLIER_TOTAL_MAX = 5000.0
@@ -462,6 +463,53 @@ def _top_items_yesterday(client, now_my) -> dict:
     return {"label": yesterday, "items": items}
 
 
+def dead_letter_emails(error_rows, inserted_ids, threshold) -> list:
+    """Pure: given sales_ingest_log ``error`` rows and the set of message-ids
+    that later landed (``inserted``), return the dead letters — message-ids that
+    failed ``threshold`` or more times and never made it into a destination.
+    Recovered ones (a later ``inserted`` row exists) are excluded automatically,
+    so a code fix clears the alert. Each entry: {message_id, subject, detail,
+    count}, most-failed first."""
+    by_id: dict = {}
+    for r in error_rows or []:
+        mid = r.get("source_message_id")
+        if not mid or mid in inserted_ids:
+            continue
+        slot = by_id.setdefault(mid, {"message_id": mid, "subject": None, "detail": None, "count": 0})
+        slot["count"] += 1
+        # Keep the most recent subject/detail we see (rows arrive newest-first).
+        if slot["subject"] is None and r.get("source_subject"):
+            slot["subject"] = r.get("source_subject")
+        if slot["detail"] is None and r.get("detail"):
+            slot["detail"] = r.get("detail")
+    dead = [v for v in by_id.values() if v["count"] >= threshold]
+    dead.sort(key=lambda v: v["count"], reverse=True)
+    return dead
+
+
+def _dead_letter_emails(client, now_my) -> list:
+    from sales_ingest import DEAD_LETTER_THRESHOLD
+    try:
+        error_rows = _rows(
+            client.table(SALES_INGEST_LOG_TABLE)
+            .select("source_message_id, source_subject, detail")
+            .eq("status", "error")
+            .order("ran_at", desc=True)
+            .execute()
+        )
+        inserted = _rows(
+            client.table(SALES_INGEST_LOG_TABLE)
+            .select("source_message_id")
+            .eq("status", "inserted")
+            .execute()
+        )
+    except Exception:
+        logger.warning("digest: dead-letter emails unavailable", exc_info=True)
+        return []
+    inserted_ids = {r.get("source_message_id") for r in inserted if r.get("source_message_id")}
+    return dead_letter_emails(error_rows, inserted_ids, DEAD_LETTER_THRESHOLD)
+
+
 def _safe(fn, default, client, now_my):
     """Run a new-section gatherer; on any failure (e.g. a migration not yet
     applied) degrade to ``default`` rather than breaking the whole digest."""
@@ -482,6 +530,7 @@ def gather_digest_data(client, now_my) -> dict:
         "today_suppliers": _safe(_today_suppliers, [], client, now_my),
         "outlet_spending": _safe(_outlet_spending_week, [], client, now_my),
         "top_items_yesterday": _safe(_top_items_yesterday, {}, client, now_my),
+        "dead_letter_emails": _safe(_dead_letter_emails, [], client, now_my),
     }
     data.update(_food_cost_sections(client, now_my))
     return data

@@ -17,7 +17,13 @@ from email.message import EmailMessage
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sales_email_fetcher import Mailbox  # noqa: E402
-from sales_ingest import _canonical_code, build_sales_record, process_email, run  # noqa: E402
+from sales_ingest import (  # noqa: E402
+    DEAD_LETTER_THRESHOLD,
+    _canonical_code,
+    build_sales_record,
+    process_email,
+    run,
+)
 from sales_parser import OUTLET_CANONICAL_BY_CODE, parse_shift_close, read_shift_close_file  # noqa: E402
 from tests.sales_fixtures import path_for_code  # noqa: E402
 from tests.sales_daily_fixtures import path_for_code as d_path_for_code  # noqa: E402
@@ -79,12 +85,18 @@ def _sek20_d_content():
 
 
 class FakeStore:
-    def __init__(self, outlets=None):
+    def __init__(self, outlets=None, *, error_counts=None, drop_saves=False):
         self.saved = []
         self.daily = []
         self.logs = []
         self._keys = set()
         self._dkeys = set()
+        self._mids = set()        # source_message_id in sales_daily
+        self._dmids = set()       # source_message_id in sales_daily_summary
+        self._error_counts = dict(error_counts or {})
+        # When True, save()/save_daily() silently fail to land the row — models
+        # an insert that the destination read-back can't confirm (Part 2).
+        self._drop_saves = drop_saves
         self._outlets = _default_outlets() if outlets is None else outlets
         self.load_calls = 0
 
@@ -92,20 +104,39 @@ class FakeStore:
         self.load_calls += 1
         return dict(self._outlets)
 
+    def load_error_counts(self):
+        return dict(self._error_counts)
+
     def exists(self, *key):
         return key in self._keys
 
+    def exists_message_id(self, message_id):
+        return message_id in self._mids
+
     def save(self, record):
+        if self._drop_saves:
+            return 0
         self.saved.append(record)
         self._keys.add(record["key"])
+        mid = record["parent"].get("source_message_id")
+        if mid:
+            self._mids.add(mid)
         return len(self.saved)
 
     def exists_daily(self, outlet_canonical, business_date):
         return (outlet_canonical, business_date) in self._dkeys
 
+    def exists_daily_message_id(self, message_id):
+        return message_id in self._dmids
+
     def save_daily(self, record):
+        if self._drop_saves:
+            return 0
         self.daily.append(record)
         self._dkeys.add(record["key"])
+        mid = record["parent"].get("source_message_id")
+        if mid:
+            self._dmids.add(mid)
         return len(self.daily)
 
     def log(self, entry):
@@ -234,6 +265,115 @@ class IngestionRunTests(unittest.TestCase):
         self.assertEqual(len(store.saved), 0)
         self.assertNotIn(b"1", mailbox.seen)
         self.assertTrue(any(e["detail"] == "empty_attachment" for e in store.logs))
+
+
+class SelfHealingTests(unittest.TestCase):
+    """PR #65: mark-read-only-after-confirmed-store + dedup against the
+    destination + dead-letter cap. Four coupled guarantees:
+      1. reading an email never sets \\Seen (BODY.PEEK[]);
+      2. \\Seen is set only after the row is confirmed in the destination;
+      3. dedup checks the DESTINATION by source_message_id, not the ingest log;
+      4. a message that fails 3+ times is dead-lettered (no log spam, unread).
+    """
+
+    # --- Part 1: BODY.PEEK[] (reading must not set \Seen) --------------------
+
+    def test_fetch_uses_body_peek_not_rfc822(self):
+        class FetchConn:
+            def __init__(self, raw):
+                self._raw = raw
+                self.fetch_args = None
+
+            def fetch(self, msg_id, spec):
+                self.fetch_args = (msg_id, spec)
+                return "OK", [(b"1 (BODY[] {N}", self._raw)]
+
+        raw = make_email("S-KLANG SHIFTCLOSE (1499)", _klang_content()).as_bytes()
+        conn = FetchConn(raw)
+        Mailbox(conn).fetch(b"1")
+        # PEEK reads the body without the server flagging it \Seen.
+        self.assertIn("BODY.PEEK[]", conn.fetch_args[1])
+        self.assertNotIn("RFC822", conn.fetch_args[1])
+
+    # --- Part 2: confirm row in destination, THEN mark read ------------------
+
+    def test_marks_seen_only_after_confirmed_store(self):
+        mailbox = FakeMailbox([(b"1", make_email("S-KLANG SHIFTCLOSE (1499)", _klang_content()))])
+        store = FakeStore()
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["inserted"], 1)
+        self.assertIn(b"1", mailbox.seen)  # confirmed in destination -> seen
+
+    def test_unconfirmed_store_left_unread(self):
+        # save() silently fails to land the row; the destination read-back can't
+        # confirm it, so it is recorded as an error and left UNREAD for retry.
+        mailbox = FakeMailbox([(b"1", make_email("S-KLANG SHIFTCLOSE (1499)", _klang_content()))])
+        store = FakeStore(drop_saves=True)
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["inserted"], 0)
+        self.assertEqual(summary["errors"], 1)
+        self.assertNotIn(b"1", mailbox.seen)
+        self.assertTrue(any(e["detail"] == "insert_not_confirmed" for e in store.logs))
+
+    # --- Part 3: dedup against the DESTINATION by source_message_id ----------
+
+    def test_dedup_against_destination_message_id(self):
+        # The row for <dup> already exists in the destination -> skip, no resave.
+        mailbox = FakeMailbox([(b"1", make_email("S-KLANG SHIFTCLOSE (1499)",
+                                                  _klang_content(), message_id="<dup>"))])
+        store = FakeStore()
+        store._mids.add("<dup>")
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["skipped"], 1)
+        self.assertEqual(store.saved, [])
+        self.assertIn(b"1", mailbox.seen)
+
+    def test_logged_but_missing_reprocesses(self):
+        # <lost> has prior error logs (seen before) but is NOT in the
+        # destination -> dedup must NOT trust the log; reprocess and insert.
+        mailbox = FakeMailbox([(b"1", make_email("S-KLANG SHIFTCLOSE (1499)",
+                                                  _klang_content(), message_id="<lost>"))])
+        store = FakeStore(error_counts={"<lost>": 1})
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["inserted"], 1)
+        self.assertEqual(len(store.saved), 1)
+        self.assertIn(b"1", mailbox.seen)
+
+    def test_d_file_dedup_against_destination_message_id(self):
+        mailbox = FakeMailbox([(b"1", make_email("D-SEK20 ON 26/May/2026 00:09:19",
+                                                  _sek20_d_content(), message_id="<d-dup>"))])
+        store = FakeStore()
+        store._dmids.add("<d-dup>")
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["skipped"], 1)
+        self.assertEqual(store.daily, [])
+
+    # --- Part 4: dead-letter after DEAD_LETTER_THRESHOLD failures ------------
+
+    def test_dead_letter_caps_log_spam(self):
+        # <stuck> has already failed the threshold number of times: a fresh
+        # failure is NOT re-logged (no spam) and is counted as a dead letter,
+        # still left UNREAD.
+        bad = make_email("S-JAKEL SHIFTCLOSE (1)", "garbage with no sales total",
+                         message_id="<stuck>")
+        mailbox = FakeMailbox([(b"1", bad)])
+        store = FakeStore(error_counts={"<stuck>": DEAD_LETTER_THRESHOLD})
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["dead_letter"], 1)
+        self.assertEqual(summary["errors"], 0)
+        self.assertEqual(store.logs, [])  # suppressed — no per-poll spam
+        self.assertNotIn(b"1", mailbox.seen)
+
+    def test_below_threshold_still_logs_error(self):
+        bad = make_email("S-JAKEL SHIFTCLOSE (1)", "garbage with no sales total",
+                         message_id="<warming>")
+        mailbox = FakeMailbox([(b"1", bad)])
+        store = FakeStore(error_counts={"<warming>": DEAD_LETTER_THRESHOLD - 1})
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["errors"], 1)
+        self.assertEqual(summary["dead_letter"], 0)
+        self.assertTrue(any(e["status"] == "error" for e in store.logs))
+        self.assertNotIn(b"1", mailbox.seen)
 
 
 class DailyRoutingTests(unittest.TestCase):

@@ -280,6 +280,22 @@ class SupabaseSalesStore:
             }
         return out
 
+    def exists_message_id(self, message_id) -> bool:
+        """Has THIS exact email already landed in the S-file destination
+        (``sales_daily``)? Keyed on ``source_message_id`` so dedup trusts the
+        DESTINATION, not ``sales_ingest_log`` — a logged-but-failed insert (row
+        genuinely missing) is reprocessed rather than skipped forever."""
+        if not message_id:
+            return False
+        resp = (
+            self.client.table(SALES_DAILY_TABLE)
+            .select("id")
+            .eq("source_message_id", message_id)
+            .limit(1)
+            .execute()
+        )
+        return bool(resp.data)
+
     def exists(self, outlet_canonical, shift_no, business_date, shift_type) -> bool:
         q = (
             self.client.table(SALES_DAILY_TABLE)
@@ -303,6 +319,21 @@ class SupabaseSalesStore:
             payload = [{**r, "sales_daily_id": daily_id} for r in rows]
             self.client.table(table).insert(payload).execute()
         return daily_id
+
+    def exists_daily_message_id(self, message_id) -> bool:
+        """As ``exists_message_id`` but for the D-file destination
+        (``sales_daily_summary``). Dedup keyed on the destination's
+        ``source_message_id``."""
+        if not message_id:
+            return False
+        resp = (
+            self.client.table(DAILY_SUMMARY_TABLE)
+            .select("id")
+            .eq("source_message_id", message_id)
+            .limit(1)
+            .execute()
+        )
+        return bool(resp.data)
 
     def exists_daily(self, outlet_canonical, business_date) -> bool:
         resp = (
@@ -332,6 +363,30 @@ class SupabaseSalesStore:
         except Exception:  # noqa: BLE001 - logging must never break ingestion
             logger.warning("Could not write sales_ingest_log row", exc_info=True)
 
+    def load_error_counts(self) -> dict:
+        """Count prior ``error`` rows per ``source_message_id`` (one query,
+        reused for the whole batch). Drives the dead-letter cap: once a
+        message-id has failed ``DEAD_LETTER_THRESHOLD`` times we stop re-logging
+        it (no per-poll log spam) and surface it in the nightly digest instead.
+        No migration needed — we count existing ``sales_ingest_log`` rows."""
+        from collections import Counter
+        try:
+            resp = (
+                self.client.table(SALES_INGEST_LOG_TABLE)
+                .select("source_message_id")
+                .eq("status", "error")
+                .execute()
+            )
+        except Exception:  # noqa: BLE001 - degrade gracefully if the log is unavailable
+            logger.warning("Could not load sales_ingest_log error counts", exc_info=True)
+            return {}
+        counts: Counter = Counter()
+        for r in (resp.data or []):
+            mid = r.get("source_message_id")
+            if mid:
+                counts[mid] += 1
+        return dict(counts)
+
 
 # --- per-email processing ----------------------------------------------------
 
@@ -345,6 +400,12 @@ def _canonical_code(outlet_code) -> str | None:
 
 
 def _process_s_file(store, email_dict, canonical, now_my):
+    message_id = email_dict.get("message_id")
+    # Part 3: dedup against the DESTINATION by source_message_id. A message whose
+    # row already landed (e.g. mark_seen failed last poll) is skipped; a
+    # logged-but-missing one falls through and is reprocessed.
+    if store.exists_message_id(message_id):
+        return "skipped", "duplicate"
     parsed = parse_shift_close(email_dict["content"])
     if parsed.get("total_sales") is None:
         return "error", "no_total_parsed"
@@ -352,10 +413,19 @@ def _process_s_file(store, email_dict, canonical, now_my):
     if store.exists(*record["key"]):
         return "skipped", "duplicate"
     store.save(record)
+    # Part 2: CONFIRM the row is actually in the destination before the caller
+    # marks the email \Seen. A false negative here (e.g. read-replica lag) only
+    # costs a retry — next poll the message_id dedup above catches the row.
+    if message_id and not store.exists_message_id(message_id):
+        return "error", "insert_not_confirmed"
     return "inserted", None
 
 
 def _process_d_file(store, email_dict, canonical, now_my):
+    message_id = email_dict.get("message_id")
+    # Part 3: dedup against the DESTINATION (sales_daily_summary) by message_id.
+    if store.exists_daily_message_id(message_id):
+        return "skipped", "duplicate"
     parsed = parse_daily_summary(email_dict["content"])
     if parsed.get("daily_aggregate", {}).get("day_sales") is None:
         return "error", "no_day_sales_parsed"
@@ -364,6 +434,9 @@ def _process_d_file(store, email_dict, canonical, now_my):
     if store.exists_daily(canonical, business_date.isoformat()):
         return "skipped", "duplicate"
     store.save_daily(record)
+    # Part 2: confirm before \Seen.
+    if message_id and not store.exists_daily_message_id(message_id):
+        return "error", "insert_not_confirmed"
     return "inserted", None
 
 
@@ -426,6 +499,17 @@ def _maybe_log(store, entry):
         log(entry)
 
 
+def _load_error_counts(store) -> dict:
+    """Prior error count per message-id, or {} if the store doesn't expose it."""
+    loader = getattr(store, "load_error_counts", None)
+    return dict(loader()) if callable(loader) else {}
+
+
+# After this many failed runs for one message-id we stop re-logging it every
+# poll (no log spam) and let the nightly digest surface it as a dead letter. The
+# email stays UNREAD so a code fix recovers it automatically on the next poll.
+DEAD_LETTER_THRESHOLD = 3
+
 # Statuses whose email we flag \Seen (terminal decisions). skipped_unknown and
 # error are left UNREAD so they retry once the outlet is registered / fixed.
 _MARK_SEEN_STATUSES = frozenset({"inserted", "skipped", "skipped_inactive"})
@@ -448,8 +532,10 @@ def run(*, store, mailbox, now_my, since=None) -> dict:
     summary = {
         "fetched": 0, "inserted": 0, "skipped": 0,
         "skipped_inactive": 0, "skipped_unknown": 0, "errors": 0,
+        "dead_letter": 0,
     }
     outlets = store.load_outlets()  # one query, reused for the whole batch
+    error_counts = _load_error_counts(store)  # prior failures per message-id
     # subject_token=None: fetch all unread POS mail (S- AND D-), classify in code.
     for msg_id in mailbox.search(since=since, subject_token=None):
         try:
@@ -473,6 +559,17 @@ def run(*, store, mailbox, now_my, since=None) -> dict:
         except Exception as exc:  # noqa: BLE001 - unexpected; record, leave unread
             logger.exception("Ingest failed for %r", email_dict.get("subject"))
             status, detail = "error", f"exception: {exc}"
+
+        # Part 4: dead-letter cap. Once a message-id has already failed
+        # DEAD_LETTER_THRESHOLD times, stop re-logging the error every poll —
+        # the nightly digest surfaces it instead. The email is still left UNREAD
+        # (error is not a mark-seen status), so a code fix recovers it next poll.
+        if status == "error":
+            mid = email_dict.get("message_id")
+            if mid and error_counts.get(mid, 0) >= DEAD_LETTER_THRESHOLD:
+                summary["dead_letter"] += 1
+                continue
+            error_counts[mid] = error_counts.get(mid, 0) + 1
 
         _maybe_log(store, _log_entry(email_dict, status, detail, outlet_name))
         summary[_COUNTER_BY_STATUS.get(status, "errors")] += 1
