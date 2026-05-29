@@ -306,6 +306,61 @@ class IncludeUnknownReceiptsTests(unittest.TestCase):
         self.assertEqual(row["total_food_purchases"], 75.0)
 
 
+class OcrDateClampTests(unittest.TestCase):
+    """PR #64: a receipt whose OCR date is >3 days in the future is counted on
+    its upload day rather than dropped onto a future day no one reconciles."""
+
+    def _seed(self, receipts):
+        return {
+            "merchant_canonical": [{"id": 1, "display_name": "BABAS"}],
+            "receipts": receipts,
+            "sales_daily_summary": [
+                {"id": 5001, "outlet_canonical": "Vista", "business_date": "2026-05-26",
+                 "day_sales": 1000.0},
+            ],
+            "sales_daily_payouts": [],
+        }
+
+    def test_future_dated_receipt_clamped_to_upload_day(self):
+        # Uploaded 2026-05-26 (11:00 MY) but OCR read 2026-07-01 (~5 weeks out).
+        client = FakeClient(self._seed([
+            {"id": 1, "total": 90.0, "merchant": "X", "merchant_canonical_id": None,
+             "outlet": "Vista", "receipt_date": "2026-07-01", "receipt_type": "UNKNOWN",
+             "created_at": "2026-05-26T03:00:00+00:00"},
+        ]))
+        result = rs.run_reconciliation(client, "2026-05-26")
+        self.assertEqual(result["clamped_receipts"], 1)
+        row = client.store["purchase_reconciliation"][0]
+        self.assertEqual(row["total_food_purchases"], 90.0)   # counted, not dropped
+        self.assertEqual(row["total_receipts"], 1)
+
+    def test_warns_when_clamping(self):
+        client = FakeClient(self._seed([
+            {"id": 1, "total": 90.0, "merchant": "X", "merchant_canonical_id": None,
+             "outlet": "Vista", "receipt_date": "2026-07-01", "receipt_type": "UNKNOWN",
+             "created_at": "2026-05-26T03:00:00+00:00"},
+        ]))
+        with self.assertLogs("reconciliation_service", level="WARNING") as cm:
+            rs.run_reconciliation(client, "2026-05-26")
+        self.assertTrue(any("clamped" in m for m in cm.output))
+
+    def test_in_window_future_date_not_clamped(self):
+        # 2 days ahead is plausible (date roll-over, slow upload) — keep as-is,
+        # so it stays on its own day and isn't counted on the upload day.
+        client = FakeClient(self._seed([
+            {"id": 1, "total": 90.0, "merchant": "X", "merchant_canonical_id": None,
+             "outlet": "Vista", "receipt_date": "2026-05-28", "receipt_type": "UNKNOWN",
+             "created_at": "2026-05-26T03:00:00+00:00"},
+        ]))
+        result = rs.run_reconciliation(client, "2026-05-26")
+        self.assertEqual(result["clamped_receipts"], 0)
+        # The receipt belongs to 2026-05-28, so the upload day's row (created
+        # only because a sales summary exists) carries no food purchases.
+        row = client.store["purchase_reconciliation"][0]
+        self.assertEqual(row["total_receipts"], 0)
+        self.assertEqual(row["total_food_purchases"], 0.0)
+
+
 class BotWiring(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

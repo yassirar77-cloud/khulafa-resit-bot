@@ -11,7 +11,45 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from date_utils import normalize_date  # noqa: E402
+from datetime import date  # noqa: E402
+
+from date_utils import clamp_business_date, normalize_date  # noqa: E402
+
+
+class ClampBusinessDate(unittest.TestCase):
+    """PR #64: future OCR dates fall back to the upload day, never dropped."""
+
+    def test_future_date_beyond_3_days_is_clamped(self):
+        # Uploaded 2026-05-29, OCR read 2026-06-15 (~17 days ahead) -> clamp.
+        eff, clamped = clamp_business_date("2026-06-15", "2026-05-29T03:00:00+00:00")
+        self.assertEqual(eff, date(2026, 5, 29))
+        self.assertTrue(clamped)
+
+    def test_date_within_3_days_not_clamped(self):
+        # 2 days ahead is within tolerance — keep the OCR'd date as-is.
+        eff, clamped = clamp_business_date("2026-05-31", "2026-05-29T03:00:00+00:00")
+        self.assertEqual(eff, date(2026, 5, 31))
+        self.assertFalse(clamped)
+
+    def test_past_date_never_clamped(self):
+        # A receipt dated before its upload is normal (delivered then uploaded).
+        eff, clamped = clamp_business_date("2026-05-20", "2026-05-29T03:00:00+00:00")
+        self.assertEqual(eff, date(2026, 5, 20))
+        self.assertFalse(clamped)
+
+    def test_null_receipt_date_falls_back_without_clamp_flag(self):
+        # No OCR date -> use the upload day, but that's the ordinary fallback,
+        # not a future-date clamp, so it isn't flagged.
+        eff, clamped = clamp_business_date(None, "2026-05-29T03:00:00+00:00")
+        self.assertEqual(eff, date(2026, 5, 29))
+        self.assertFalse(clamped)
+
+    def test_utc_late_night_maps_to_next_my_day(self):
+        # 2026-05-29 18:00 UTC = 2026-05-30 02:00 MY; a same-MY-day OCR date for
+        # the 30th must NOT be seen as future.
+        eff, clamped = clamp_business_date("2026-05-30", "2026-05-29T18:00:00+00:00")
+        self.assertEqual(eff, date(2026, 5, 30))
+        self.assertFalse(clamped)
 
 
 class NormalizeDateAcceptedFormats(unittest.TestCase):

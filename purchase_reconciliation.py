@@ -30,6 +30,7 @@ class Receipt:
     merchant_canonical: str | None = None   # canonical display name, if resolved
     merchant: str | None = None             # raw merchant string
     receipt_type: str | None = None         # SUPPLIER_PURCHASE | PETTY_CASH | UNKNOWN | ...
+    created_at: str | None = None           # upload time, for deterministic tie-breaks
 
 
 # Classification flag stored per receipt-bearing match-log row, so the digest
@@ -52,6 +53,7 @@ class POSPayout:
     description: str = ""                    # e.g. "PAY TO BABAS"
     vendor_name: str | None = None           # e.g. "BABAS"
     amount: float = 0.0
+    created_at: str | None = None            # POS event time, for tie-breaks
 
 
 @dataclass(frozen=True)
@@ -212,6 +214,34 @@ _CONFIDENCE = {
     (1, 1): (0.7, "fuzzy_amount_fuzzy_merchant"),
 }
 
+# Amount-only fallback: ~95% of receipts have no canonical merchant, so a
+# merchant-anchored match never fires and the receipt AND its POS payout both
+# count -> food cost reads ~2x reality. When the merchant can't be matched we
+# fall back to amount alone, on a deliberately tight tolerance so same-amount-
+# but-different-spend pairs don't get falsely merged. Tagged so it's auditable.
+AMOUNT_ONLY_TOLERANCE_ABS = 2.0
+AMOUNT_ONLY_CONFIDENCE = 0.5
+AMOUNT_ONLY_METHOD = "amount_only"
+
+# Candidate tiers, lowest assigned first: merchant-anchored matches always win
+# over amount-only ones (a receipt prefers its real supplier payout).
+_TIER_MERCHANT = 0
+_TIER_AMOUNT_ONLY = 1
+
+
+def _sortable_time(ts) -> str:
+    """ISO timestamps sort lexicographically; None sorts first (deterministic)."""
+    return "" if ts is None else str(ts)
+
+
+def _tie_break_key(payout: POSPayout, receipt: Receipt) -> tuple:
+    """Earliest-by-time, then id, so equal-distance candidates resolve the same
+    way on every run regardless of input ordering."""
+    return (
+        _sortable_time(payout.created_at), payout.id or 0,
+        _sortable_time(receipt.created_at), receipt.id or 0,
+    )
+
 
 def match_receipts_to_payouts(
     receipts,
@@ -219,11 +249,20 @@ def match_receipts_to_payouts(
     canonical_merchants,
     amount_tolerance_abs: float = 5.0,
     amount_tolerance_pct: float = 0.02,
+    amount_only_tolerance_abs: float = AMOUNT_ONLY_TOLERANCE_ABS,
 ) -> ReconciliationResult:
     """The smart-merge core. ``receipts`` are supplier-purchase Receipts;
-    ``pos_payouts`` are POSPayouts from sales_daily_payouts. Greedy assignment:
-    among all valid (payout, receipt) candidate pairs, take the highest
-    confidence / closest amount first, each row used once."""
+    ``pos_payouts`` are POSPayouts from sales_daily_payouts (already partitioned
+    by outlet + business_date upstream).
+
+    Two-tier greedy assignment:
+      1. merchant-anchored: same merchant + amount within ±RM5 (the original
+         path), highest confidence / closest amount first;
+      2. amount-only fallback: when the merchant is null/unmatched, amount alone
+         within ±RM2, closest amount first.
+    Merchant matches are always assigned before amount-only ones; each receipt
+    and each payout is consumed at most once, and a deterministic tie-break
+    (earliest time, then id) keeps the result stable across runs."""
     result = ReconciliationResult()
 
     food_payouts: list[POSPayout] = []
@@ -241,17 +280,24 @@ def match_receipts_to_payouts(
         payout_canonical, _ = fuzzy_match_merchant(payout.description, canonical_merchants)
         payee = strip_pos_prefix(payout.description) or (payout.vendor_name or "")
         for ri, receipt in enumerate(receipts):
-            a_score = _amount_score(
-                receipt.amount, payout.amount, amount_tolerance_abs, amount_tolerance_pct
-            )
-            if a_score == 0:
-                continue
-            m_score = _merchant_score(payee, payout_canonical, receipt)
-            if m_score == 0:
-                continue
-            confidence, method = _CONFIDENCE[(a_score, m_score)]
             diff = abs((receipt.amount or 0.0) - (payout.amount or 0.0))
-            candidates.append(((-confidence, diff), pi, ri, confidence, method))
+            m_score = _merchant_score(payee, payout_canonical, receipt)
+            tie = _tie_break_key(payout, receipt)
+            if m_score > 0:
+                a_score = _amount_score(
+                    receipt.amount, payout.amount, amount_tolerance_abs, amount_tolerance_pct
+                )
+                if a_score == 0:
+                    continue
+                confidence, method = _CONFIDENCE[(a_score, m_score)]
+                sort_key = (_TIER_MERCHANT, -confidence, diff, tie)
+                candidates.append((sort_key, pi, ri, confidence, method))
+            elif diff <= amount_only_tolerance_abs:
+                # Merchant null/unmatched -> amount-only fallback (±RM2).
+                sort_key = (_TIER_AMOUNT_ONLY, -AMOUNT_ONLY_CONFIDENCE, diff, tie)
+                candidates.append(
+                    (sort_key, pi, ri, AMOUNT_ONLY_CONFIDENCE, AMOUNT_ONLY_METHOD)
+                )
 
     candidates.sort(key=lambda c: c[0])
     used_payouts: set[int] = set()

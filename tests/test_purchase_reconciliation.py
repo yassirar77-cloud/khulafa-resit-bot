@@ -12,12 +12,13 @@ from purchase_reconciliation import POSPayout, Receipt
 CANONICAL = ["BABAS", "EVEREST", "AIS", "KACHANG", "GARDENIA", "SAIDA"]
 
 
-def _r(amount, canonical=None, merchant=None, rid=1):
-    return Receipt(id=rid, amount=amount, merchant_canonical=canonical, merchant=merchant)
+def _r(amount, canonical=None, merchant=None, rid=1, created_at=None):
+    return Receipt(id=rid, amount=amount, merchant_canonical=canonical,
+                   merchant=merchant, created_at=created_at)
 
 
-def _p(desc, amount, pid=1):
-    return POSPayout(id=pid, description=desc, amount=amount)
+def _p(desc, amount, pid=1, created_at=None):
+    return POSPayout(id=pid, description=desc, amount=amount, created_at=created_at)
 
 
 class PrefixAndClassification(unittest.TestCase):
@@ -138,6 +139,110 @@ class Matching(unittest.TestCase):
         )
         self.assertEqual(len(res.account_only_receipts), 1)
         self.assertEqual(len(res.matched), 0)
+
+
+class AmountOnlyFallback(unittest.TestCase):
+    """PR #64: ~95% of receipts have no canonical merchant, so a merchant-
+    anchored match never fires and both the receipt and its POS payout count,
+    doubling food cost. The amount-only fallback dedupes them."""
+
+    def test_amount_only_matches_when_merchant_null(self):
+        # No merchant on the receipt, no canonical for the payout, amounts ±RM2.
+        res = pr.match_receipts_to_payouts(
+            [_r(60.0)], [_p("PAY TO MYSTERY SUPPLIER", 61.0)], CANONICAL
+        )
+        self.assertEqual(len(res.matched), 1)
+        self.assertEqual(res.matched[0].method, "amount_only")
+        self.assertEqual(res.matched[0].confidence, 0.5)
+        self.assertEqual(res.cash_no_receipt, [])
+        self.assertEqual(res.account_only_receipts, [])
+
+    def test_amount_only_respects_2rm_tolerance(self):
+        # RM63 receipt vs RM60 payout — RM3 apart, outside the ±RM2 amount-only
+        # window, so they must NOT be merged (no merchant to lean on).
+        res = pr.match_receipts_to_payouts(
+            [_r(63.0)], [_p("PAY TO MYSTERY SUPPLIER", 60.0)], CANONICAL
+        )
+        self.assertEqual(len(res.matched), 0)
+        self.assertEqual(len(res.cash_no_receipt), 1)        # Type B
+        self.assertEqual(len(res.account_only_receipts), 1)  # Type C
+
+    def test_amount_only_does_not_consume_staff_advance(self):
+        # A same-amount staff advance must stay excluded (Type D), never matched.
+        res = pr.match_receipts_to_payouts(
+            [_r(300.0)], [_p("PAY [LP] KARUNGARAJ", 300.0)], CANONICAL
+        )
+        self.assertEqual(len(res.matched), 0)
+        self.assertEqual(len(res.excluded_staff), 1)
+        self.assertEqual(len(res.account_only_receipts), 1)
+
+    def test_amount_only_does_not_consume_utility(self):
+        # A same-amount utility payout stays excluded (Type E), never matched.
+        res = pr.match_receipts_to_payouts(
+            [_r(250.0)], [_p("PAY TO TNB", 250.0)], CANONICAL
+        )
+        self.assertEqual(len(res.matched), 0)
+        self.assertEqual(len(res.excluded_utility), 1)
+        self.assertEqual(len(res.account_only_receipts), 1)
+
+    def test_merchant_match_preferred_over_amount_only(self):
+        # Receipt knows its supplier (BABAS); two same-amount payouts compete —
+        # the merchant-anchored one must win, the other stays cash-no-receipt.
+        receipt = _r(60.0, canonical="BABAS")
+        payouts = [_p("PAY TO MYSTERY", 60.0, pid=10),
+                   _p("PAY TO BABAS", 60.0, pid=11)]
+        res = pr.match_receipts_to_payouts([receipt], payouts, CANONICAL)
+        self.assertEqual(len(res.matched), 1)
+        self.assertEqual(res.matched[0].payout.id, 11)
+        self.assertEqual(res.matched[0].method, "exact_amount_exact_merchant")
+        self.assertEqual(len(res.cash_no_receipt), 1)
+        self.assertEqual(res.cash_no_receipt[0].id, 10)
+
+
+class CandidateResolution(unittest.TestCase):
+    """PR #64: deterministic one-to-one assignment for the amount-only path."""
+
+    def test_closest_amount_wins(self):
+        receipt = _r(60.0)
+        payouts = [_p("PAY TO A", 61.5, pid=10),   # RM1.50 away
+                   _p("PAY TO B", 60.5, pid=11)]    # RM0.50 away — closer
+        res = pr.match_receipts_to_payouts([receipt], payouts, CANONICAL)
+        self.assertEqual(len(res.matched), 1)
+        self.assertEqual(res.matched[0].payout.id, 11)
+
+    def test_one_receipt_consumes_one_payout(self):
+        # Two RM60 receipts, two RM60 payouts -> exactly two matches, each row
+        # used once (no cross double-counting).
+        receipts = [_r(60.0, rid=1), _r(60.0, rid=2)]
+        payouts = [_p("PAY TO X", 60.0, pid=10), _p("PAY TO Y", 60.0, pid=11)]
+        res = pr.match_receipts_to_payouts(receipts, payouts, CANONICAL)
+        self.assertEqual(len(res.matched), 2)
+        self.assertEqual({m.payout.id for m in res.matched}, {10, 11})
+        self.assertEqual({m.receipt.id for m in res.matched}, {1, 2})
+        self.assertEqual(res.cash_no_receipt, [])
+        self.assertEqual(res.account_only_receipts, [])
+
+    def test_tie_breaks_to_earliest_by_time(self):
+        # Equal amount distance -> earliest payout by time wins.
+        receipt = _r(60.0, rid=1)
+        payouts = [
+            _p("PAY TO X", 60.0, pid=10, created_at="2026-05-29T10:00:00+00:00"),
+            _p("PAY TO Y", 60.0, pid=11, created_at="2026-05-29T08:00:00+00:00"),
+        ]
+        res = pr.match_receipts_to_payouts([receipt], payouts, CANONICAL)
+        self.assertEqual(len(res.matched), 1)
+        self.assertEqual(res.matched[0].payout.id, 11)   # 08:00 beats 10:00
+
+    def test_deterministic_regardless_of_input_order(self):
+        receipts = [_r(60.0, rid=1), _r(120.0, rid=2)]
+        payouts = [_p("PAY TO X", 60.0, pid=10), _p("PAY TO Y", 120.0, pid=11)]
+        forward = pr.match_receipts_to_payouts(receipts, payouts, CANONICAL)
+        reverse = pr.match_receipts_to_payouts(
+            list(reversed(receipts)), list(reversed(payouts)), CANONICAL
+        )
+        pairs = lambda res: {(m.receipt.id, m.payout.id) for m in res.matched}  # noqa: E731
+        self.assertEqual(pairs(forward), pairs(reverse))
+        self.assertEqual(pairs(forward), {(1, 10), (2, 11)})
 
 
 class TypeClassification(unittest.TestCase):

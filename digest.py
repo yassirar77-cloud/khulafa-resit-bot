@@ -364,6 +364,12 @@ def _food_cost_block(food_cost):
             f"⚠️ {int(unclassified['count'])} receipts with unclassified merchants "
             f"({format_rm(unclassified.get('value'))} in this calc — verify high-value ones)"
         )
+    clamped = (food_cost or {}).get("clamped") or {}
+    if clamped.get("count"):
+        lines.append(
+            f"⚠️ {int(clamped['count'])} receipt(s) had a future OCR date clamped to "
+            f"the upload day (counted, not dropped — check the scans)"
+        )
     return "\n".join(lines)
 
 
