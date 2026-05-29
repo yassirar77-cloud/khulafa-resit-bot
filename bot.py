@@ -89,8 +89,10 @@ from backfill_items import (
 import analytics
 import digest
 import food_cost_analytics
+import manager_registration
 import reconciliation_service
 import sales_analytics
+import weekly_manager_reports as wmr
 from digest_data import gather_digest_data, log_digest
 from sales_ingest import run_ingest_once
 from sales_parser import OUTLET_CANONICAL_BY_CODE
@@ -3545,6 +3547,196 @@ async def food_cost_month_command(update: Update, context: ContextTypes.DEFAULT_
     )
 
 
+# === PR #67: weekly manager food-cost reports (Phase 1) ======================
+#
+# SAFETY: weekly messages route to the OWNER (prefixed "[TEST — ...]") until
+# the owner flips MANAGER_DELIVERY_ENABLED. The owner ALWAYS gets a consolidated
+# HQ summary regardless of the flag. Registration maps outlet -> manager but
+# delivery to managers stays gated off.
+
+
+async def gen_codes_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only: generate one fresh one-time registration code per outlet."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    try:
+        codes = await asyncio.to_thread(
+            manager_registration.create_registration_codes, supabase
+        )
+    except Exception:
+        logger.exception("gen_codes failed")
+        await message.reply_text("Failed to generate registration codes.")
+        return
+    lines = [
+        "🔑 Outlet registration codes (one-time use):",
+        "",
+    ]
+    for c in codes:
+        lines.append(f"• {c['display']:<10} {c['code']}")
+    lines += [
+        "",
+        "Give each outlet manager their code. They register by DMing this bot:",
+        "/register <CODE>",
+        "",
+        "Generating new codes invalidates any older unused codes.",
+    ]
+    await message.reply_text("\n".join(lines))
+
+
+async def register_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Open to anyone: a manager redeems their one-time code here. We use the
+    sender's chat_id + name as the delivery target."""
+    message = update.effective_message
+    if not message:
+        return
+    if not context.args:
+        await message.reply_text(
+            "Usage: /register <CODE>\nExample: /register SEK20-7K2A"
+        )
+        return
+    user = update.effective_user
+    chat = update.effective_chat
+    manager_name = None
+    if user:
+        manager_name = (user.full_name or user.username or "").strip() or None
+    chat_id = chat.id if chat else (user.id if user else None)
+    if chat_id is None:
+        return
+    try:
+        result = await asyncio.to_thread(
+            manager_registration.register_manager,
+            supabase, context.args[0], manager_name, chat_id,
+        )
+    except Exception:
+        logger.exception("register failed")
+        await message.reply_text(
+            "Sorry, something went wrong registering you. Please try again."
+        )
+        return
+    if not result.get("ok"):
+        # Generic, leak-free error.
+        await message.reply_text(result.get("error", manager_registration.INVALID_CODE_MESSAGE))
+        return
+    await message.reply_text(
+        f"✅ Registered for {result['outlet_display']}. "
+        "You'll receive that outlet's weekly food-cost summary here."
+    )
+
+
+def _gather_weekly_report(today=None) -> dict:
+    """Build every per-outlet message + the HQ summary for the prior full week.
+
+    Reuses PR #63's sales-weighted rolling food cost over the prior Mon–Sun, and
+    the week before that for the "Last week: Z%" baseline. Returns a bundle of
+    routed messages (target chat + text) and the owner HQ summary. No Telegram
+    I/O here — that keeps this testable and the send loop dumb."""
+    today = today or _my_today()
+    pm, ps = wmr.prior_week_range(today)
+    bpm, bps = wmr.week_before_range(today)
+    period_label = f"{pm.isoformat()} → {ps.isoformat()}"
+
+    prior_dates = wmr.dates_in_range(pm, ps)
+    before_dates = wmr.dates_in_range(bpm, bps)
+    prior_rows = _fetch_recon_rows(prior_dates)
+    before_rows = _fetch_recon_rows(before_dates)
+
+    prior_by_outlet = food_cost_analytics.rolling_food_cost_by_outlet(prior_rows)
+    before_by_outlet = food_cost_analytics.rolling_food_cost_by_outlet(before_rows)
+    _s, _p, group_pct = food_cost_analytics.group_food_cost(prior_rows)
+    incomplete = {
+        d["outlet"] for d in food_cost_analytics.incomplete_period_dates(prior_rows)
+    }
+    managers = manager_registration.get_all_managers(supabase)
+    enabled = wmr.delivery_enabled()
+
+    messages: list[dict] = []
+    hq_rows: list[dict] = []
+    for outlet in manager_registration.OUTLETS:
+        this_pct = (prior_by_outlet.get(outlet.canonical) or {}).get("pct")
+        last_pct = (before_by_outlet.get(outlet.canonical) or {}).get("pct")
+        mgr = managers.get(outlet.code)
+        # Skip outlets with no data AND no registered manager — nothing useful
+        # to say, and no one waiting on it.
+        if this_pct is None and last_pct is None and mgr is None:
+            continue
+        complete = this_pct is not None and outlet.canonical not in incomplete
+        note = wmr.contextual_note(this_pct, last_pct, group_pct, complete=complete)
+        body = wmr.format_manager_message(
+            outlet.display, this_pct, group_pct, last_pct, note
+        )
+        decision = wmr.route_message(
+            enabled, outlet.display,
+            mgr.get("chat_id") if mgr else None,
+            ALERT_CHAT_ID,
+        )
+        messages.append({
+            "target": decision.target_chat_id,
+            "text": decision.prefix + body,
+            "outlet": outlet.code,
+        })
+        hq_rows.append({
+            "display": outlet.display,
+            "this_pct": this_pct,
+            "last_pct": last_pct,
+            "manager_name": mgr.get("manager_name") if mgr else None,
+            "route_reason": decision.reason,
+        })
+
+    hq_summary = wmr.build_hq_summary(period_label, hq_rows, group_pct, enabled)
+    return {
+        "period_label": period_label,
+        "messages": messages,
+        "hq_summary": hq_summary,
+        "enabled": enabled,
+    }
+
+
+async def post_weekly_manager_reports(application: Application, *, notify_chat_id=None) -> None:
+    """Monday 09:00 MY job. Sends each per-outlet message to its routed target
+    (owner while delivery is gated off), then ALWAYS sends the owner the
+    consolidated HQ summary."""
+    try:
+        bundle = await asyncio.to_thread(_gather_weekly_report)
+    except Exception:
+        logger.exception("weekly manager report: gather failed")
+        if notify_chat_id is not None:
+            with contextlib.suppress(Exception):
+                await application.bot.send_message(
+                    chat_id=notify_chat_id,
+                    text="Failed to build the weekly manager report.",
+                )
+        return
+
+    sent = 0
+    for msg in bundle["messages"]:
+        try:
+            await application.bot.send_message(chat_id=msg["target"], text=msg["text"])
+            sent += 1
+        except Exception:
+            logger.exception("weekly manager report: send failed for %s", msg.get("outlet"))
+    # Owner ALWAYS gets the consolidated HQ summary, regardless of the flag.
+    try:
+        await application.bot.send_message(chat_id=ALERT_CHAT_ID, text=bundle["hq_summary"])
+    except Exception:
+        logger.exception("weekly manager report: HQ summary send failed")
+    logger.info(
+        "Weekly manager report posted (%d outlet messages, delivery_enabled=%s)",
+        sent, bundle["enabled"],
+    )
+
+
+async def weekly_report_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only: trigger the weekly report on demand (for testing)."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    await message.reply_text("Building weekly manager report…")
+    await post_weekly_manager_reports(
+        context.application, notify_chat_id=_command_owner_id(update)
+    )
+
+
 async def top_items_sold_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message or not is_reviewer(_command_owner_id(update)):
@@ -3736,6 +3928,9 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("food_cost_week", food_cost_week_command))
     app.add_handler(CommandHandler("food_cost_month", food_cost_month_command))
     app.add_handler(CommandHandler("food_cost_outlet", food_cost_outlet_command))
+    app.add_handler(CommandHandler("gen_codes", gen_codes_command))
+    app.add_handler(CommandHandler("register", register_command))
+    app.add_handler(CommandHandler("weekly_report_now", weekly_report_now_command))
     app.add_handler(CommandHandler("cash_no_receipt_today", cash_no_receipt_today_command))
     app.add_handler(CommandHandler("reconcile_now", reconcile_now_command))
     app.add_handler(CommandHandler("reconcile_date", reconcile_date_command))
@@ -3795,6 +3990,20 @@ async def run_bot() -> None:
         trigger="cron",
         minute="*/30",
         id="sales_ingest",
+        replace_existing=True,
+    )
+    # PR #67: weekly manager food-cost reports — Monday 09:00 Asia/Kuala_Lumpur.
+    # Delivery is gated by MANAGER_DELIVERY_ENABLED (default False): until the
+    # owner flips it, every message routes to the owner with a [TEST] prefix,
+    # and the owner always receives the consolidated HQ summary.
+    scheduler.add_job(
+        post_weekly_manager_reports,
+        trigger="cron",
+        day_of_week="mon",
+        hour=9,
+        minute=0,
+        args=[app],
+        id="weekly_manager_reports",
         replace_existing=True,
     )
 
