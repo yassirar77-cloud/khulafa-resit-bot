@@ -76,6 +76,15 @@ class Content(unittest.TestCase):
         self.assertTrue(wmr.contains_accusatory("You wasted money this week"))
         self.assertTrue(wmr.contains_accusatory("This outlet FAILED its target"))
 
+    def test_accusatory_note_is_scrubbed_at_runtime(self):
+        # Runtime enforcement: even if a caller passes an accusatory note, the
+        # rendered message must not contain it — it's swapped for the neutral note.
+        bad = "You wasted stock and over-bought again — you failed."
+        self.assertEqual(wmr.safe_note(bad), wmr.NOTE_NEUTRAL)
+        msg = wmr.format_manager_message("SEK 20", 41.0, 30.0, 30.0, bad)
+        self.assertFalse(wmr.contains_accusatory(msg))
+        self.assertIn(wmr.NOTE_NEUTRAL, msg)
+
 
 class Routing(unittest.TestCase):
     OWNER = 543674519

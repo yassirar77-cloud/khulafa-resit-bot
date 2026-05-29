@@ -26,11 +26,14 @@ these to build content and decide routing.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from datetime import date, timedelta
 
 from food_cost_analytics import food_cost_status, status_emoji
+
+logger = logging.getLogger(__name__)
 
 # === SAFETY FLAG =============================================================
 # Default False. Build the real-delivery path, keep it unreachable by default.
@@ -133,9 +136,23 @@ def contextual_note(this_pct, last_pct, group_pct, *, complete: bool) -> str:
     return NOTE_NEUTRAL
 
 
+def safe_note(note) -> str:
+    """Runtime tone safeguard. If a note trips the accusatory-word guard — a
+    future regression, a hand-edited constant, anything — swap it for a neutral
+    note and log loudly rather than send it. This is enforcement, not just a
+    test: no banned word reaches a manager even if the note logic changes."""
+    if contains_accusatory(note):
+        logger.warning("Accusatory note blocked, replaced with neutral: %r", note)
+        return NOTE_NEUTRAL
+    return note
+
+
 def format_manager_message(outlet_display, this_pct, group_pct, last_pct, note) -> str:
     """The weekly per-outlet message. Leads with a friendly header, then the
-    exact benchmark line, then the contextual note."""
+    exact benchmark line, then the contextual note.
+
+    The note is run through ``safe_note`` so an accusatory word can never reach
+    a manager, regardless of how the note was produced."""
     emoji = status_emoji(food_cost_status(this_pct))
     return (
         f"📊 {outlet_display} — last week's food cost {emoji}\n"
@@ -143,7 +160,7 @@ def format_manager_message(outlet_display, this_pct, group_pct, last_pct, note) 
         f"Your food cost: {_fmt_pct(this_pct)} | Group avg: {_fmt_pct(group_pct)} "
         f"| Last week: {_fmt_pct(last_pct)}\n"
         "\n"
-        f"{note}"
+        f"{safe_note(note)}"
     )
 
 
