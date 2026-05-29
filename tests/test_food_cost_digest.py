@@ -122,6 +122,53 @@ class Bug4And5NewSuppliers(unittest.TestCase):
         self.assertIn("BRAND NEW VENDOR", names)
 
 
+class _ReconWindowFake:
+    """Minimal client supporting the select/gte/lte/execute chain that
+    digest_data._recon_window issues, filtering rows by business_date."""
+
+    def __init__(self, rows):
+        self._rows = rows
+        self._start = self._end = None
+
+    def table(self, _name):
+        return self
+
+    def select(self, *_a, **_k):
+        return self
+
+    def gte(self, _col, val):
+        self._start = val
+        return self
+
+    def lte(self, _col, val):
+        self._end = val
+        return self
+
+    def execute(self):
+        import types as _t
+        rows = [r for r in self._rows
+                if self._start <= str(r.get("business_date")) <= self._end]
+        return _t.SimpleNamespace(data=rows)
+
+
+class FoodCostPayloadWiring(unittest.TestCase):
+    def test_payload_populates_rolling_mtd_and_incomplete(self):
+        from datetime import date
+        rows = [_recon("Vista", 4000.0, 1200.0, 30.0) for _ in range(6)]
+        for i, r in enumerate(rows):
+            r["business_date"] = f"2026-05-2{i}"
+        closure = _recon("Vista", 100.0, 30.0, 30.0)
+        closure["business_date"] = "2026-05-26"
+        rows.append(closure)
+        client = _ReconWindowFake(rows)
+        payload = digest_data._food_cost_payload(client, rows, date(2026, 5, 26))
+        self.assertIsNotNone(payload.get("rolling_group_pct"))
+        self.assertIn("mtd_group_pct", payload)
+        self.assertIsNotNone(payload["mtd_group_pct"])
+        flagged = {d["business_date"] for d in payload.get("incomplete_dates", [])}
+        self.assertIn("2026-05-26", flagged)   # the closure day surfaced
+
+
 class NewSections(unittest.TestCase):
     def _full_data(self):
         data = dict(EMPTY_DATA)
@@ -137,6 +184,14 @@ class NewSections(unittest.TestCase):
                 _recon("Jakel", 4040.0, 1540.0, 38.1),
                 _recon("SBESI", None, 0.0, None),
             ],
+            "rolling": {
+                "Vista": {"sales": 80000.0, "purchases": 22400.0, "pct": 28.0, "days": 7},
+                "Jakel": {"sales": 28000.0, "purchases": 10080.0, "pct": 36.0, "days": 7},
+                "SBESI": {"sales": 0.0, "purchases": 0.0, "pct": None, "days": 3},
+            },
+            "rolling_group_pct": 31.5,
+            "rolling_days": 7,
+            "mtd_group_pct": 30.2,
         }
         # Rolling-vs-rolling: this 7-day rolling vs the prior 7-day rolling.
         data["food_cost_anomalies"] = fca.compute_anomalies(
@@ -162,25 +217,30 @@ class NewSections(unittest.TestCase):
     def test_food_cost_flags_red_outlet(self):
         joined = "\n\n".join(digest.build_digest_messages(self._full_data(), NOW))
         self.assertIn("Jakel", joined)
-        self.assertIn("38.1%", joined)
-        self.assertIn("INVESTIGATE", joined)
+        self.assertIn("36.0%", joined)             # rolling, not the 38.1% daily
+        self.assertIn("INVESTIGATE", joined)       # rolling 36% is red
         self.assertIn("🔴", joined)
-        self.assertIn("data incomplete", joined)  # SBESI
+        self.assertIn("data incomplete", joined)   # SBESI
 
-    def test_food_cost_shows_daily_and_rolling(self):
+    def test_food_cost_headlines_rolling_and_mtd_no_daily(self):
+        joined = "\n\n".join(digest.build_digest_messages(self._full_data(), NOW))
+        self.assertIn("31.5% (7-day rolling)", joined)   # headline rolling
+        self.assertIn("Month-to-date: 🟡 30.2%", joined)  # secondary MTD line
+        self.assertIn("36.0%", joined)                    # Jakel 7-day rolling
+        # No daily % framing anywhere.
+        self.assertNotIn("today | 7-day", joined)
+        self.assertNotIn("38.1%", joined)                 # the volatile daily %
+        self.assertNotIn("% today", joined)
+
+    def test_food_cost_incomplete_period_note(self):
         data = self._full_data()
-        data["food_cost"]["rolling"] = {
-            "Vista": {"sales": 80000.0, "purchases": 24000.0, "pct": 28.0, "days": 7},
-            "Jakel": {"sales": 28000.0, "purchases": 10080.0, "pct": 36.0, "days": 7},
-        }
-        data["food_cost"]["rolling_group_pct"] = 31.5
-        data["food_cost"]["rolling_days"] = 7
+        data["food_cost"]["incomplete_dates"] = [
+            {"outlet": "Jakel", "business_date": "2026-05-27", "sales": 200.0, "median": 4000.0},
+        ]
         joined = "\n\n".join(digest.build_digest_messages(data, NOW))
-        self.assertIn("today | 7-day", joined)        # per-outlet dual columns
-        self.assertIn("38.1%", joined)                 # Jakel daily (volatile)
-        self.assertIn("36.0%", joined)                 # Jakel 7-day rolling
-        self.assertIn("INVESTIGATE", joined)           # rolling 36% is red
-        self.assertIn("31.5%", joined)                 # group 7-day rolling
+        self.assertIn("Incomplete sales day", joined)
+        self.assertIn("2026-05-27", joined)
+        self.assertIn("counted, not hidden", joined)
 
     def test_cash_alerts_and_sales_render(self):
         joined = "\n\n".join(digest.build_digest_messages(self._full_data(), NOW))

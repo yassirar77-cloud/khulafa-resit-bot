@@ -137,21 +137,68 @@ class SalesSummary(unittest.TestCase):
 
 
 class Formatters(unittest.TestCase):
-    def test_food_cost_today_renders_group_and_outlets(self):
+    def test_food_cost_today_shows_raw_figures_not_percent(self):
+        # Repurposed: raw sales + purchases, NO daily food cost %, with a note
+        # pointing to the weekly/monthly reports.
         rows = [
             _recon("Vista", 1000.0, 260.0, 26.0),
             _recon("Jakel", 1000.0, 380.0, 38.0),
         ]
         out = fca.format_food_cost_today("2026-05-29", rows)
         self.assertIn("Khulafa Group", out)
-        self.assertIn("Vista", out)
-        self.assertIn("Jakel", out)
-        self.assertIn("🟢", out)
-        self.assertIn("🔴", out)
+        self.assertIn("RM1,000.00 sales", out)
+        self.assertIn("RM260.00 purch", out)
+        self.assertIn("reported weekly", out)
+        # No daily food cost % value, and no status emoji band.
+        self.assertNotIn("26.0%", out)
+        self.assertNotIn("38.0%", out)
+        self.assertNotIn("🟢", out)
+        self.assertNotIn("🔴", out)
 
     def test_food_cost_today_empty(self):
         out = fca.format_food_cost_today("2026-05-29", [])
         self.assertIn("/reconcile_now", out)
+
+    def test_food_cost_month_renders_rolling_per_outlet(self):
+        rows = [
+            _recon("Vista", 2000.0, 6000.0, 300.0),
+            _recon("Vista", 3000.0, 200.0, 6.7),
+            _recon("Jakel", 4000.0, 1400.0, 35.0),
+        ]
+        out = fca.format_food_cost_month("2026-05-01 → 2026-05-29", rows)
+        self.assertIn("Month-to-date", out)
+        self.assertIn("Khulafa Group", out)
+        self.assertIn("Vista", out)
+        self.assertIn("Jakel", out)
+        # Vista rolling = (6000+200)/(2000+3000) = 124% — sales-weighted, not a
+        # mean of the daily %s (300% / 6.7%).
+        self.assertIn("124.0%", out)
+
+    def test_incomplete_period_flags_closure_day(self):
+        # 6 normal RM4,000 days + one RM200 closure (Raya) -> the closure flags.
+        rows = [_recon("Vista", 4000.0, 1200.0, 30.0) for _ in range(6)]
+        for i, r in enumerate(rows):
+            r["business_date"] = f"2026-05-2{i}"
+        closed = _recon("Vista", 200.0, 60.0, 30.0)
+        closed["business_date"] = "2026-05-27"
+        rows.append(closed)
+        flagged = fca.incomplete_period_dates(rows)
+        self.assertEqual(len(flagged), 1)
+        self.assertEqual(flagged[0]["outlet"], "Vista")
+        self.assertEqual(flagged[0]["business_date"], "2026-05-27")
+
+    def test_incomplete_period_skips_outlet_with_little_history(self):
+        # Only 2 days of data -> no reliable baseline -> never flag.
+        rows = [_recon("Vista", 4000.0, 1200.0, 30.0), _recon("Vista", 50.0, 15.0, 30.0)]
+        for i, r in enumerate(rows):
+            r["business_date"] = f"2026-05-2{i}"
+        self.assertEqual(fca.incomplete_period_dates(rows), [])
+
+    def test_incomplete_period_empty_when_all_normal(self):
+        rows = [_recon("Vista", 4000.0, 1200.0, 30.0) for _ in range(5)]
+        for i, r in enumerate(rows):
+            r["business_date"] = f"2026-05-2{i}"
+        self.assertEqual(fca.incomplete_period_dates(rows), [])
 
     def test_cash_no_receipt_empty_is_positive(self):
         out = fca.format_cash_no_receipt("2026-05-29", [])
@@ -178,6 +225,22 @@ class Formatters(unittest.TestCase):
         out = fca.format_outlet_trend("Jakel", rows, group_pct=28.3)
         self.assertIn("7-day rolling", out)
         self.assertIn("Group 7-day", out)
+
+    def test_outlet_trend_headlines_week_and_month_with_raw_daily(self):
+        week = [_recon("Jakel", 4000.0, 1400.0, 35.0)]
+        week[0]["business_date"] = "2026-05-28"
+        month = [
+            _recon("Jakel", 4000.0, 1400.0, 35.0),
+            _recon("Jakel", 5000.0, 1500.0, 30.0),
+        ]
+        for i, r in enumerate(month):
+            r["business_date"] = f"2026-05-1{i}"
+        out = fca.format_outlet_trend("Jakel", week, group_pct=28.3, month_rows=month)
+        self.assertIn("7-day rolling:", out)
+        self.assertIn("Month-to-date:", out)
+        # Daily breakdown is explicitly raw, not a %.
+        self.assertIn("NOT food cost %", out)
+        self.assertIn("RM4,000.00 sales", out)
 
     def test_food_cost_week_renders_rolling_per_outlet(self):
         rows = [

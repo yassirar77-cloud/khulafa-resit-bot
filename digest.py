@@ -315,49 +315,64 @@ def _sales_today_block(sales):
 
 
 def _food_cost_block(food_cost):
-    """``food_cost``: {label, rows, rolling?, rolling_group_pct?, rolling_days?}.
+    """``food_cost``: {label, rows, rolling, rolling_group_pct, rolling_days,
+    mtd_group_pct?, incomplete_dates?, unclassified?, clamped?}.
 
-    Shows BOTH the volatile daily food cost % and the smoothed 7-day rolling %
-    per outlet, so a burst-delivery day is visible but read in context. The
-    INVESTIGATE flag keys off the 7-day rolling when available (the stable
-    signal), else the daily %."""
+    Food cost is reported as the smoothed N-day rolling % (headline) plus a
+    month-to-date line — NEVER a single day's %. Daily food cost % is structural
+    noise: receipts are dated by their upload day, sales by the overnight
+    17:00-cutoff business date, so the two only balance over a full period.
+    Disrupted days (closures) are FLAGGED, not hidden — they still count."""
     label = food_cost.get("label") if food_cost else None
     header = f"{NEW_SECTION_HEADERS[1]} ({_html(label)})" if label else NEW_SECTION_HEADERS[1]
     rows = (food_cost or {}).get("rows") or []
-    if not rows:
-        return f"{header}\n- (no reconciliation data — run /reconcile_now)"
     rolling = (food_cost or {}).get("rolling") or {}
+    if not rolling and not rows:
+        return f"{header}\n- (no reconciliation data — run /reconcile_now)"
     rolling_days = (food_cost or {}).get("rolling_days") or 7
     rolling_group_pct = (food_cost or {}).get("rolling_group_pct")
+    mtd_group_pct = (food_cost or {}).get("mtd_group_pct")
 
-    _sales, _purch, group_pct = fca.group_food_cost(rows)
-    daily_group = (
-        f"{fca.status_emoji(fca.food_cost_status(group_pct))} {group_pct:.1f}%"
-        if group_pct is not None else "⚪ n/a"
+    roll_group = (
+        f"{fca.status_emoji(fca.food_cost_status(rolling_group_pct))} {rolling_group_pct:.1f}%"
+        if rolling_group_pct is not None else "⚪ n/a"
     )
-    if rolling_group_pct is not None:
-        roll_group = f"{fca.status_emoji(fca.food_cost_status(rolling_group_pct))} {rolling_group_pct:.1f}%"
-        group_line = f"Khulafa Group: {daily_group} today | {roll_group} ({rolling_days}-day)"
-    else:
-        group_line = f"Khulafa Group: {daily_group}"
+    lines = [header, f"Khulafa Group: {roll_group} ({rolling_days}-day rolling)"]
+    if mtd_group_pct is not None:
+        lines.append(
+            f"Month-to-date: {fca.status_emoji(fca.food_cost_status(mtd_group_pct))} "
+            f"{mtd_group_pct:.1f}%"
+        )
+    lines += ["", f"Per outlet ({rolling_days}-day rolling):"]
 
-    lines = [header, group_line, "", f"Per outlet (today | {rolling_days}-day):"]
-    for o in fca.per_outlet_food_cost(rows):
-        outlet = o["outlet"]
-        daily_emoji = fca.status_emoji(o["status"])
-        roll = rolling.get(outlet) or {}
-        roll_pct = roll.get("pct")
-        roll_status = fca.food_cost_status(roll_pct)
-        flag_status = roll_status if roll_pct is not None else o["status"]
-        flag = " INVESTIGATE" if flag_status == "red" else ""
-        daily_part = (
-            "data incomplete " + daily_emoji if o["pct"] is None
-            else f"{o['pct']:.1f}% {daily_emoji}"
+    # Prefer the rolling per-outlet figures; degrade to listing the outlets as
+    # data-incomplete if the rolling window wasn't available.
+    if rolling:
+        ranked = sorted(
+            rolling.items(),
+            key=lambda kv: (kv[1].get("pct") is None, kv[1].get("pct") or 0.0, kv[0] or ""),
         )
-        roll_part = (
-            f" | {roll_pct:.1f}% {fca.status_emoji(roll_status)}" if roll_pct is not None else ""
+        for outlet, v in ranked:
+            roll_pct = v.get("pct")
+            status = fca.food_cost_status(roll_pct)
+            flag = " INVESTIGATE" if status == "red" else ""
+            if roll_pct is None:
+                lines.append(f"- {_name(outlet)}: data incomplete ⚪")
+            else:
+                lines.append(f"- {_name(outlet)}: {roll_pct:.1f}% {fca.status_emoji(status)}{flag}")
+    else:
+        for o in fca.per_outlet_food_cost(rows):
+            lines.append(f"- {_name(o['outlet'])}: data incomplete ⚪")
+
+    incomplete = (food_cost or {}).get("incomplete_dates") or []
+    if incomplete:
+        detail = ", ".join(
+            f"{_name(d.get('outlet'))} {d.get('business_date')}" for d in incomplete[:6]
         )
-        lines.append(f"- {_name(outlet)}: {daily_part}{roll_part}{flag}")
+        more = f" +{len(incomplete) - 6} more" if len(incomplete) > 6 else ""
+        lines.append(
+            f"⚠️ Incomplete sales day(s) in this window — counted, not hidden: {detail}{more}"
+        )
     unclassified = (food_cost or {}).get("unclassified") or {}
     if unclassified.get("count"):
         lines.append(

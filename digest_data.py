@@ -306,17 +306,25 @@ def _food_cost_sections(client, now_my) -> dict:
 
 
 def _food_cost_payload(client, recon, recon_date) -> dict:
-    """Daily rows + the 7-day rolling (sales-weighted) per-outlet figures for the
-    FOOD COST % section. Rolling degrades to empty if the window read fails."""
+    """The FOOD COST % section payload: the N-day rolling (sales-weighted)
+    per-outlet figures (headline), the month-to-date group % (secondary line),
+    and the incomplete-period flag. No daily % — it's structural noise. Each
+    piece degrades independently if its window read fails."""
     payload = {"label": recon_date.isoformat(), "rows": recon, "rolling_days": FOOD_COST_LOOKBACK_DAYS}
     start = recon_date - timedelta(days=FOOD_COST_LOOKBACK_DAYS - 1)
     try:
         window = _recon_window(client, start.isoformat(), recon_date.isoformat())
+        payload["rolling"] = fca.rolling_food_cost_by_outlet(window)
+        payload["rolling_group_pct"] = fca.group_food_cost(window)[2]
+        payload["incomplete_dates"] = fca.incomplete_period_dates(window)
     except Exception:
         logger.warning("digest: food-cost rolling window unavailable", exc_info=True)
-        return payload
-    payload["rolling"] = fca.rolling_food_cost_by_outlet(window)
-    payload["rolling_group_pct"] = fca.group_food_cost(window)[2]
+    try:
+        month_start = recon_date.replace(day=1)
+        month_rows = _recon_window(client, month_start.isoformat(), recon_date.isoformat())
+        payload["mtd_group_pct"] = fca.group_food_cost(month_rows)[2]
+    except Exception:
+        logger.warning("digest: month-to-date food cost unavailable", exc_info=True)
     return payload
 
 

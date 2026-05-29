@@ -370,6 +370,8 @@ class BotWiring(unittest.TestCase):
     def test_new_commands_registered(self):
         for cmd, handler in [
             ("food_cost_today", "food_cost_today_command"),
+            ("food_cost_week", "food_cost_week_command"),
+            ("food_cost_month", "food_cost_month_command"),
             ("food_cost_outlet", "food_cost_outlet_command"),
             ("cash_no_receipt_today", "cash_no_receipt_today_command"),
             ("reconcile_now", "reconcile_now_command"),
