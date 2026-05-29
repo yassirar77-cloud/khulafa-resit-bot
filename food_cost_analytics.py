@@ -32,6 +32,13 @@ ANOMALY_INFO = 2.0
 ANOMALY_WARNING = 4.0
 ANOMALY_CRITICAL = 6.0
 
+# Incomplete-period detection: a business date whose sales fell below this
+# fraction of the outlet's median sales over the window is almost certainly a
+# closure / disrupted day (Raya, flood, power cut). We FLAG it — never hide or
+# fudge it — so an aggregate over a disrupted week is read with eyes open.
+INCOMPLETE_PERIOD_RATIO = 0.20
+INCOMPLETE_MIN_HISTORY = 3
+
 
 def _num(value):
     try:
@@ -190,6 +197,54 @@ def compute_anomalies(current_rolling, prior_rolling) -> list[Anomaly]:
     return anomalies
 
 
+# --- incomplete-period detection ---------------------------------------------
+
+def _median(values):
+    s = sorted(values)
+    n = len(s)
+    if n == 0:
+        return None
+    mid = n // 2
+    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2.0
+
+
+def incomplete_period_dates(recon_rows, *, ratio=INCOMPLETE_PERIOD_RATIO,
+                            min_history=INCOMPLETE_MIN_HISTORY) -> list[dict]:
+    """Business dates where an outlet's day_sales collapsed below ``ratio`` of
+    its median sales over the window — a closure / disrupted day that would
+    otherwise quietly distort a weekly/monthly aggregate.
+
+    Skips an outlet with fewer than ``min_history`` days of sales (no reliable
+    baseline). The disrupted day is NOT dropped from any aggregate — this only
+    surfaces a ⚠️ so the number is read honestly. Returns
+    ``[{outlet, business_date, sales, median}]`` sorted by date then outlet."""
+    by_outlet: dict[str, list] = defaultdict(list)
+    for r in recon_rows:
+        outlet = r.get("outlet_canonical")
+        sales = _num(r.get("sales_total"))
+        bdate = r.get("business_date")
+        if outlet and bdate is not None and sales is not None:
+            by_outlet[outlet].append((str(bdate), sales))
+
+    flagged: list[dict] = []
+    for outlet, series in by_outlet.items():
+        if len(series) < min_history:
+            continue
+        median = _median([s for _d, s in series])
+        if not median or median <= 0:
+            continue
+        for bdate, sales in series:
+            if sales < ratio * median:
+                flagged.append({
+                    "outlet": outlet,
+                    "business_date": bdate,
+                    "sales": round(sales, 2),
+                    "median": round(median, 2),
+                })
+    flagged.sort(key=lambda x: (x["business_date"], x["outlet"] or ""))
+    return flagged
+
+
 # --- sales summary (over sales_daily_summary D-file rows) --------------------
 
 def sales_summary(rows) -> dict:
@@ -220,34 +275,38 @@ def sales_summary(rows) -> dict:
 # --- plain-text formatters (Telegram /food_cost_* commands) ------------------
 
 def format_food_cost_today(date_label, recon_rows) -> str:
+    """Raw sales + purchases for the day — deliberately NOT a food cost %.
+
+    A single day's % is structural noise: receipts are dated by the calendar day
+    they're uploaded, sales by the overnight 17:00-cutoff business date, so the
+    two only balance over a full period. Food cost % is reported weekly
+    (/food_cost_week) and monthly (/food_cost_month); this command just shows
+    the day's raw figures."""
     if not recon_rows:
-        return f"Food cost — {date_label}:\nNo reconciliation data yet. Try /reconcile_now."
-    sales, purchases, group_pct = group_food_cost(recon_rows)
-    group_status = food_cost_status(group_pct)
-    group_line = (
-        f"{status_emoji(group_status)} {group_pct:.1f}%" if group_pct is not None else "⚪ —"
-    )
+        return (
+            f"Sales & purchases — {date_label}:\n"
+            "No reconciliation data yet. Try /reconcile_now."
+        )
+    sales, purchases, _pct = group_food_cost(recon_rows)
     lines = [
-        f"Food cost — {date_label}:",
+        f"Sales & purchases — {date_label}:",
         "",
-        f"Khulafa Group: {group_line}",
-        f"(based on RM{_money(sales)} sales, RM{_money(purchases)} purchases)",
+        f"Khulafa Group: RM{_money(sales)} sales, RM{_money(purchases)} purchases",
         "",
         "Per outlet:",
     ]
     for o in per_outlet_food_cost(recon_rows):
-        emoji = status_emoji(o["status"])
-        if o["pct"] is None:
-            lines.append(f"{emoji} {o['outlet']:<12} —      (no D-file yet)")
+        if o["sales"] is None:
+            lines.append(f"• {o['outlet']:<12} RM{_money(o['purchases'])} purch  (no D-file yet)")
         else:
             lines.append(
-                f"{emoji} {o['outlet']:<12} {o['pct']:>5.1f}%  "
-                f"(RM{_money(o['purchases'])} / RM{_money(o['sales'])})"
+                f"• {o['outlet']:<12} RM{_money(o['sales'])} sales  "
+                f"RM{_money(o['purchases'])} purch"
             )
     lines += [
         "",
-        "🟢 Excellent (under 30%)  🟡 Healthy (30-35%)",
-        "🔴 Investigate (over 35%)  ⚪ Data incomplete",
+        "ℹ️ Food cost % is reported weekly (/food_cost_week) and monthly "
+        "(/food_cost_month) — one day's receipts and sales don't line up.",
     ]
     return "\n".join(lines)
 
@@ -258,27 +317,26 @@ def _rolling_sort_key(item):
     return (pct is None, pct if pct is not None else 0.0, outlet or "")
 
 
-def format_food_cost_week(date_label, recon_rows) -> str:
-    """7-day rolling food cost % per outlet over ``recon_rows`` (a 7-day window of
-    purchase_reconciliation rows). Sales-weighted, so burst deliveries don't
-    distort it — the stable read of the week that /food_cost_today can't give."""
+def _format_rolling_food_cost(heading, date_label, recon_rows, window_phrase,
+                              per_outlet_label) -> str:
+    """Shared sales-weighted rolling food cost % renderer for the week / month
+    commands. Summing purchases and sales over the window then dividing means a
+    burst supplier delivery can't distort the figure the way a mean of daily %s
+    would — the stable read a single day can't give."""
     if not recon_rows:
-        return (
-            f"7-day rolling food cost — {date_label}:\n"
-            "No reconciliation data yet. Try /reconcile_now."
-        )
+        return f"{heading} — {date_label}:\nNo reconciliation data yet. Try /reconcile_now."
     sales, purchases, group_pct = group_food_cost(recon_rows)
     group_line = (
         f"{status_emoji(food_cost_status(group_pct))} {group_pct:.1f}%"
         if group_pct is not None else "⚪ —"
     )
     lines = [
-        f"7-day rolling food cost — {date_label}:",
+        f"{heading} — {date_label}:",
         "",
         f"Khulafa Group: {group_line}",
-        f"(RM{_money(purchases)} purchases / RM{_money(sales)} sales over 7 days)",
+        f"(RM{_money(purchases)} purchases / RM{_money(sales)} sales {window_phrase})",
         "",
-        "Per outlet (7-day rolling):",
+        f"Per outlet ({per_outlet_label}):",
     ]
     by_outlet = rolling_food_cost_by_outlet(recon_rows)
     for outlet, v in sorted(by_outlet.items(), key=_rolling_sort_key):
@@ -298,35 +356,65 @@ def format_food_cost_week(date_label, recon_rows) -> str:
     return "\n".join(lines)
 
 
-def format_outlet_trend(outlet, daily_rows, group_pct=None) -> str:
-    """7-day food cost trend for one outlet. ``daily_rows``:
-    purchase_reconciliation rows ({business_date, sales_total,
-    total_food_purchases, food_cost_percent}) sorted oldest-first by caller."""
-    if not daily_rows:
+def format_food_cost_week(date_label, recon_rows) -> str:
+    """7-day rolling food cost % per outlet — the primary, stable weekly read."""
+    return _format_rolling_food_cost(
+        "7-day rolling food cost", date_label, recon_rows,
+        "over 7 days", "7-day rolling",
+    )
+
+
+def format_food_cost_month(date_label, recon_rows) -> str:
+    """Month-to-date food cost % per outlet (sales-weighted). The longer the
+    clean period, the closer this lands on the true food cost."""
+    return _format_rolling_food_cost(
+        "Month-to-date food cost", date_label, recon_rows,
+        "month-to-date", "month-to-date",
+    )
+
+
+def format_outlet_trend(outlet, daily_rows, group_pct=None, month_rows=None) -> str:
+    """Food cost for one outlet: the weekly + monthly rolling % as the headline,
+    with the daily breakdown shown only as RAW figures (NOT a daily %, which is
+    structural noise). ``daily_rows`` are the last 7 days' purchase_reconciliation
+    rows; ``month_rows`` (optional) the month-to-date rows."""
+    if not daily_rows and not month_rows:
         return f"No reconciliation data for {outlet} in the last 7 days."
-    lines = [f"{outlet} — Food Cost Trend (7 days):"]
-    for r in sorted(daily_rows, key=lambda x: str(x.get("business_date"))):
-        pct = _num(r.get("food_cost_percent"))
-        date = str(r.get("business_date"))
-        if pct is None:
-            lines.append(f"{date}  (no sales / data incomplete)")
-            continue
+
+    _ws, _wp, week_pct = group_food_cost(daily_rows or [])
+    lines = [f"{outlet} — Food Cost:"]
+    lines.append(
+        f"7-day rolling: {week_pct:.1f}% {status_emoji(food_cost_status(week_pct))}"
+        if week_pct is not None else "7-day rolling: ⚪ data incomplete"
+    )
+    if month_rows is not None:
+        _ms, _mp, month_pct = group_food_cost(month_rows)
         lines.append(
-            f"{date}  RM{_money(r.get('sales_total'))} sales  "
-            f"RM{_money(r.get('total_food_purchases'))} purch  "
-            f"{pct:.1f}% {status_emoji(food_cost_status(pct))}"
+            f"Month-to-date: {month_pct:.1f}% {status_emoji(food_cost_status(month_pct))}"
+            if month_pct is not None else "Month-to-date: ⚪ data incomplete"
         )
-    # 7-day figure is the sales-weighted rolling % (not a mean of daily %s), so
-    # burst-delivery days don't distort it — consistent with /food_cost_week.
-    _s, _p, rolling = group_food_cost(daily_rows)
-    if rolling is not None:
-        lines.append("")
-        lines.append(f"7-day rolling: {rolling:.1f}% {status_emoji(food_cost_status(rolling))}")
-        if group_pct is not None:
-            lines.append(f"Group 7-day: {group_pct:.1f}% {status_emoji(food_cost_status(group_pct))}")
-            delta = rolling - group_pct
-            sign = "+" if delta >= 0 else ""
-            lines.append(f"{outlet} is {sign}{delta:.1f}% vs group.")
+    if group_pct is not None and week_pct is not None:
+        delta = week_pct - group_pct
+        sign = "+" if delta >= 0 else ""
+        lines.append(
+            f"Group 7-day: {group_pct:.1f}% {status_emoji(food_cost_status(group_pct))} "
+            f"({outlet} {sign}{delta:.1f}% vs group)"
+        )
+
+    lines += ["", "Daily breakdown (raw figures — NOT food cost %):"]
+    for r in sorted(daily_rows or [], key=lambda x: str(x.get("business_date"))):
+        date = str(r.get("business_date"))
+        sales = _num(r.get("sales_total"))
+        purch = r.get("total_food_purchases")
+        if sales is None:
+            lines.append(f"{date}  RM{_money(purch)} purch  (no D-file / sales)")
+        else:
+            lines.append(f"{date}  RM{_money(sales)} sales  RM{_money(purch)} purch")
+    lines += [
+        "",
+        "ℹ️ Daily figures are raw — food cost % is meaningful only weekly/monthly "
+        "(receipts and sales only balance over a full period).",
+    ]
     return "\n".join(lines)
 
 

@@ -3182,6 +3182,14 @@ def _business_date_list(n: int, end=None):
     return [(end - timedelta(days=i)).isoformat() for i in range(n)]
 
 
+def _month_to_date_dates(end=None):
+    """Business dates from the 1st of ``end``'s month through ``end`` (newest
+    first), for the month-to-date food cost view."""
+    end = end or _my_today()
+    n = (end - end.replace(day=1)).days + 1
+    return _business_date_list(n, end)
+
+
 def _fetch_sales_rows(business_dates):
     resp = (
         supabase.table(SALES_DAILY_TABLE)
@@ -3413,17 +3421,24 @@ async def food_cost_outlet_command(update: Update, context: ContextTypes.DEFAULT
         await message.reply_text("Usage: /food_cost_outlet <name>\nExample: /food_cost_outlet jakel")
         return
     outlet = _resolve_outlet_name(" ".join(context.args))
-    dates = _business_date_list(7)
+    week_dates = set(_business_date_list(7))
+    month_dates = set(_month_to_date_dates())
+    all_dates = sorted(week_dates | month_dates)
     try:
-        all_rows = await asyncio.to_thread(_fetch_recon_rows, dates)
+        all_rows = await asyncio.to_thread(_fetch_recon_rows, all_dates)
     except Exception:
         logger.exception("food_cost_outlet failed")
         await message.reply_text("Failed to read food cost trend.")
         return
-    outlet_rows = [r for r in all_rows if r.get("outlet_canonical") == outlet]
-    _s, _p, group_pct = food_cost_analytics.group_food_cost(all_rows)
+    week_rows = [r for r in all_rows if str(r.get("business_date")) in week_dates]
+    week_outlet = [r for r in week_rows if r.get("outlet_canonical") == outlet]
+    month_outlet = [
+        r for r in all_rows
+        if r.get("outlet_canonical") == outlet and str(r.get("business_date")) in month_dates
+    ]
+    _s, _p, group_pct = food_cost_analytics.group_food_cost(week_rows)
     await message.reply_text(
-        food_cost_analytics.format_outlet_trend(outlet, outlet_rows, group_pct)
+        food_cost_analytics.format_outlet_trend(outlet, week_outlet, group_pct, month_outlet)
     )
 
 
@@ -3510,6 +3525,23 @@ async def food_cost_week_command(update: Update, context: ContextTypes.DEFAULT_T
         return
     await message.reply_text(
         food_cost_analytics.format_food_cost_week(f"{start} → {end}", rows)
+    )
+
+
+async def food_cost_month_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    dates = _month_to_date_dates()
+    start, end = dates[-1], dates[0]
+    try:
+        rows = await asyncio.to_thread(_fetch_recon_rows, dates)
+    except Exception:
+        logger.exception("food_cost_month failed")
+        await message.reply_text("Failed to compute food cost.")
+        return
+    await message.reply_text(
+        food_cost_analytics.format_food_cost_month(f"{start} → {end}", rows)
     )
 
 
@@ -3702,6 +3734,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("sales_ingest_manual", sales_ingest_manual_command))
     app.add_handler(CommandHandler("food_cost_today", food_cost_today_command))
     app.add_handler(CommandHandler("food_cost_week", food_cost_week_command))
+    app.add_handler(CommandHandler("food_cost_month", food_cost_month_command))
     app.add_handler(CommandHandler("food_cost_outlet", food_cost_outlet_command))
     app.add_handler(CommandHandler("cash_no_receipt_today", cash_no_receipt_today_command))
     app.add_handler(CommandHandler("reconcile_now", reconcile_now_command))
