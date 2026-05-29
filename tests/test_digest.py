@@ -83,6 +83,32 @@ class Sections(unittest.TestCase):
             self.assertIn(header, joined, f"missing section: {header}")
         self.assertEqual(len(digest.SECTION_HEADERS), 8)
 
+    def test_dead_letter_surfaces_in_digest(self):
+        # Part 4 (PR #65): a message-id that failed >= threshold times and never
+        # landed surfaces as a dead-letter section; a recovered one (later
+        # 'inserted') is excluded. The block is absent when there's nothing.
+        import digest_data
+
+        error_rows = (
+            [{"source_message_id": "<stuck>", "source_subject": "S-JAKEL SHIFTCLOSE (1)",
+              "detail": "no_total_parsed"}] * 3
+            + [{"source_message_id": "<recovered>", "source_subject": "S-KLANG", "detail": "x"}] * 3
+            + [{"source_message_id": "<warming>", "source_subject": "S-SEK6", "detail": "y"}]
+        )
+        dead = digest_data.dead_letter_emails(error_rows, {"<recovered>"}, threshold=3)
+        ids = {d["message_id"] for d in dead}
+        self.assertEqual(ids, {"<stuck>"})  # >=3 and not recovered
+        self.assertEqual(dead[0]["count"], 3)
+
+        # Rendered into the digest when present, escaped, and absent when empty.
+        data = dict(EMPTY_DATA)
+        data["dead_letter_emails"] = dead
+        joined = "\n\n".join(digest.build_digest_messages(data, NOW))
+        self.assertIn(digest.DEAD_LETTER_HEADER, joined)
+        self.assertIn("S-JAKEL SHIFTCLOSE (1)", joined)
+        empty = "\n\n".join(digest.build_digest_messages(EMPTY_DATA, NOW))
+        self.assertNotIn(digest.DEAD_LETTER_HEADER, empty)
+
     def test_digest_handles_empty_price_alerts_section(self):
         joined = "\n\n".join(digest.build_digest_messages(EMPTY_DATA, NOW))
         self.assertIn("No significant price changes", joined)

@@ -56,6 +56,11 @@ NEW_SECTION_HEADERS = (
     "🏆 <b>TOP ITEMS YESTERDAY</b>",
 )
 
+# PR #65 sales-ingestion health: dead-lettered shift-close emails (3+ failed
+# runs, still not stored). Surfaced once a night here instead of per-poll log
+# spam. Only rendered when there's something to report.
+DEAD_LETTER_HEADER = "📭 <b>UNINGESTED SALES EMAILS</b>"
+
 
 def _num(value):
     try:
@@ -445,6 +450,24 @@ def _top_items_yesterday_block(top_items):
     return "\n".join(lines)
 
 
+def _dead_letter_block(dead_letters):
+    """``dead_letters``: list of {message_id, subject, detail, count}. Each is a
+    shift-close email that has failed to ingest 3+ times and is still missing
+    from the destination — a code fix is needed, then it self-heals on the next
+    poll. Empty -> no block (returns None, dropped by render_blocks)."""
+    rows = dead_letters or []
+    if not rows:
+        return None
+    lines = [f"{DEAD_LETTER_HEADER} ({len(rows)} need a fix)"]
+    for d in rows:
+        subject = d.get("subject") or d.get("message_id") or "(unknown email)"
+        detail = d.get("detail")
+        suffix = f" — {_html(detail)}" if detail else ""
+        lines.append(f"• {_html(subject)} (failed {d.get('count')}×){suffix}")
+    lines.append("<i>Left unread; will retry automatically once the parser is fixed.</i>")
+    return "\n".join(lines)
+
+
 def _footer_block(now_my):
     return "\n".join([
         SECTION_SEP,
@@ -477,7 +500,7 @@ def render_blocks(data, now_my):
     outlets = data.get("outlet_spending") or aggregate_outlets(_slice(pm, week_start, iso))
     alerts = price_alerts(_slice(pm, recent_start, iso), _slice(pm, prior_start, prior_end))
 
-    return [
+    blocks = [
         _header_block(now_my),
         _today_block(data.get("today", {})),
         _suppliers_block(suppliers),
@@ -492,8 +515,11 @@ def render_blocks(data, now_my):
         _data_quality_block(data.get("data_quality", {})),
         _outlier_block(data.get("outliers", {})),
         _new_suppliers_block(data.get("new_suppliers", [])),
+        _dead_letter_block(data.get("dead_letter_emails", [])),
         _footer_block(now_my),
     ]
+    # Optional sections (e.g. dead letters) return None when empty — drop them.
+    return [b for b in blocks if b is not None]
 
 
 def pack_messages(blocks, limit=TG_LIMIT):

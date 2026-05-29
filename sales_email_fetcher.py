@@ -98,8 +98,15 @@ class Mailbox:
         return data[0].split()
 
     def fetch(self, msg_id):
-        """Fetch and parse one message into an ``email.message.Message``."""
-        typ, msg_data = self._conn.fetch(msg_id, "(RFC822)")
+        """Fetch and parse one message into an ``email.message.Message``.
+
+        Uses ``BODY.PEEK[]`` rather than ``RFC822``: a plain ``RFC822`` FETCH
+        sets the ``\\Seen`` flag as a server-side side effect, which would mark
+        the email read BEFORE we have confirmed it was stored — exactly the
+        "read-before-confirmed" failure this module guards against. PEEK reads
+        the full message without touching flags, so ``\\Seen`` is set only by an
+        explicit ``mark_seen`` after a confirmed store."""
+        typ, msg_data = self._conn.fetch(msg_id, "(BODY.PEEK[])")
         if typ != "OK" or not msg_data or not msg_data[0]:
             raise RuntimeError(f"IMAP fetch failed for {msg_id!r}")
         raw = msg_data[0][1]
