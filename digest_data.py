@@ -15,6 +15,7 @@ from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import food_cost_analytics as fca
+from date_utils import clamp_business_date
 from merchant_resolver import compute_coverage, load_snapshot, match_merchant
 from outlet_resolver import canonical_outlet
 
@@ -293,6 +294,7 @@ def _food_cost_sections(client, now_my) -> dict:
     if recon:
         out["food_cost"] = _food_cost_payload(client, recon, recon_date)
         out["food_cost"]["unclassified"] = _unclassified_food_cost(client, recon)
+        out["food_cost"]["clamped"] = _clamped_receipts(client, recon_date)
         out["food_cost_anomalies"] = _food_cost_anomalies(client, recon_date)
         out["cash_alerts"] = _cash_no_receipt_alerts(client, recon)
 
@@ -401,6 +403,31 @@ def _unclassified_food_cost(client, recon_rows) -> dict:
         "count": len(log_rows),
         "value": round(sum(_to_float(r.get("amount")) for r in log_rows), 2),
     }
+
+
+def _clamped_receipts(client, recon_date) -> dict:
+    """How many food receipts reconciled on ``recon_date`` had their future OCR
+    date clamped to the upload day (a data-quality signal for the digest). Those
+    receipts were uploaded on ``recon_date`` but OCR'd a date >3 days ahead, so
+    we re-scan the upload-day window and apply the same clamp predicate. {count}."""
+    try:
+        start_local = datetime.combine(recon_date, time.min, tzinfo=MALAYSIA_TZ)
+        end_local = start_local + timedelta(days=1)
+        rows = _rows(
+            client.table(RECEIPTS_TABLE)
+            .select("receipt_date, created_at")
+            .gte("created_at", start_local.astimezone(timezone.utc).isoformat())
+            .lt("created_at", end_local.astimezone(timezone.utc).isoformat())
+            .execute()
+        )
+    except Exception:
+        logger.warning("digest: clamped-receipt stat unavailable", exc_info=True)
+        return {"count": 0}
+    count = sum(
+        1 for r in rows
+        if clamp_business_date(r.get("receipt_date"), r.get("created_at"))[1]
+    )
+    return {"count": count}
 
 
 def _top_items_yesterday(client, now_my) -> dict:

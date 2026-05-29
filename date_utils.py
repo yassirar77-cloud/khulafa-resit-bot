@@ -5,10 +5,20 @@ can import it without pulling in the full bot runtime.
 """
 
 import re
-from datetime import datetime
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 MIN_PLAUSIBLE_YEAR = 2024
 FALLBACK_YEAR = 2026
+
+# Receipt dates / business dates are Malaysia-local; created_at is a UTC
+# timestamptz, so it must be converted to MY-local before comparing days.
+_MY_TZ = ZoneInfo("Asia/Kuala_Lumpur")
+
+# OCR sometimes reads a wildly future receipt date (a transposed day, a bumped
+# year). If the OCR'd date lands more than this many days after the upload day
+# it's treated as an OCR error and the upload day is used instead.
+DEFAULT_MAX_FUTURE_DAYS = 3
 
 _ISO_RE = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})$")
 _DMY_RE = re.compile(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$")
@@ -54,3 +64,61 @@ def normalize_date(value) -> str | None:
             return None
 
     return None
+
+
+def _parse_local_date(value):
+    """A bare (already-local) date from ``YYYY-MM-DD`` / date / datetime."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        return date.fromisoformat(s[:10])
+    except ValueError:
+        return None
+
+
+def _parse_upload_date(value):
+    """``created_at`` (UTC tz-aware ISO / datetime) -> MY-local calendar date."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, date):
+        return value
+    else:
+        s = str(value).strip()
+        if not s:
+            return None
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except ValueError:
+            return _parse_local_date(s)
+    if dt.tzinfo is None:
+        return dt.date()
+    return dt.astimezone(_MY_TZ).date()
+
+
+def clamp_business_date(receipt_date, created_at, *, max_future_days=DEFAULT_MAX_FUTURE_DAYS):
+    """Effective business date for a receipt, guarding against future OCR dates.
+
+    If the OCR'd ``receipt_date`` is more than ``max_future_days`` after the
+    upload day (``created_at``, MY-local), it's almost certainly an OCR error,
+    so the upload day is used instead — the spend still counts, just on a real
+    day rather than a future one that never gets reconciled.
+
+    Returns ``(effective_date: date | None, clamped: bool)``. A missing
+    ``receipt_date`` falls back to the upload day but is NOT flagged as clamped
+    (that's the ordinary null-date fallback, not an OCR future-date error)."""
+    rd = _parse_local_date(receipt_date)
+    ud = _parse_upload_date(created_at)
+    if rd is None:
+        return ud, False
+    if ud is not None and (rd - ud).days > max_future_days:
+        return ud, True
+    return rd, False

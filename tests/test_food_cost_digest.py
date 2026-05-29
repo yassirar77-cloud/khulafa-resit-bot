@@ -200,6 +200,21 @@ class NewSections(unittest.TestCase):
         self.assertNotIn("<", stripped)
         self.assertNotIn(">", stripped)
 
+    def test_clamped_receipts_render_a_warning_line(self):
+        # PR #64: when receipts had a future OCR date clamped to the upload day,
+        # the food-cost section surfaces it as a data-quality note.
+        data = self._full_data()
+        data["food_cost"]["clamped"] = {"count": 3}
+        joined = "\n\n".join(digest.build_digest_messages(data, NOW))
+        self.assertIn("future OCR date", joined)
+        self.assertIn("3 receipt", joined)
+
+    def test_no_clamp_line_when_none_clamped(self):
+        data = self._full_data()
+        data["food_cost"]["clamped"] = {"count": 0}
+        joined = "\n\n".join(digest.build_digest_messages(data, NOW))
+        self.assertNotIn("future OCR date", joined)
+
     def test_no_bare_angle_brackets_with_full_data(self):
         joined = "\n\n".join(digest.build_digest_messages(self._full_data(), NOW))
         stripped = joined

@@ -18,6 +18,7 @@ from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import purchase_reconciliation as pr
+from date_utils import clamp_business_date
 from outlet_resolver import canonical_outlet
 
 logger = logging.getLogger(__name__)
@@ -69,15 +70,23 @@ _RECEIPT_COLUMNS = (
 
 
 def _fetch_receipts(client, business_date):
-    """All food-relevant receipts for the business day.
+    """All food-relevant receipts whose *effective* business date is
+    ``business_date``, plus a count of those whose future OCR date was clamped.
 
-    Two sources, deduped by id:
+    Returns ``(rows, clamped_count)``. Two pools, deduped by id:
     1. receipt_date == business_date (the normal case).
-    2. receipt_date IS NULL but uploaded (created_at) on that day in MY local
-       time — OCR sometimes fails to read a date, and previously the strict
-       ``.eq("receipt_date", ...)`` filter dropped these silently. We fall back
-       to the upload day so the spend still counts (consistent with how the
-       digest's "today's receipts" stat reads created_at)."""
+    2. receipts uploaded (created_at) on that day in MY local time — this
+       catches both NULL OCR dates (the old fallback) and future-dated OCR
+       errors (receipt_date >3 days after upload), which would otherwise land
+       on a future day that never gets reconciled.
+
+    Each candidate's effective date is computed with ``clamp_business_date``;
+    only those landing on ``business_date`` are kept. A receipt clamped INTO
+    this day (future OCR date) is counted in ``clamped_count`` so the digest can
+    surface the data-quality issue. A receipt whose receipt_date == this day but
+    whose upload was >3 days earlier is clamped OUT (counted on its upload day
+    instead) and dropped here."""
+    day = business_date if isinstance(business_date, _date_type) else _parse_date(business_date)
     dated = _rows(
         client.table(RECEIPTS_TABLE)
         .select(_RECEIPT_COLUMNS)
@@ -85,28 +94,44 @@ def _fetch_receipts(client, business_date):
         .eq("receipt_date", str(business_date))
         .execute()
     )
-    undated = _fetch_undated_receipts(client, business_date)
-    seen = {r.get("id") for r in dated}
-    return dated + [r for r in undated if r.get("id") not in seen]
+    uploaded = _fetch_uploaded_receipts(client, day)
+
+    kept: dict = {}
+    clamped = 0
+    for r in dated + uploaded:
+        effective, was_clamped = clamp_business_date(r.get("receipt_date"), r.get("created_at"))
+        if effective != day:
+            continue
+        rid = r.get("id")
+        if rid in kept:
+            continue
+        kept[rid] = r
+        if was_clamped:
+            clamped += 1
+    if clamped:
+        logger.warning(
+            "reconcile: clamped %d receipt(s) with a future OCR date to their "
+            "upload day for %s", clamped, business_date,
+        )
+    return list(kept.values()), clamped
 
 
-def _fetch_undated_receipts(client, business_date):
-    """Receipts with no OCR'd date, uploaded on ``business_date`` (MY local)."""
+def _fetch_uploaded_receipts(client, day):
+    """All food-relevant receipts uploaded on ``day`` (MY local), regardless of
+    OCR'd receipt_date — the caller clamps each to its effective day."""
     try:
-        day = business_date if isinstance(business_date, _date_type) else _parse_date(business_date)
         start_local = datetime.combine(day, time.min, tzinfo=MALAYSIA_TZ)
         end_local = start_local + timedelta(days=1)
         return _rows(
             client.table(RECEIPTS_TABLE)
             .select(_RECEIPT_COLUMNS)
             .not_.in_("receipt_type", NON_FOOD_RECEIPT_TYPES)
-            .is_("receipt_date", "null")
             .gte("created_at", start_local.astimezone(timezone.utc).isoformat())
             .lt("created_at", end_local.astimezone(timezone.utc).isoformat())
             .execute()
         )
     except Exception:
-        logger.warning("reconcile: NULL receipt_date fallback failed for %s", business_date,
+        logger.warning("reconcile: upload-day receipt fetch failed for %s", day,
                        exc_info=True)
         return []
 
@@ -126,7 +151,7 @@ def _fetch_payouts(client, summary_ids):
         return []
     return _rows(
         client.table(SALES_DAILY_PAYOUTS_TABLE)
-        .select("id, summary_id, description, vendor_name, amount")
+        .select("id, summary_id, description, vendor_name, amount, created_at")
         .in_("summary_id", summary_ids)
         .execute()
     )
@@ -160,6 +185,7 @@ def _receipts_by_outlet(receipt_rows, canonical_by_id) -> dict:
             merchant_canonical=canonical_by_id.get(r.get("merchant_canonical_id")),
             merchant=r.get("merchant"),
             receipt_type=r.get("receipt_type"),
+            created_at=r.get("created_at"),
         ))
     if skipped_amount:
         logger.info("reconcile: skipped %d receipt(s) outside (RM%.0f, RM%.0f]",
@@ -188,6 +214,7 @@ def _payouts_by_outlet(summaries, payout_rows) -> dict:
             description=p.get("description") or "",
             vendor_name=p.get("vendor_name"),
             amount=_float(p.get("amount")),
+            created_at=p.get("created_at"),
         ))
     return by_outlet
 
@@ -249,7 +276,7 @@ def run_reconciliation(client, business_date) -> dict:
     canonical_by_id = _load_canonical_merchants(client)
     canonical_names = [n for n in canonical_by_id.values() if n]
 
-    receipt_rows = _fetch_receipts(client, business_date)
+    receipt_rows, clamped_count = _fetch_receipts(client, business_date)
     summaries = _fetch_summaries(client, business_date)
     payout_rows = _fetch_payouts(client, [s["id"] for s in summaries])
 
@@ -279,6 +306,7 @@ def run_reconciliation(client, business_date) -> dict:
         "business_date": str(business_date),
         "outlets_processed": len(stored_rows),
         "rows": stored_rows,
+        "clamped_receipts": clamped_count,
     }
 
 
