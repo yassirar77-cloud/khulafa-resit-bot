@@ -23,6 +23,9 @@ class _Query:
         self._op = "select"
         self._payload = None
         self._filters: list[tuple[str, object]] = []
+        self._null_cols: list[str] = []
+        self._in_filters: list[tuple[str, set]] = []
+        self._order: tuple[str, bool] | None = None
         self._limit = None
 
     # --- builders ---
@@ -48,18 +51,38 @@ class _Query:
         self._filters.append((col, val))
         return self
 
+    def is_(self, col, _val):
+        # Only the IS NULL form is used by the bot.
+        self._null_cols.append(col)
+        return self
+
+    def in_(self, col, vals):
+        self._in_filters.append((col, set(vals)))
+        return self
+
+    def order(self, col, desc=False):
+        self._order = (col, desc)
+        return self
+
     def limit(self, n):
         self._limit = n
         return self
 
     # --- helpers ---
     def _matches(self, row):
-        return all(row.get(c) == v for c, v in self._filters)
+        return (
+            all(row.get(c) == v for c, v in self._filters)
+            and all(row.get(c) is None for c in self._null_cols)
+            and all(row.get(c) in vals for c, vals in self._in_filters)
+        )
 
     def execute(self):
         rows = self._store.setdefault(self._table, [])
         if self._op == "select":
             out = [r for r in rows if self._matches(r)]
+            if self._order is not None:
+                col, desc = self._order
+                out = sorted(out, key=lambda r: (r.get(col) is None, r.get(col)), reverse=desc)
             if self._limit is not None:
                 out = out[: self._limit]
             return _Result([dict(r) for r in out])
