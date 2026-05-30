@@ -28,6 +28,7 @@ import reconciliation_service  # noqa: E402
 
 from datetime import timedelta  # noqa: E402
 
+import merchant_auto_resolve  # noqa: E402
 from digest import build_digest_messages, parse_mode_attempts  # noqa: E402
 from digest_data import MALAYSIA_TZ, gather_digest_data, log_digest  # noqa: E402
 
@@ -90,6 +91,17 @@ def _deliver_message(send_fn, recipient, message, plain):
     return False, False, last_error
 
 
+def _merchant_review_digest_line(client):
+    """One-line nudge if the merchant review queue is non-empty, else None.
+    Best-effort: a failure here must never block the digest."""
+    try:
+        queue = merchant_auto_resolve.fetch_review_queue(client)
+        return merchant_auto_resolve.format_review_digest_line(queue)
+    except Exception:
+        logger.warning("merchant review digest line failed", exc_info=True)
+        return None
+
+
 def run(client, *, recipients, now_my, send_fn, data=None, plain=False) -> dict:
     """Build + deliver the digest to each recipient, logging each outcome.
     Returns ``{recipient: status}``. ``send_fn(recipient, text, parse_mode)``
@@ -98,6 +110,11 @@ def run(client, *, recipients, now_my, send_fn, data=None, plain=False) -> dict:
     if data is None:
         data = gather_digest_data(client, now_my)
     messages = build_digest_messages(data, now_my)
+    review_line = _merchant_review_digest_line(client)
+    if review_line:
+        # One line a day (the digest itself is once-nightly), only when the
+        # owner queue is non-empty — so it nudges without spamming.
+        messages = [*messages, review_line]
     full_text = "\n\n".join(messages)
     message_bytes = len(full_text.encode("utf-8"))
 

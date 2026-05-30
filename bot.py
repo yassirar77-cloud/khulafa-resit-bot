@@ -73,6 +73,13 @@ from backfill_canonical import (
     should_apply as backfill_should_apply,
     top_unmatched_from_audit,
 )
+import merchant_auto_resolve
+from merchant_auto_resolve import (
+    fetch_review_queue as fetch_merchant_review_queue,
+    format_resolve_report as format_merchant_resolve_report,
+    format_review_queue as format_merchant_review_queue,
+    undo_resolution as undo_merchant_resolution,
+)
 import item_resolver
 from item_resolver import (
     format_coverage_report as format_item_coverage,
@@ -1687,6 +1694,11 @@ HELP_TEXT = (
     "/reconcile_now — re-run today/yesterday reconciliation\n"
     "/reconcile_date YYYY-MM-DD — re-run one historical date\n"
     "\n"
+    "Merchant auto-resolve:\n"
+    "/merchant_resolve_now — clear the unresolved-merchant backlog (auto-resolve, escalate, defer)\n"
+    "/merchant_review — owner queue of escalated merchants (by RM at stake)\n"
+    "/merchant_undo <log_id> — reverse one auto-resolution and re-reconcile\n"
+    "\n"
     "Sales:\n"
     "/sales_today, /sales_yesterday — sales by outlet\n"
     "/sales_summary_today, /sales_customers_today, /sales_avg_ticket\n"
@@ -2631,6 +2643,75 @@ async def merchant_add_alias_command(update: Update, context: ContextTypes.DEFAU
         )
         return
     await message.reply_text(f"✅ Added alias {alias_text!r} -> canonical #{canonical_id}.")
+
+
+# === PR #68: risk-weighted merchant auto-resolution (owner-only) =============
+
+def _canonical_names_by_id() -> dict:
+    return {c.get("id"): c.get("display_name") for c in _fetch_canonicals()}
+
+
+async def merchant_resolve_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """One-pass backfill of the whole unresolved-merchant backlog. Auto-resolves
+    confident matches, escalates risky ones, defers the long tail, and re-runs
+    reconciliation for every business date a tagged receipt touches."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    await message.reply_text("Resolving merchant backlog (auto-resolve + reconcile)…")
+    try:
+        stats = await asyncio.to_thread(
+            merchant_auto_resolve.resolve_all, supabase, actor=_command_owner_id(update)
+        )
+    except Exception as exc:  # noqa: BLE001 - surfaced to the owner
+        logger.exception("merchant_resolve_now failed")
+        await message.reply_text(f"Auto-resolve failed: {exc}")
+        return
+    await message.reply_text(format_merchant_resolve_report(stats))
+
+
+async def merchant_review_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner review queue: active escalations ranked by RM at stake descending."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    try:
+        queue = await asyncio.to_thread(fetch_merchant_review_queue, supabase)
+        names = await asyncio.to_thread(_canonical_names_by_id)
+    except Exception:
+        logger.exception("merchant_review failed")
+        await message.reply_text("Failed to read the review queue.")
+        return
+    await message.reply_text(format_merchant_review_queue(queue, names))
+
+
+async def merchant_undo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reverse one auto-resolution by its log id: untag receipts, drop the alias,
+    and re-reconcile the affected dates so food cost reverts."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    args = context.args or []
+    if not args or not args[0].isdigit():
+        await message.reply_text("Usage: /merchant_undo <log_id>  (see /merchant_review)")
+        return
+    log_id = int(args[0])
+    try:
+        row = await asyncio.to_thread(undo_merchant_resolution, supabase, log_id)
+    except Exception:
+        logger.exception("merchant_undo failed")
+        await message.reply_text("Failed to undo resolution.")
+        return
+    if row is None:
+        await message.reply_text(
+            f"Nothing to undo for log #{log_id} "
+            "(not an auto-resolution, or already undone)."
+        )
+        return
+    await message.reply_text(
+        f"↩️ Undid resolution #{log_id}: {row.get('raw_merchant')!r} untagged, "
+        f"alias removed, {len(row.get('affected_dates') or [])} date(s) re-reconciled."
+    )
 
 
 # === PR #31: canonical-merchant backfill commands (owner-only) ===============
@@ -4007,6 +4088,9 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("merchant_confirm", merchant_confirm_command))
     app.add_handler(CommandHandler("merchant_reject", merchant_reject_command))
     app.add_handler(CommandHandler("merchant_add_alias", merchant_add_alias_command))
+    app.add_handler(CommandHandler("merchant_resolve_now", merchant_resolve_now_command))
+    app.add_handler(CommandHandler("merchant_review", merchant_review_command))
+    app.add_handler(CommandHandler("merchant_undo", merchant_undo_command))
     app.add_handler(CommandHandler("backfill_status", backfill_status_command))
     app.add_handler(CommandHandler("backfill_preview", backfill_preview_command))
     app.add_handler(CommandHandler("backfill_apply", backfill_apply_command))
