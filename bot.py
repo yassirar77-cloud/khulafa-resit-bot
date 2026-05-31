@@ -36,7 +36,7 @@ from telegram.ext import (
 from audit_messages import build_big_purchase_message
 from config.reviewers import REVIEWER_CHAT_IDS, is_reviewer
 from date_utils import normalize_date
-from image_store import upload_receipt_image
+from image_store import probe_cloudinary, upload_receipt_image
 from image_utils import resize_for_ocr
 from items_utils import normalize_items
 from money_utils import normalize_total
@@ -2373,6 +2373,21 @@ def _command_owner_id(update: Update):
     return user.id if user else None
 
 
+async def cloudinary_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin-only on-demand re-run of the Cloudinary archival health probe.
+
+    Lets the owner re-verify image archival anytime without a redeploy. Mirrors
+    the startup probe; silently ignores non-reviewers like the other admin
+    commands.
+    """
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    ok, detail = await asyncio.to_thread(probe_cloudinary)
+    icon = "✅" if ok else "⚠️"
+    await message.reply_text(f"{icon} Cloudinary: {detail}")
+
+
 def _parse_reparse_n(args, default: int, maximum: int) -> int:
     if not args:
         return default
@@ -4142,6 +4157,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("compare", compare_command))
     app.add_handler(CommandHandler("advances", advances_command))
     app.add_handler(CommandHandler("dashboard", dashboard))
+    app.add_handler(CommandHandler("cloudinary_check", cloudinary_check_command))
     app.add_handler(CommandHandler("reparse_status", reparse_status_command))
     app.add_handler(CommandHandler("reparse_preview", reparse_preview_command))
     app.add_handler(CommandHandler("reparse_apply", reparse_apply_command))
@@ -4283,6 +4299,19 @@ async def run_bot() -> None:
             error_callback=on_polling_error,
         )
         logger.info("Bot started (health on :%d)", HEALTH_PORT)
+
+        # One-time Cloudinary archival health probe. Off-thread so it can't block
+        # the event loop, and fully wrapped so a broken/misconfigured Cloudinary
+        # only logs — it must never stop the bot from starting.
+        try:
+            probe_ok, probe_detail = await asyncio.to_thread(probe_cloudinary)
+            if probe_ok:
+                logger.info("CLOUDINARY PROBE: %s", probe_detail)
+            else:
+                logger.warning("CLOUDINARY PROBE: %s", probe_detail)
+        except Exception:
+            logger.warning("CLOUDINARY PROBE: probe errored; continuing", exc_info=True)
+
         try:
             await stop.wait()
         finally:
