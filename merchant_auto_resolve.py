@@ -58,10 +58,14 @@ AUTO_RESOLVE_CONF_CUTOFF = 0.90
 # is deferred (silent — the long tail isn't worth owner attention); at/above it
 # the merchant is escalated to the owner queue.
 #
-# Tuned CONSERVATIVELY for v1 — a LOW threshold escalates MORE (fewer silent
-# auto-decisions on uncertain matches). Raise it as trust in the auto-matcher
-# grows and the review queue proves itself low-noise.
-ESCALATION_RISK_THRESHOLD = 50.0  # Ringgit
+# Tuned against production: the initial conservative RM50 escalated 107
+# merchants — far past the "handful per week" the queue is designed for. The
+# risk distribution showed the money concentrates at the top (24 merchants at
+# risk >= 200 carry RM32,781 of the RM50k+ at stake), so RM200 keeps that
+# high-value tail in the owner queue while letting the 83 lower-risk merchants
+# auto-resolve or defer. Lower it again only if too much real spend slips
+# through silently.
+ESCALATION_RISK_THRESHOLD = 200.0  # Ringgit
 
 # Below this confidence we don't attach a best-guess canonical at all (the
 # overlap is incidental). The merchant is still logged and risk-weighted, just

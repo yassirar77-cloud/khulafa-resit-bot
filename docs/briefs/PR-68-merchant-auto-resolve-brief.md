@@ -53,7 +53,7 @@ Exposed constants (one place to tune):
 | constant | value | meaning |
 |---|---|---|
 | `AUTO_RESOLVE_CONF_CUTOFF` | `0.90` | clean match auto-resolves at any RM |
-| `ESCALATION_RISK_THRESHOLD` | `50.0` (RM) | tuned **conservatively** — a low threshold escalates *more*; raise as trust grows |
+| `ESCALATION_RISK_THRESHOLD` | `200.0` (RM) | tuned against production — RM50 escalated 107 merchants; RM200 keeps the 24 high-value ones (RM32,781) in the queue and lets 83 lower-risk ones auto-resolve/defer |
 
 ### Worked examples (must hold in tests)
 
@@ -61,8 +61,8 @@ Exposed constants (one place to tune):
 |---|---|---|---|---|
 | 1 | 0.96 | 1,240.50 | 49.62 | **auto-resolve** (conf ≥ cutoff, any RM) |
 | 2 | 0.92 | 6.00 | 0.48 | **auto-resolve** (conf ≥ cutoff, tiny RM) |
-| 3 | 0.70 | 18.00 | 5.40 | **defer** (risk < 50) |
-| 4 | 0.65 | 420.00 | 147.00 | **escalate** (risk ≥ 50) |
+| 3 | 0.70 | 18.00 | 5.40 | **defer** (risk < 200) |
+| 4 | 0.65 | 700.00 | 245.00 | **escalate** (risk ≥ 200) |
 
 ## Part 4 — reversible & re-runnable
 
