@@ -21,7 +21,7 @@ class BotReviewFlow(unittest.TestCase):
     def test_low_confidence_routes_to_pending_review(self):
         # handle_photo gates on the stored verifier confidence and routes.
         self.assertIn('if should_queue(verification["confidence"]):', self.src)
-        self.assertIn("await route_to_review(message, context, parsed, verification)", self.src)
+        self.assertIn("await route_to_review(message, context, parsed, verification", self.src)
         # route_to_review writes to the queue, not to receipts.
         self.assertIn("store_pending_review(", self.src)
 
