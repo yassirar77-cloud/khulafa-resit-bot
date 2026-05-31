@@ -151,10 +151,17 @@ class DecisionWorkedExamples(unittest.TestCase):
         self.assertLess(risk, ESCALATION_RISK_THRESHOLD)
 
     def test_4_low_conf_high_rm_escalates(self):
-        # risk = 0.35 * 420 = 147 >= 50 -> owner review.
-        decision, risk = decide(0.65, 420.00)
+        # risk = 0.35 * 700 = 245 >= 200 -> owner review (the high-value tail).
+        decision, risk = decide(0.65, 700.00)
         self.assertEqual(decision, DECISION_ESCALATE)
         self.assertGreaterEqual(risk, ESCALATION_RISK_THRESHOLD)
+
+    def test_mid_risk_defers_after_production_tune(self):
+        # risk = 0.35 * 420 = 147 < 200 -> defers under the tuned threshold
+        # (this exact case escalated under the original RM50).
+        decision, risk = decide(0.65, 420.00)
+        self.assertEqual(decision, DECISION_DEFER)
+        self.assertLess(risk, ESCALATION_RISK_THRESHOLD)
 
     def test_threshold_boundary_escalates(self):
         # Exactly at the threshold escalates (>=), so the conservative tuning
@@ -166,7 +173,7 @@ class DecisionWorkedExamples(unittest.TestCase):
     def test_constants_are_conservative(self):
         # Sanity-pin the exposed knobs so a careless retune is caught in review.
         self.assertEqual(AUTO_RESOLVE_CONF_CUTOFF, 0.90)
-        self.assertEqual(ESCALATION_RISK_THRESHOLD, 50.0)
+        self.assertEqual(ESCALATION_RISK_THRESHOLD, 200.0)
 
 
 # === Part 5: review queue + digest line ======================================
@@ -293,7 +300,7 @@ class ResolveAll(unittest.TestCase):
         self.assertEqual(len(auto), 1)
 
     def test_review_queue_reads_back_escalations_by_rm(self):
-        self._add_receipt(501, "ALPHA UNKNOWN VENDOR ONE", 200.0, "2026-05-21")
+        self._add_receipt(501, "ALPHA UNKNOWN VENDOR ONE", 400.0, "2026-05-21")
         self._add_receipt(502, "BETA UNKNOWN VENDOR TWO", 900.0, "2026-05-21")
         resolve_all(self.db, reconcile_fn=self.reconcile)
         queue = fetch_review_queue(self.db)
