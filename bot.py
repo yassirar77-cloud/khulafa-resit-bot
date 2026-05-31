@@ -36,6 +36,7 @@ from telegram.ext import (
 from audit_messages import build_big_purchase_message
 from config.reviewers import REVIEWER_CHAT_IDS, is_reviewer
 from date_utils import normalize_date
+from image_store import upload_receipt_image
 from image_utils import resize_for_ocr
 from items_utils import normalize_items
 from money_utils import normalize_total
@@ -437,11 +438,14 @@ _outlet_column_available = True
 _verification_columns_available = True
 _bill_to_column_available = True
 _receipt_type_column_available = True
+_image_columns_available = True
+_pending_image_column_available = True
 _VERIFICATION_KEYS = ("verification_status", "verification_notes", "confidence")
+_IMAGE_KEYS = ("photo_file_id", "image_url")
 
 
 def store_receipt(record: dict) -> dict:
-    global _outlet_column_available, _verification_columns_available, _bill_to_column_available, _receipt_type_column_available
+    global _outlet_column_available, _verification_columns_available, _bill_to_column_available, _receipt_type_column_available, _image_columns_available
     payload = dict(record)
     # Postgres' date column rejects human formats like "25/4/26"; coerce to ISO
     # before insert. None passes through (column is nullable).
@@ -459,6 +463,9 @@ def store_receipt(record: dict) -> dict:
         payload.pop("bill_to", None)
     if not _receipt_type_column_available:
         payload.pop("receipt_type", None)
+    if not _image_columns_available:
+        for key in _IMAGE_KEYS:
+            payload.pop(key, None)
     try:
         result = supabase.table(RECEIPTS_TABLE).insert(payload).execute()
     except Exception as exc:
@@ -497,6 +504,16 @@ def store_receipt(record: dict) -> dict:
             )
             _receipt_type_column_available = False
             payload.pop("receipt_type", None)
+            result = supabase.table(RECEIPTS_TABLE).insert(payload).execute()
+        elif any(k in payload for k in _IMAGE_KEYS) and any(k in msg for k in _IMAGE_KEYS):
+            logger.warning(
+                "receipts image columns missing — apply "
+                "migrations/0027_receipt_image_persistence.sql. Saving without "
+                "photo_file_id/image_url for now."
+            )
+            _image_columns_available = False
+            for key in _IMAGE_KEYS:
+                payload.pop(key, None)
             result = supabase.table(RECEIPTS_TABLE).insert(payload).execute()
         else:
             raise
@@ -550,11 +567,29 @@ def store_petty_cash(
 # === PR #29b: low-confidence manual-review queue =============================
 
 def store_pending_review(record: dict) -> dict:
+    global _pending_image_column_available
     payload = dict(record)
     payload["parsed_date"] = normalize_date(payload.get("parsed_date"))
     if payload.get("parsed_total") is not None:
         payload["parsed_total"] = normalize_total(payload.get("parsed_total"))
-    result = supabase.table(PENDING_REVIEW_TABLE).insert(payload).execute()
+    if not _pending_image_column_available:
+        payload.pop("image_url", None)
+    try:
+        result = supabase.table(PENDING_REVIEW_TABLE).insert(payload).execute()
+    except Exception as exc:
+        # Graceful fallback if 0027 hasn't been applied yet — never block the
+        # review queue over the new image_url column.
+        if "image_url" in payload and "image_url" in str(exc).lower():
+            logger.warning(
+                "pending_review.image_url column missing — apply "
+                "migrations/0027_receipt_image_persistence.sql. Queuing without "
+                "image_url for now."
+            )
+            _pending_image_column_available = False
+            payload.pop("image_url", None)
+            result = supabase.table(PENDING_REVIEW_TABLE).insert(payload).execute()
+        else:
+            raise
     return result.data[0] if result.data else record
 
 
@@ -610,6 +645,10 @@ def promote_pending_to_receipt(pending: dict, edits: dict | None = None) -> dict
         "verification_status": "MANUAL_REVIEW",
         "verification_notes": f"approved via review queue (pending #{pending.get('id')})",
         "confidence": pending.get("confidence"),
+        # Carry the image references forward so promoted receipts keep their
+        # photo (previously dropped on promotion).
+        "photo_file_id": pending.get("photo_file_id"),
+        "image_url": pending.get("image_url"),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     return store_receipt(record)
@@ -1106,7 +1145,8 @@ def fetch_recent_pending_reviews(within_hours: int = 24) -> list:
 
 
 async def route_to_review(
-    message, context: ContextTypes.DEFAULT_TYPE, parsed: dict, verification: dict
+    message, context: ContextTypes.DEFAULT_TYPE, parsed: dict, verification: dict,
+    image_url: str | None = None,
 ) -> None:
     confidence = verification.get("confidence")
     # De-dup: if an equivalent receipt is already pending review from the last
@@ -1131,6 +1171,7 @@ async def route_to_review(
         "telegram_message_id": message.message_id,
         "chat_id": message.chat_id,
         "photo_file_id": photo.file_id if photo else None,
+        "image_url": image_url,
         "confidence": confidence,
         "reason": reason,
         "status": "pending",
@@ -1349,6 +1390,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     file = await context.bot.get_file(photo.file_id)
     image_bytes = bytes(await file.download_as_bytearray())
 
+    # Persist the image for every receipt (re-OCR / model comparison / debug).
+    # Capture the Telegram file_id (free fallback reference) and kick off a
+    # best-effort Cloudinary archive of the ORIGINAL full-res bytes (before
+    # resize downscales them) as a background task. It runs concurrently with
+    # OCR — which dominates latency — so archival adds ~nothing to the live
+    # flow, and upload_receipt_image never raises (returns None on failure).
+    photo_file_id = photo.file_id
+    image_upload_task = asyncio.create_task(
+        asyncio.to_thread(upload_receipt_image, image_bytes)
+    )
+
     if IMAGE_RESIZE_ENABLED:
         image_bytes = await asyncio.to_thread(
             resize_for_ocr, image_bytes, IMAGE_MAX_DIM
@@ -1363,6 +1415,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             parsed = await extract_with_glm_chat(image_bytes)
     except Exception:
         logger.exception("OCR failed (provider=%s)", ZAI_OCR_PROVIDER)
+        # Receipt won't be saved, so the archive isn't needed — let the
+        # background upload finish quietly rather than orphaning the task.
+        image_upload_task.cancel()
         await message.reply_text("Failed to read receipt. Try a clearer photo.")
         return
     ocr_latency = time.monotonic() - ocr_start
@@ -1398,6 +1453,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         merchant=parsed.get("merchant"),
     )
 
+    # Collect the background image archive result (started before OCR, so it has
+    # overlapped the slow OCR/verification work). Never let it break the save.
+    try:
+        image_url = await image_upload_task
+    except Exception:
+        logger.warning("Receipt image archive task failed; continuing", exc_info=True)
+        image_url = None
+
     user = update.effective_user
     merchant_raw = parsed.get("merchant")
     record = {
@@ -1417,6 +1480,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "verification_notes": verification["notes"],
         "confidence": verification["confidence"],
         "receipt_type": classification.receipt_type.value,
+        "photo_file_id": photo_file_id,
+        "image_url": image_url,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -1425,7 +1490,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # never reaches `receipts`/`item_prices` and poisons price intelligence.
     # We gate on the stored confidence — the second-pass verifier score.
     if should_queue(verification["confidence"]):
-        await route_to_review(message, context, parsed, verification)
+        await route_to_review(message, context, parsed, verification, image_url=image_url)
         return
 
     try:
