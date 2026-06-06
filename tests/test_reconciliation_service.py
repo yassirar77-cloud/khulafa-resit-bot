@@ -7,6 +7,7 @@ import types
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 
 import reconciliation_service as rs
 
@@ -359,6 +360,137 @@ class OcrDateClampTests(unittest.TestCase):
         row = client.store["purchase_reconciliation"][0]
         self.assertEqual(row["total_receipts"], 0)
         self.assertEqual(row["total_food_purchases"], 0.0)
+
+
+class DryRunTests(unittest.TestCase):
+    """Backfill preview: run_reconciliation(dry_run=True) computes the would-be
+    rows (so sales_total can be eyeballed) but writes nothing."""
+
+    def _seed(self):
+        return {
+            "merchant_canonical": [{"id": 1, "display_name": "BABAS"}],
+            "receipts": [
+                {"id": 1001, "total": 60.0, "merchant": "BABAS PRODUCTS",
+                 "merchant_canonical_id": 1, "outlet": "Vista",
+                 "receipt_date": "2026-05-29", "receipt_type": "SUPPLIER_PURCHASE"},
+            ],
+            "sales_daily_summary": [
+                {"id": 5001, "outlet_canonical": "Vista", "business_date": "2026-05-29",
+                 "day_sales": 600.0},
+            ],
+            "sales_daily_payouts": [
+                {"id": 7001, "summary_id": 5001, "description": "PAY TO BABAS",
+                 "vendor_name": "BABAS", "amount": 60.0},
+            ],
+        }
+
+    def test_dry_run_computes_rows_without_writing(self):
+        client = FakeClient(self._seed())
+        result = rs.run_reconciliation(client, "2026-05-29", dry_run=True)
+        self.assertEqual(result["outlets_processed"], 1)
+        row = result["rows"][0]
+        self.assertEqual(row["outlet_canonical"], "Vista")
+        self.assertEqual(row["sales_total"], 600.0)            # re-pulled from summary
+        self.assertEqual(row["total_food_purchases"], 60.0)
+        self.assertIsNone(row["id"])                            # never persisted
+        # Nothing was written to either destination table.
+        self.assertNotIn("purchase_reconciliation", client.store)
+        self.assertNotIn("purchase_match_log", client.store)
+
+    def test_dry_run_then_apply_writes_same_sales_total(self):
+        client = FakeClient(self._seed())
+        preview = rs.run_reconciliation(client, "2026-05-29", dry_run=True)["rows"][0]
+        applied = rs.run_reconciliation(client, "2026-05-29")["rows"][0]
+        self.assertEqual(preview["sales_total"], applied["sales_total"])
+        self.assertEqual(len(client.store["purchase_reconciliation"]), 1)
+
+
+class BackfillScriptTests(unittest.TestCase):
+    """scripts/backfill_reconciliation.py: re-pull sales_total over a date range."""
+
+    def setUp(self):
+        import backfill_reconciliation
+        self.bf = backfill_reconciliation
+
+    def _seed_stale(self):
+        # A frozen row: sales_total=NULL though the summary now has the sales.
+        return {
+            "merchant_canonical": [{"id": 1, "display_name": "BABAS"}],
+            "receipts": [
+                {"id": 1001, "total": 60.0, "merchant": "BABAS",
+                 "merchant_canonical_id": 1, "outlet": "Vista",
+                 "receipt_date": "2026-06-04", "receipt_type": "SUPPLIER_PURCHASE"},
+            ],
+            "sales_daily_summary": [
+                {"id": 5001, "outlet_canonical": "Vista", "business_date": "2026-06-04",
+                 "day_sales": 15521.50},
+            ],
+            "sales_daily_payouts": [],
+            "purchase_reconciliation": [
+                {"id": 9001, "outlet_canonical": "Vista", "business_date": "2026-06-04",
+                 "sales_total": None, "total_food_purchases": 60.0},
+            ],
+        }
+
+    def test_dry_run_previews_fill_and_writes_nothing(self):
+        client = FakeClient(self._seed_stale())
+        d = self.bf.date(2026, 6, 4)
+        stats = self.bf.backfill(client, d, d, dry_run=True)
+        self.assertEqual(stats["FILLED"], 1)
+        # The stored row is untouched — still NULL after a dry run.
+        self.assertIsNone(client.store["purchase_reconciliation"][0]["sales_total"])
+
+    def test_apply_fills_sales_total(self):
+        client = FakeClient(self._seed_stale())
+        d = self.bf.date(2026, 6, 4)
+        self.bf.backfill(client, d, d, dry_run=False)
+        rows = client.store["purchase_reconciliation"]
+        self.assertEqual(len(rows), 1)                          # UPSERT, not duplicated
+        self.assertEqual(rows[0]["sales_total"], 15521.50)
+
+    def test_apply_creates_missing_outlet_row(self):
+        # An outlet present in the summary but with no prior recon row (the D.U
+        # case) gets a fresh row on apply.
+        seed = self._seed_stale()
+        seed["sales_daily_summary"].append(
+            {"id": 5002, "outlet_canonical": "D.U", "business_date": "2026-06-04",
+             "day_sales": 5302.60})
+        client = FakeClient(seed)
+        d = self.bf.date(2026, 6, 4)
+        self.bf.backfill(client, d, d, dry_run=False)
+        by_outlet = {r["outlet_canonical"]: r for r in client.store["purchase_reconciliation"]}
+        self.assertIn("D.U", by_outlet)
+        self.assertEqual(by_outlet["D.U"]["sales_total"], 5302.60)
+
+
+class ReconcileWindowTests(unittest.TestCase):
+    """Part 2 (Option A): the nightly pre-digest refresh covers the full
+    food-cost rolling window, not just today + yesterday."""
+
+    def test_reconcile_before_digest_covers_full_rolling_window(self):
+        import datetime as _dt
+
+        import digest_data
+        import send_daily_digest as sdd
+
+        captured = {}
+
+        def _fake(_client, dates, **_kw):
+            captured["dates"] = list(dates)
+            return [{"business_date": d, "outlets_processed": 0} for d in dates]
+
+        orig = sdd.reconciliation_service.run_reconciliation_for_dates
+        sdd.reconciliation_service.run_reconciliation_for_dates = _fake
+        try:
+            now_my = _dt.datetime(2026, 6, 6, 23, 0, tzinfo=digest_data.MALAYSIA_TZ)
+            sdd._reconcile_before_digest(object(), now_my)
+        finally:
+            sdd.reconciliation_service.run_reconciliation_for_dates = orig
+
+        self.assertEqual(len(captured["dates"]), digest_data.FOOD_COST_LOOKBACK_DAYS)
+        self.assertEqual(captured["dates"][0], "2026-06-06")     # today first
+        self.assertEqual(captured["dates"][-1], "2026-05-31")    # 7th day back
+        self.assertEqual(len(set(captured["dates"])), len(captured["dates"]))  # distinct
 
 
 class BotWiring(unittest.TestCase):

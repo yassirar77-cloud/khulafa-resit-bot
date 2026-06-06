@@ -30,7 +30,12 @@ from datetime import timedelta  # noqa: E402
 
 import merchant_auto_resolve  # noqa: E402
 from digest import build_digest_messages, parse_mode_attempts  # noqa: E402
-from digest_data import MALAYSIA_TZ, gather_digest_data, log_digest  # noqa: E402
+from digest_data import (  # noqa: E402
+    FOOD_COST_LOOKBACK_DAYS,
+    MALAYSIA_TZ,
+    gather_digest_data,
+    log_digest,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("send_daily_digest")
@@ -163,11 +168,17 @@ def main() -> None:
 
 
 def _reconcile_before_digest(client, now_my) -> None:
-    """Refresh purchase_reconciliation for today + yesterday so the digest's
-    food-cost sections are current. Best-effort: a failure must not block the
-    digest itself."""
+    """Refresh purchase_reconciliation across the full food-cost rolling window
+    so the digest's food-cost sections are current. Best-effort: a failure must
+    not block the digest itself.
+
+    The window matches FOOD_COST_LOOKBACK_DAYS (the rolling read), not just
+    today + yesterday: a day's sales D-file (sales_daily_summary) lands the next
+    morning, so a 2-day window froze older days at sales_total=NULL once they
+    aged past 'yesterday'. Re-running the whole window every night re-pulls
+    sales_total from sales_daily_summary for every day still on screen."""
     today = now_my.date()
-    dates = [today.isoformat(), (today - timedelta(days=1)).isoformat()]
+    dates = [(today - timedelta(days=i)).isoformat() for i in range(FOOD_COST_LOOKBACK_DAYS)]
     try:
         results = reconciliation_service.run_reconciliation_for_dates(client, dates)
         logger.info(
