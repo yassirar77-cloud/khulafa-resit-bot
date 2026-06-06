@@ -220,11 +220,20 @@ def _payouts_by_outlet(summaries, payout_rows) -> dict:
 
 
 def reconcile_outlet(client, outlet, business_date, receipts, payouts,
-                     canonical_names, sales_total):
+                     canonical_names, sales_total, *, dry_run=False):
     """Run the pure matcher for one outlet/date and persist the result.
-    Returns the stored purchase_reconciliation row dict (with id)."""
+    Returns the stored purchase_reconciliation row dict (with id).
+
+    ``dry_run``: compute the row exactly as a real run would (same matcher, same
+    ``summarize``) but write nothing — no UPSERT, no match-log rewrite. Returns
+    the would-be row with ``id=None`` so a caller can preview sales_total etc."""
     result = pr.match_receipts_to_payouts(receipts, payouts, canonical_names)
     row = pr.summarize(result, outlet, business_date, sales_total=sales_total)
+
+    if dry_run:
+        preview = dict(row)
+        preview["id"] = None
+        return preview
 
     upserted = _rows(
         client.table(RECONCILIATION_TABLE)
@@ -270,9 +279,13 @@ def _insert_match_log(client, log_rows) -> None:
             logger.warning("reconcile: could not write purchase_match_log", exc_info=True)
 
 
-def run_reconciliation(client, business_date) -> dict:
+def run_reconciliation(client, business_date, *, dry_run=False) -> dict:
     """Reconcile every outlet that has sales or receipts on ``business_date``.
-    Returns {outlets_processed, business_date, rows}."""
+    Returns {outlets_processed, business_date, rows}.
+
+    ``dry_run`` flows through to ``reconcile_outlet``: the rows are computed (so
+    the caller can preview the would-be sales_total / purchases) but nothing is
+    written."""
     canonical_by_id = _load_canonical_merchants(client)
     canonical_names = [n for n in canonical_by_id.values() if n]
 
@@ -298,6 +311,7 @@ def run_reconciliation(client, business_date) -> dict:
                 payouts_by_outlet.get(outlet, []),
                 canonical_names,
                 sales_by_outlet.get(outlet),
+                dry_run=dry_run,
             )
             stored_rows.append(stored)
         except Exception:
@@ -310,5 +324,5 @@ def run_reconciliation(client, business_date) -> dict:
     }
 
 
-def run_reconciliation_for_dates(client, business_dates) -> list[dict]:
-    return [run_reconciliation(client, d) for d in business_dates]
+def run_reconciliation_for_dates(client, business_dates, *, dry_run=False) -> list[dict]:
+    return [run_reconciliation(client, d, dry_run=dry_run) for d in business_dates]
