@@ -25,6 +25,7 @@ class _Query:
         self._filters: list[tuple[str, object]] = []
         self._null_cols: list[str] = []
         self._in_filters: list[tuple[str, set]] = []
+        self._range_filters: list[tuple[str, str, object]] = []
         self._order: tuple[str, bool] | None = None
         self._limit = None
 
@@ -60,6 +61,22 @@ class _Query:
         self._in_filters.append((col, set(vals)))
         return self
 
+    def gte(self, col, val):
+        self._range_filters.append((col, ">=", val))
+        return self
+
+    def lte(self, col, val):
+        self._range_filters.append((col, "<=", val))
+        return self
+
+    def gt(self, col, val):
+        self._range_filters.append((col, ">", val))
+        return self
+
+    def lt(self, col, val):
+        self._range_filters.append((col, "<", val))
+        return self
+
     def order(self, col, desc=False):
         self._order = (col, desc)
         return self
@@ -74,7 +91,22 @@ class _Query:
             all(row.get(c) == v for c, v in self._filters)
             and all(row.get(c) is None for c in self._null_cols)
             and all(row.get(c) in vals for c, vals in self._in_filters)
+            and all(self._cmp(row.get(c), op, v) for c, op, v in self._range_filters)
         )
+
+    @staticmethod
+    def _cmp(actual, op, val):
+        if actual is None:
+            return False
+        if op == ">=":
+            return actual >= val
+        if op == "<=":
+            return actual <= val
+        if op == ">":
+            return actual > val
+        if op == "<":
+            return actual < val
+        return False
 
     def execute(self):
         rows = self._store.setdefault(self._table, [])
