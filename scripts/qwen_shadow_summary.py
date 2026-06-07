@@ -22,7 +22,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import ocr_shadow_fields  # noqa: E402
+
 COMPARISON_TABLE = "ocr_shadow_comparison"
+SHADOW_LOG_TABLE = "ocr_shadow_log"
 
 
 def _to_float(v):
@@ -111,6 +114,33 @@ def format_summary(s: dict) -> str:
     return "\n".join(lines)
 
 
+def _pct(x):
+    return "  —  " if x is None else f"{x * 100:5.1f}%"
+
+
+def format_field_summary(s: dict) -> str:
+    """Per-field (item/qty/unit/price) match rates + the switch decision."""
+    lines = [
+        "",
+        "Qwen vs GLM — ordering-field accuracy (item / qty / unit / price)",
+        "=" * 64,
+        f"field rows logged: {s['rows']}   manual spot-checks: {s['manual_checked']}",
+        "",
+        f"  {'field':<6} {'agree(GLM=Qwen)':>16} {'GLM✓manual':>12} {'Qwen✓manual':>12}",
+    ]
+    for f in ocr_shadow_fields.FIELDS:
+        pf = s["per_field"][f]
+        lines.append(
+            f"  {f:<6} {_pct(pf['agreement_rate']):>16} "
+            f"{_pct(pf['glm_accuracy']):>12} {_pct(pf['qwen_accuracy']):>12}")
+    lines += [
+        "",
+        f"VERDICT: {s['verdict']} — {s['decision']}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def _build_client():
     from supabase import create_client
 
@@ -126,10 +156,17 @@ def main() -> None:
         "--tolerance", type=float, default=0.01,
         help="absolute total difference treated as agreement (default 0.01)",
     )
+    parser.add_argument(
+        "--fields", action="store_true",
+        help="also report per-field (item/qty/unit/price) accuracy from ocr_shadow_log",
+    )
     args = parser.parse_args()
     client = _build_client()
     rows = client.table(COMPARISON_TABLE).select("*").execute().data or []
     print(format_summary(summarize(rows, top=args.top, tolerance=args.tolerance)))
+    if args.fields:
+        field_rows = client.table(SHADOW_LOG_TABLE).select("*").execute().data or []
+        print(format_field_summary(ocr_shadow_fields.score(field_rows)))
 
 
 if __name__ == "__main__":

@@ -39,6 +39,7 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import ocr_shadow_fields  # noqa: E402
 from image_utils import resize_for_ocr  # noqa: E402
 from qwen_ocr_shadow import extract_with_qwen_ocr, shadow_enabled  # noqa: E402
 
@@ -48,7 +49,8 @@ logger = logging.getLogger("qwen_shadow_backfill")
 RECEIPTS_TABLE = "receipts"
 PENDING_TABLE = "pending_review"
 COMPARISON_TABLE = "ocr_shadow_comparison"
-SELECT_COLUMNS = "id, total, confidence, receipt_date, raw_text, chat_id, message_id"
+SHADOW_LOG_TABLE = "ocr_shadow_log"
+SELECT_COLUMNS = "id, total, confidence, receipt_date, raw_text, chat_id, message_id, items"
 
 OUTLIER_TOTAL = 5000          # RM/Sen split-column misreads land far above this
 FUTURE_GRACE_DAYS = 7
@@ -242,6 +244,16 @@ def run(client, *, limit: int, dry_run: bool, token_budget: int) -> dict:
             # Most likely the unique index rejecting a concurrent dup.
             logger.warning("receipt %s: comparison insert failed", rid, exc_info=True)
             continue
+        # Field-by-field log on the four ordering-critical fields (item / qty /
+        # unit / price). Best-effort: a logging hiccup must not abort the run.
+        try:
+            field_rows = ocr_shadow_fields.field_rows(
+                rid, receipt.get("items") or [], qwen.get("items") or [])
+            if field_rows:
+                client.table(SHADOW_LOG_TABLE).insert(field_rows).execute()
+        except Exception:
+            logger.warning("receipt %s: shadow field log failed", rid, exc_info=True)
+
         done.add(rid)
         processed += 1
         stats["compared"] += 1

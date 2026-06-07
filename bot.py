@@ -98,6 +98,7 @@ import analytics
 import digest
 import food_cost_analytics
 import manager_registration
+import order_generator
 import reconciliation_service
 import sales_analytics
 import weekly_manager_reports as wmr
@@ -1772,7 +1773,10 @@ HELP_TEXT = (
     "Weekly manager reports:\n"
     "/gen_codes — generate one-time outlet registration codes\n"
     "/register <CODE> — register as an outlet's manager\n"
-    "/weekly_report_now [recent | YYYY-MM-DD] — preview the weekly report"
+    "/weekly_report_now [recent | YYYY-MM-DD] — preview the weekly report\n"
+    "\n"
+    "Order drafts:\n"
+    "/order_drafts_now — preview tomorrow's per-outlet order drafts"
 )
 
 
@@ -4006,6 +4010,130 @@ async def weekly_report_now_command(update: Update, context: ContextTypes.DEFAUL
     )
 
 
+# === Auto order-list generator (Phase 1) ====================================
+# Evening (default 20:00 MY) per-outlet purchase-order drafts. Delivery reuses
+# the weekly-report safety gate: while MANAGER_DELIVERY_ENABLED is False every
+# draft routes to the owner with a [TEST] prefix; the owner always gets the HQ
+# summary. Nothing is ever auto-sent to a supplier — managers review & edit, the
+# office boy forwards. See order_generator / order_cadence / order_draft.
+
+def _gather_order_drafts(today=None) -> dict:
+    """Build every per-outlet order draft + an HQ summary for the owner.
+
+    Reuses the live outlet registry (outlet_canonical) for display names and
+    outlet_managers for routing, and the same route_message / delivery_enabled
+    gate as the weekly report. No Telegram I/O here — that stays in the job."""
+    today = today or _my_today()
+    outlets = manager_registration.load_active_outlets(supabase)
+    managers = manager_registration.get_all_managers(supabase)
+    display_by_code = {o.code: o.display for o in outlets}
+    enabled = wmr.delivery_enabled()
+
+    bundle = order_generator.gather_order_drafts(
+        supabase, today=today,
+        display_for=lambda code: display_by_code.get(code, code),
+    )
+
+    messages: list[dict] = []
+    hq_rows: list[dict] = []
+    for o in bundle["outlets"]:
+        code = o["outlet_code"]
+        mgr = managers.get(code)
+        decision = wmr.route_message(
+            enabled, o["display"],
+            mgr.get("chat_id") if mgr else None,
+            ALERT_CHAT_ID,
+        )
+        messages.append({
+            "target": decision.target_chat_id,
+            "text": decision.prefix + o["message"],
+            "outlet": code,
+        })
+        hq_rows.append({
+            "display": o["display"],
+            "lines": o["line_count"],
+            "review": o["review_count"],
+            "route_reason": decision.reason,
+            "manager_name": mgr.get("manager_name") if mgr else None,
+        })
+
+    mode = (
+        "🟢 LIVE — drafts delivered to registered managers"
+        if enabled else
+        "🧪 TEST MODE — every draft above was sent to you, NOT to managers"
+    )
+    hq_lines = [
+        f"🧾 HQ Order-Draft Summary — for {bundle['target_day'].isoformat()}",
+        "",
+    ]
+    if hq_rows:
+        for r in hq_rows:
+            if r["route_reason"] == "manager":
+                who = f"→ {r['manager_name'] or 'manager'}"
+            elif r["route_reason"] == "no_manager":
+                who = "→ (no manager registered)"
+            else:
+                who = "→ you (test)"
+            flag = f"  ⚠️{r['review']} review" if r["review"] else ""
+            hq_lines.append(f"{r['display']:<12} {r['lines']} item(s){flag}  {who}")
+    else:
+        hq_lines.append("No outlets had items due tomorrow.")
+    hq_lines += ["", mode]
+
+    return {
+        "target_day": bundle["target_day"],
+        "messages": messages,
+        "hq_summary": "\n".join(hq_lines),
+        "enabled": enabled,
+        "has_data": bundle["has_data"],
+    }
+
+
+async def post_order_drafts(application: Application, *, notify_chat_id=None) -> None:
+    """Evening job: build and route per-outlet order drafts, then send the owner
+    the HQ summary. Delivery is gated by MANAGER_DELIVERY_ENABLED (default off)."""
+    try:
+        bundle = await asyncio.to_thread(_gather_order_drafts)
+    except Exception:
+        logger.exception("order drafts: gather failed")
+        if notify_chat_id is not None:
+            with contextlib.suppress(Exception):
+                await application.bot.send_message(
+                    chat_id=notify_chat_id, text="Failed to build the order drafts.")
+        return
+
+    if not bundle["has_data"]:
+        note = ("📭 No purchase history in the lookback window — no order drafts "
+                "to build yet.")
+        for chat in {ALERT_CHAT_ID, notify_chat_id} - {None}:
+            with contextlib.suppress(Exception):
+                await application.bot.send_message(chat_id=chat, text=note)
+        return
+
+    sent = 0
+    for msg in bundle["messages"]:
+        try:
+            await application.bot.send_message(chat_id=msg["target"], text=msg["text"])
+            sent += 1
+        except Exception:
+            logger.exception("order drafts: send failed for %s", msg.get("outlet"))
+    try:
+        await application.bot.send_message(chat_id=ALERT_CHAT_ID, text=bundle["hq_summary"])
+    except Exception:
+        logger.exception("order drafts: HQ summary send failed")
+    logger.info("Order drafts posted (%d outlet messages, delivery_enabled=%s)",
+                sent, bundle["enabled"])
+
+
+async def order_drafts_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only: build the order drafts on demand (for testing the evening job)."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    await message.reply_text("Building order drafts…")
+    await post_order_drafts(context.application, notify_chat_id=_command_owner_id(update))
+
+
 async def top_items_sold_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message or not is_reviewer(_command_owner_id(update)):
@@ -4204,6 +4332,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("gen_codes", gen_codes_command))
     app.add_handler(CommandHandler("register", register_command))
     app.add_handler(CommandHandler("weekly_report_now", weekly_report_now_command))
+    app.add_handler(CommandHandler("order_drafts_now", order_drafts_now_command))
     app.add_handler(CommandHandler("cash_no_receipt_today", cash_no_receipt_today_command))
     app.add_handler(CommandHandler("reconcile_now", reconcile_now_command))
     app.add_handler(CommandHandler("reconcile_date", reconcile_date_command))
@@ -4277,6 +4406,20 @@ async def run_bot() -> None:
         minute=0,
         args=[app],
         id="weekly_manager_reports",
+        replace_existing=True,
+    )
+    # Auto order-list generator — evening per-outlet purchase-order drafts
+    # (default 20:00 MY, ahead of the 23:00 digest so it isn't buried). Gated by
+    # MANAGER_DELIVERY_ENABLED: until the owner flips it, every draft routes to
+    # the owner with a [TEST] prefix. Never auto-sends to suppliers.
+    _order_draft_hour = order_generator.send_hour()
+    scheduler.add_job(
+        post_order_drafts,
+        trigger="cron",
+        hour=_order_draft_hour,
+        minute=0,
+        args=[app],
+        id="order_drafts",
         replace_existing=True,
     )
 
