@@ -114,5 +114,93 @@ class FormatTests(unittest.TestCase):
         self.assertIn("Tiada item due", msg)
 
 
+class ChunkingTests(unittest.TestCase):
+    """build_outlet_messages: stay under the 4096 cap, never split an item."""
+
+    def setUp(self):
+        self.today = date(2026, 6, 7)
+        self.tomorrow = self.today + timedelta(days=1)
+
+    def _lines(self, n, *, supplier="BESTARI FARM"):
+        # Reasoning-rich lines (each has a "↳ last bought" sub-line) so the full
+        # form is large — the worst case for the 4096 cap.
+        return [{
+            "canonical_item": "ayam", "qty": 12, "pack": "kg", "pack_known": False,
+            "cadence_info": {"cadence": oc.DAILY, "needs_review": False,
+                             "last_purchase_date": self.today, "median_gap_days": 1.0,
+                             "reason": "daily"},
+            "due_info": {"due": True, "reason": "daily item"},
+            "supplier": "%s %d" % (supplier, i % 5),  # a few suppliers, so groups span chunks
+            "alternate": None, "spike": None,
+        } for i in range(n)]
+
+    def test_small_outlet_single_chunk(self):
+        msgs = order_draft.build_outlet_messages("SEK-20", self.tomorrow, self._lines(3))
+        self.assertEqual(len(msgs), 1)
+        self.assertNotIn("sambungan", msgs[0])
+        self.assertIn("SEK-20", msgs[0])
+
+    def test_empty_is_single_note(self):
+        msgs = order_draft.build_outlet_messages("SEK-20", self.tomorrow, [])
+        self.assertEqual(len(msgs), 1)
+        self.assertIn("Tiada item due", msgs[0])
+
+    def test_oversized_full_form_splits_under_limit(self):
+        # The full (reasoning-rich) form splits into multiple chunks, each <=
+        # limit. Tested on _pack_messages directly so condensation doesn't mask
+        # the multi-chunk path. 200 items would otherwise be one giant string.
+        limit = 3500
+        msgs = order_draft._pack_messages("SEK-20", self.tomorrow,
+                                          self._lines(200), limit=limit, compact=False)
+        self.assertGreater(len(msgs), 2)
+        for m in msgs:
+            self.assertLessEqual(len(m), limit, "a chunk exceeded the safety limit")
+
+    def test_no_item_split_across_chunks(self):
+        msgs = order_draft._pack_messages("SEK-20", self.tomorrow,
+                                          self._lines(200), limit=3500, compact=False)
+        for m in msgs:
+            seen_head = False
+            for ln in m.split("\n"):
+                # An indented continuation line ("   ↳ ...") must be preceded by
+                # its "• ..." head WITHIN the same chunk — never orphaned.
+                if ln.startswith("   "):
+                    self.assertTrue(seen_head,
+                                    "continuation line orphaned from its item head")
+                if ln.startswith("• "):
+                    seen_head = True
+
+    def test_all_items_preserved(self):
+        lines = self._lines(200)
+        msgs = order_draft._pack_messages("SEK-20", self.tomorrow, lines,
+                                          limit=3500, compact=False)
+        total_heads = sum(m.count("• ") for m in msgs)
+        self.assertEqual(total_heads, len(lines))
+
+    def test_two_chunk_full_form_not_condensed(self):
+        # An outlet whose full draft fits in exactly two chunks keeps its full
+        # reasoning (condensation only kicks in beyond two chunks).
+        msgs = order_draft.build_outlet_messages("SEK-20", self.tomorrow,
+                                                 self._lines(30), limit=3800)
+        self.assertEqual(len(msgs), 2)
+        self.assertIn("↳ last bought", "\n".join(msgs))
+        for m in msgs:
+            self.assertLessEqual(len(m), 3800)
+
+    def test_condensation_kicks_in_when_over_two_chunks(self):
+        # Many reasoning-rich lines -> full form needs >2 chunks -> compact form.
+        lines = self._lines(120)
+        msgs = order_draft.build_outlet_messages("SEK-20", self.tomorrow, lines, limit=3800)
+        joined = "\n".join(msgs)
+        # Compact form drops the multi-line reasoning entirely...
+        self.assertNotIn("↳ last bought", joined)
+        # ...keeps one head per item...
+        self.assertEqual(sum(m.count("• ") for m in msgs), len(lines))
+        # ...and is far more compact than the full form would have been.
+        full = order_draft._pack_messages("SEK-20", self.tomorrow, lines,
+                                          limit=3500, compact=False)
+        self.assertLess(len(msgs), len(full))
+
+
 if __name__ == "__main__":
     unittest.main()
