@@ -26,6 +26,12 @@ class OrderDraftsWiring(unittest.TestCase):
         # The old single unbounded send must be gone.
         self.assertNotIn('"text": decision.prefix + o["message"],', self.src)
 
+    def test_outlet_display_falls_back_to_alias(self):
+        # The header resolves the live registry name first, then the internal
+        # code alias (so "D" -> "D.U"), never a bare code.
+        self.assertIn("outlet_mapping.outlet_display_name(code)", self.src)
+        self.assertIn("display_by_code.get(code)", self.src)
+
     def test_gather_failure_alerts_owner(self):
         # A build crash notifies ALERT_CHAT_ID (not only notify_chat_id) — the
         # silent-cron bug. failure_alert builds the text.

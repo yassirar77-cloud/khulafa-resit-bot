@@ -4023,15 +4023,20 @@ def _gather_order_drafts(today=None) -> dict:
     Reuses the live outlet registry (outlet_canonical) for display names and
     outlet_managers for routing, and the same route_message / delivery_enabled
     gate as the weekly report. No Telegram I/O here — that stays in the job."""
+    import outlet_mapping
+
     today = today or _my_today()
     outlets = manager_registration.load_active_outlets(supabase)
     managers = manager_registration.get_all_managers(supabase)
     display_by_code = {o.code: o.display for o in outlets}
     enabled = wmr.delivery_enabled()
 
+    # Prefer the live registry name; fall back to the internal-code display map
+    # (so item_prices codes like "D" render as "D.U", never a bare letter).
     bundle = order_generator.gather_order_drafts(
         supabase, today=today,
-        display_for=lambda code: display_by_code.get(code, code),
+        display_for=lambda code: display_by_code.get(code)
+        or outlet_mapping.outlet_display_name(code),
     )
 
     messages: list[dict] = []

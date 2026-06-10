@@ -53,6 +53,34 @@ class ClassifyTests(unittest.TestCase):
         # Whatever the band, the noisy gaps must trip the review flag.
         self.assertTrue(info["needs_review"])
 
+
+class StalenessTests(unittest.TestCase):
+    """A tidy historical rhythm must NOT assert a cadence once it goes silent."""
+
+    def setUp(self):
+        self.today = date(2026, 6, 7)
+
+    def test_daily_gone_silent_is_downgraded(self):
+        # 15 daily buys, then nothing for 20 days — rhythm broken.
+        dates = _series(self.today - timedelta(days=34), 1, 15)  # last = today-20
+        info = oc.detect_cadence(dates, today=self.today)
+        self.assertEqual(info["cadence"], oc.NEEDS_REVIEW)
+        self.assertTrue(info["needs_review"])
+        self.assertIn("rhythm broken", info["reason"])
+
+    def test_recent_daily_stays_daily(self):
+        dates = _series(self.today - timedelta(days=14), 1, 15)  # last = today
+        info = oc.detect_cadence(dates, today=self.today)
+        self.assertEqual(info["cadence"], oc.DAILY)
+        self.assertFalse(info["needs_review"])
+
+    def test_weekly_silent_two_months_downgraded(self):
+        # Weekly for 8 weeks, but last buy was ~8 weeks ago (> 3 × 7 days).
+        dates = _series(self.today - timedelta(days=112), 7, 8)  # last = today-63
+        info = oc.detect_cadence(dates, today=self.today)
+        self.assertEqual(info["cadence"], oc.NEEDS_REVIEW)
+        self.assertTrue(info["needs_review"])
+
     def test_single_purchase_needs_review(self):
         info = oc.detect_cadence([self.today - timedelta(days=3)], today=self.today)
         self.assertEqual(info["cadence"], oc.NEEDS_REVIEW)
