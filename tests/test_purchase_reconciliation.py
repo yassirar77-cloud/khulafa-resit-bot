@@ -36,6 +36,23 @@ class PrefixAndClassification(unittest.TestCase):
         self.assertFalse(pr.is_staff_advance("PAY TO BABAS"))
         self.assertFalse(pr.is_staff_advance(""))
 
+    def test_pinjam_loan_is_staff_advance(self):
+        # "pinjam" (Malay: loan) and the noun "pinjaman" are staff cash loans.
+        self.assertTrue(pr.is_staff_advance("PINJAM TO B ALAM pai cash"))
+        self.assertTrue(pr.is_staff_advance("PINJAM TO NATARAJAN pai cash"))
+        self.assertTrue(pr.is_staff_advance("PAY TO PINJAMAN STAFF"))
+        # "pai cash" alone is just a cash-payment method, NOT a loan signal — a
+        # genuine supplier paid in cash must stay food cost.
+        self.assertFalse(pr.is_staff_advance("PAY TO BABAS pai cash"))
+
+    def test_non_pay_detection(self):
+        self.assertTrue(pr.is_non_pay("NON_PAY TO MEWAH DAIRIES OKI SUSU"))
+        self.assertTrue(pr.is_non_pay("NON-PAY TO X"))
+        self.assertTrue(pr.is_non_pay("NONPAY TO Y"))
+        self.assertFalse(pr.is_non_pay("PAY TO BABAS"))
+        self.assertFalse(pr.is_non_pay(""))
+        self.assertFalse(pr.is_non_pay(None))
+
     def test_utility_detection(self):
         self.assertTrue(pr.is_utility("PAY TO GAS"))
         self.assertTrue(pr.is_utility("PAY TO TNB"))
@@ -256,6 +273,7 @@ class TypeClassification(unittest.TestCase):
             _p("PAY TO EVEREST", 80.0, pid=11),     # Type B (cash no receipt)
             _p("PAY [LP] KARUNGARAJ", 300.0, pid=12),  # Type D
             _p("PAY TO GAS", 250.0, pid=13),        # Type E
+            _p("NON_PAY TO KACHANG", 90.0, pid=14),  # Type F (recorded, not paid)
         ]
         return pr.match_receipts_to_payouts(receipts, payouts, CANONICAL)
 
@@ -266,14 +284,60 @@ class TypeClassification(unittest.TestCase):
         self.assertEqual(len(res.account_only_receipts), 1)  # C
         self.assertEqual(len(res.excluded_staff), 1)        # D
         self.assertEqual(len(res.excluded_utility), 1)      # E
+        self.assertEqual(len(res.excluded_non_pay), 1)      # F
 
     def test_match_log_has_all_type_codes(self):
         rows = pr.build_match_log(self._result())
         types = {r["match_type"] for r in rows}
         self.assertEqual(types, {
             "A_matched", "B_cash_no_receipt", "C_account_only",
-            "D_excluded_staff", "E_excluded_utility",
+            "D_excluded_staff", "E_excluded_utility", "F_excluded_non_pay",
         })
+
+
+class DamansaraUptownJune4Regression(unittest.TestCase):
+    """The real D.U / 2026-06-04 lines that surfaced the bug: RM14,576 of
+    "food" was 10 cash_no_receipt payouts dominated by 3 PINJAM staff loans and
+    1 NON_PAY dairy line that should never have counted. After the classifier
+    fix total_food_purchases must drop to RM6,583.50."""
+
+    def _run(self):
+        # Only the one real D.U receipt that day (FOOK LEONG, no canonical).
+        receipts = [_r(158.0, merchant="FOOK LEONG SEA PRODUCTS SDN BHD", rid=2707)]
+        payouts = [
+            _p("PAY TO BALAJI BILL", 5572.00, pid=984),
+            _p("NON_PAY TO MEWAH DAIRIES OKI SUSU", 4342.50, pid=983),
+            _p("PINJAM TO B ALAM pai cash", 3000.00, pid=985),
+            _p("PINJAM TO NATARAJAN pai cash", 500.00, pid=986),
+            _p("PAY TO AYAM BESTARI", 492.00, pid=987),
+            _p("PAY TO EXTRA JUSS", 185.00, pid=989),
+            _p("PAY TO GAS", 175.00, pid=988),
+            _p("PINJAM TO PARANJOTHI", 150.00, pid=995),
+            _p("PAY [SALARY] TO KALEEL", 120.00, pid=994),
+            _p("PAY TO MINI MART", 102.00, pid=991),
+            _p("PAY TO AIS", 57.50, pid=990),
+            _p("PAY [LEAVE PAY] TO SITHIK ALI", 25.00, pid=992),
+            _p("PAY [LEAVE PAY] TO KALEEL", 20.00, pid=993),
+            _p("PAY TO KELAPA", 17.00, pid=996),
+        ]
+        return pr.match_receipts_to_payouts(receipts, payouts, CANONICAL)
+
+    def test_pinjam_and_non_pay_now_excluded(self):
+        res = self._run()
+        non_pay_amounts = {p.amount for p in res.excluded_non_pay}
+        staff_amounts = {p.amount for p in res.excluded_staff}
+        self.assertEqual(non_pay_amounts, {4342.50})            # MEWAH dairy
+        self.assertIn(3000.00, staff_amounts)                   # PINJAM B ALAM
+        self.assertIn(500.00, staff_amounts)                    # PINJAM NATARAJAN
+        self.assertIn(150.00, staff_amounts)                    # PINJAM PARANJOTHI
+        self.assertEqual({p.amount for p in res.excluded_utility}, {175.00})  # GAS
+        # BALAJI BILL is a genuine supplier bill — still food (cash_no_receipt).
+        self.assertIn(5572.00, {p.amount for p in res.cash_no_receipt})
+
+    def test_total_food_purchases_drops_to_expected(self):
+        res = self._run()
+        row = pr.summarize(res, "D.U", "2026-06-04", sales_total=None)
+        self.assertEqual(row["total_food_purchases"], 6583.50)
 
 
 class FoodCostPercent(unittest.TestCase):
