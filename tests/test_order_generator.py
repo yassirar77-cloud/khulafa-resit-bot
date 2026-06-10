@@ -92,6 +92,39 @@ class GeneratorTests(unittest.TestCase):
         recs = ([{"merchant": "A"}] * 3) + ([{"merchant": "B"}] * 5)
         self.assertEqual(order_generator.dominant_supplier(recs), "B")
 
+    def test_outlet_exposes_messages_list(self):
+        _seed_item_prices(self.fake, self._daily_ayam())
+        out = order_generator.gather_order_drafts(self.fake, today=self.today)
+        o = out["outlets"][0]
+        self.assertIsInstance(o["messages"], list)
+        self.assertTrue(o["messages"])
+        self.assertTrue(all(isinstance(m, str) and m for m in o["messages"]))
+
+
+class FailureAlertTests(unittest.TestCase):
+    """failure_alert: the evening job must never fail silently again."""
+
+    def test_gather_error_short_circuits(self):
+        alert = order_generator.failure_alert(gather_error="KeyError")
+        self.assertIsNotNone(alert)
+        self.assertIn("KeyError", alert)
+        self.assertIn("build failed", alert)
+
+    def test_partial_send_failures_reported(self):
+        alert = order_generator.failure_alert(total_messages=5, failed_messages=2)
+        self.assertIsNotNone(alert)
+        self.assertIn("2/5", alert)
+
+    def test_hq_failure_reported(self):
+        alert = order_generator.failure_alert(hq_failed=True)
+        self.assertIsNotNone(alert)
+        self.assertIn("HQ", alert)
+
+    def test_clean_run_returns_none(self):
+        self.assertIsNone(
+            order_generator.failure_alert(total_messages=5, failed_messages=0))
+        self.assertIsNone(order_generator.failure_alert())
+
 
 if __name__ == "__main__":
     unittest.main()

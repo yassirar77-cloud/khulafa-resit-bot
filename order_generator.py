@@ -62,6 +62,28 @@ def send_hour() -> int:
         return DEFAULT_SEND_HOUR
 
 
+def failure_alert(*, gather_error: str | None = None, total_messages: int = 0,
+                  failed_messages: int = 0, hq_failed: bool = False) -> str | None:
+    """Owner-facing alert text when an evening order-draft run had ANY failure,
+    else ``None``. Pure so the evening job can never fail silently again: bot.py
+    sends the returned string to the owner (ALERT_CHAT_ID).
+
+    ``gather_error`` short-circuits — a build crash means nothing was sent at all.
+    Otherwise it reports partial send failures and/or a missing HQ summary.
+    """
+    if gather_error:
+        return "⚠️ Order drafts: build failed (%s) — no drafts sent tonight." % gather_error
+    problems: list[str] = []
+    if failed_messages:
+        problems.append("%d/%d draft message(s) failed to send"
+                        % (failed_messages, total_messages))
+    if hq_failed:
+        problems.append("HQ summary failed to send")
+    if not problems:
+        return None
+    return "⚠️ Order drafts: " + "; ".join(problems) + "."
+
+
 # --- fetch + group (DB) ------------------------------------------------------
 
 def fetch_item_price_rows(supabase, *, today: date, lookback: int) -> list[dict]:
@@ -290,13 +312,17 @@ def gather_order_drafts(supabase, *, today: date | None = None,
         if not lines:
             continue
         display = display_for(outlet_code)
+        # ``message`` is the full unbounded draft (debugging / back-compat);
+        # ``messages`` is the Telegram-safe split that delivery actually sends.
         message = order_draft.build_outlet_message(display, target_day, lines)
+        messages = order_draft.build_outlet_messages(display, target_day, lines)
         if persist:
             persist_drafts(supabase, outlet_code, target_day, lines)
         outlets_out.append({
             "outlet_code": outlet_code,
             "display": display,
             "message": message,
+            "messages": messages,
             "line_count": len(lines),
             "review_count": sum(1 for ln in lines
                                 if ln["cadence_info"].get("needs_review")),

@@ -4044,11 +4044,13 @@ def _gather_order_drafts(today=None) -> dict:
             mgr.get("chat_id") if mgr else None,
             ALERT_CHAT_ID,
         )
-        messages.append({
-            "target": decision.target_chat_id,
-            "text": decision.prefix + o["message"],
-            "outlet": code,
-        })
+        # One per Telegram-safe chunk; the routing prefix rides on the first.
+        for i, chunk in enumerate(o["messages"]):
+            messages.append({
+                "target": decision.target_chat_id,
+                "text": (decision.prefix + chunk) if i == 0 else chunk,
+                "outlet": code,
+            })
         hq_rows.append({
             "display": o["display"],
             "lines": o["line_count"],
@@ -4094,12 +4096,13 @@ async def post_order_drafts(application: Application, *, notify_chat_id=None) ->
     the HQ summary. Delivery is gated by MANAGER_DELIVERY_ENABLED (default off)."""
     try:
         bundle = await asyncio.to_thread(_gather_order_drafts)
-    except Exception:
+    except Exception as exc:
         logger.exception("order drafts: gather failed")
-        if notify_chat_id is not None:
+        # Never silent: the owner always hears that the run crashed.
+        alert = order_generator.failure_alert(gather_error=type(exc).__name__)
+        for chat in {ALERT_CHAT_ID, notify_chat_id} - {None}:
             with contextlib.suppress(Exception):
-                await application.bot.send_message(
-                    chat_id=notify_chat_id, text="Failed to build the order drafts.")
+                await application.bot.send_message(chat_id=chat, text=alert)
         return
 
     if not bundle["has_data"]:
@@ -4110,19 +4113,30 @@ async def post_order_drafts(application: Application, *, notify_chat_id=None) ->
                 await application.bot.send_message(chat_id=chat, text=note)
         return
 
-    sent = 0
+    total = len(bundle["messages"])
+    failed = 0
     for msg in bundle["messages"]:
         try:
             await application.bot.send_message(chat_id=msg["target"], text=msg["text"])
-            sent += 1
         except Exception:
+            failed += 1
             logger.exception("order drafts: send failed for %s", msg.get("outlet"))
+    hq_failed = False
     try:
         await application.bot.send_message(chat_id=ALERT_CHAT_ID, text=bundle["hq_summary"])
     except Exception:
+        hq_failed = True
         logger.exception("order drafts: HQ summary send failed")
-    logger.info("Order drafts posted (%d outlet messages, delivery_enabled=%s)",
-                sent, bundle["enabled"])
+    logger.info("Order drafts posted (%d/%d messages sent, delivery_enabled=%s)",
+                total - failed, total, bundle["enabled"])
+
+    # Never silent: surface any send failure to the owner so a swallowed
+    # exception can't lose drafts unnoticed again.
+    alert = order_generator.failure_alert(
+        total_messages=total, failed_messages=failed, hq_failed=hq_failed)
+    if alert:
+        with contextlib.suppress(Exception):
+            await application.bot.send_message(chat_id=ALERT_CHAT_ID, text=alert)
 
 
 async def order_drafts_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
