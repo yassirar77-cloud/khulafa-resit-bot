@@ -11,6 +11,7 @@ Receipt / payout taxonomy:
   C  account_only     receipt with no POS payout              -> account purchase, count receipt
   D  excluded_staff   PAY [LP] ... staff advance/leave pay    -> not food, excluded
   E  excluded_utility PAY TO GAS / TNB / water ...            -> not food, excluded
+  F  excluded_non_pay NON_PAY TO ... (recorded, not paid)     -> not food, excluded
 
 No I/O here: the DB glue (fetch rows, UPSERT) lives in reconciliation_service.py.
 """
@@ -71,6 +72,7 @@ class ReconciliationResult:
     account_only_receipts: list[Receipt] = field(default_factory=list)  # Type C
     excluded_staff: list[POSPayout] = field(default_factory=list)   # Type D
     excluded_utility: list[POSPayout] = field(default_factory=list)  # Type E
+    excluded_non_pay: list[POSPayout] = field(default_factory=list)  # Type F
 
 
 # --- description parsing -----------------------------------------------------
@@ -89,7 +91,15 @@ _STAFF_TAG_RE = re.compile(r"^\s*pay(?:out)?\s*\[[^\]]*\]", re.IGNORECASE)
 _STAFF_KEYWORDS = (
     "leave pay", "advance", "advans", "gaji", "salary", "elaun",
     "bonus", "wages", "upah", "komisen", "commission",
+    # "pinjam" (Malay: loan/borrow) — a staff cash loan, e.g.
+    # "PINJAM TO X pai cash". Substring match also catches the noun "pinjaman".
+    "pinjam",
 )
+
+# A leading "NON_PAY" marks a line the POS RECORDED but did not actually pay out
+# (a void / credit / correction entry), so it must not count toward food cost.
+# Allow an underscore, space or hyphen between the words ("NON_PAY", "NON-PAY").
+_NON_PAY_RE = re.compile(r"^\s*non[_\s-]?pay\b", re.IGNORECASE)
 
 # Utility payees. Matched as whole tokens so "AIS" (ice, a supply) never trips
 # "AIR" (water), and "GAS" doesn't match inside an unrelated word.
@@ -114,6 +124,13 @@ def strip_pos_prefix(description) -> str:
 
 def _tokens(text: str) -> list[str]:
     return [t.lower() for t in _TOKEN_RE.findall(text or "")]
+
+
+def is_non_pay(description) -> bool:
+    """True for payout lines flagged NON_PAY (recorded but not actually paid)."""
+    if not isinstance(description, str):
+        return False
+    return bool(_NON_PAY_RE.match(description))
 
 
 def is_staff_advance(description) -> bool:
@@ -267,7 +284,9 @@ def match_receipts_to_payouts(
 
     food_payouts: list[POSPayout] = []
     for p in pos_payouts:
-        if is_staff_advance(p.description):
+        if is_non_pay(p.description):
+            result.excluded_non_pay.append(p)
+        elif is_staff_advance(p.description):
             result.excluded_staff.append(p)
         elif is_utility(p.description):
             result.excluded_utility.append(p)
@@ -359,6 +378,7 @@ def summarize(result: ReconciliationResult, outlet_canonical: str, business_date
     total_payouts = (
         len(result.matched) + len(result.cash_no_receipt)
         + len(result.excluded_staff) + len(result.excluded_utility)
+        + len(result.excluded_non_pay)
     )
     return {
         "outlet_canonical": outlet_canonical,
@@ -429,6 +449,17 @@ def build_match_log(result: ReconciliationResult) -> list[dict]:
     for p in result.excluded_utility:
         rows.append({
             "match_type": "E_excluded_utility",
+            "receipt_id": None,
+            "pos_payout_id": p.id,
+            "amount": round(p.amount or 0.0, 2),
+            "merchant_or_description": p.description,
+            "match_confidence": None,
+            "match_method": None,
+            "receipt_classification": None,
+        })
+    for p in result.excluded_non_pay:
+        rows.append({
+            "match_type": "F_excluded_non_pay",
             "receipt_id": None,
             "pos_payout_id": p.id,
             "amount": round(p.amount or 0.0, 2),
