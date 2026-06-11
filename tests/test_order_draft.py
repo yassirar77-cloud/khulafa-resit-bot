@@ -59,6 +59,81 @@ class ForecastQtyTests(unittest.TestCase):
         self.assertIsNone(fc["qty"])
 
 
+class QtyGuardTests(unittest.TestCase):
+    """Plausibility guard + window alignment (Bugs 1 & 3)."""
+
+    def setUp(self):
+        self.today = date(2026, 6, 7)
+        self.wednesday = date(2026, 6, 10)  # weekday target, no weekend bump
+
+    def _recs(self, qtys):
+        # One row per distinct day, ending today.
+        n = len(qtys)
+        return [{"date": self.today - timedelta(days=n - 1 - i), "qty": q}
+                for i, q in enumerate(qtys)]
+
+    def test_dominating_outlier_capped_and_flagged(self):
+        # Normal ~40/day with one OCR-merged 40250 (receipt 2254). The mean
+        # explodes; the median stays ~40, so the guard catches it.
+        recs = self._recs([40, 41, 39, 40, 40250, 40, 41, 39])
+        ci = {"cadence": oc.DAILY, "canonical_item": "ais_batu"}
+        fc = order_draft.forecast_qty(recs, ci, target_day=self.wednesday,
+                                      today=self.today, lookback_days=90)
+        self.assertTrue(fc["qty_anomaly"])
+        self.assertGreater(fc["raw_qty"], 4000)        # raw forecast was garbage
+        self.assertEqual(fc["qty"], 200)               # capped to ceil(5 × median≈40)
+        self.assertIn("anomaly", fc["basis"])
+
+    def test_clean_history_not_flagged(self):
+        recs = self._recs([40, 41, 39, 40, 42, 38, 40, 41])
+        ci = {"cadence": oc.DAILY, "canonical_item": "ais_batu"}
+        fc = order_draft.forecast_qty(recs, ci, target_day=self.wednesday,
+                                      today=self.today, lookback_days=90)
+        self.assertFalse(fc["qty_anomaly"])
+        self.assertLessEqual(fc["qty"], 45)
+
+    def test_future_dated_only_is_history_expired(self):
+        # Only a future-dated row -> no in-window history -> no fabricated qty.
+        recs = [{"date": (self.today + timedelta(days=10)).isoformat(), "qty": 5}]
+        ci = {"cadence": oc.NEEDS_REVIEW, "canonical_item": "extra_juss"}
+        fc = order_draft.forecast_qty(recs, ci, target_day=self.today + timedelta(days=1),
+                                      today=self.today, lookback_days=90)
+        self.assertIsNone(fc["qty"])
+        self.assertTrue(fc["history_expired"])
+
+    def test_history_expired_renders_reorder_not_a_number(self):
+        line = {
+            "canonical_item": "extra_juss", "qty": None, "pack": "pack",
+            "pack_known": False, "history_expired": True, "qty_anomaly": False,
+            "cadence_info": {"cadence": oc.NEEDS_REVIEW, "needs_review": True,
+                             "last_purchase_date": None, "median_gap_days": None,
+                             "reason": "no purchases in the last 90 days"},
+            "due_info": {"due": True}, "supplier": None, "alternate": None,
+            "spike": None,
+        }
+        txt = order_draft.format_item_line(line)
+        self.assertIn("reorder?", txt)
+        self.assertIn("history expired", txt)
+        self.assertNotIn("qty?", txt)
+
+    def test_qty_anomaly_flag_shows_raw(self):
+        line = {
+            "canonical_item": "ais_batu", "qty": 200, "pack": "bag",
+            "pack_known": False, "history_expired": False, "qty_anomaly": True,
+            "raw_qty": 5062,
+            "cadence_info": {"cadence": oc.DAILY, "needs_review": False,
+                             "last_purchase_date": self.today, "median_gap_days": 1.0,
+                             "reason": "daily"},
+            "due_info": {"due": True}, "supplier": "EVEREST", "alternate": None,
+            "spike": None,
+        }
+        txt = order_draft.format_item_line(line)
+        self.assertIn("❗", txt)
+        self.assertIn("5062", txt)
+        # The compact form surfaces the anomaly mark too.
+        self.assertIn("❗", order_draft.format_item_line_compact(line))
+
+
 class FormatTests(unittest.TestCase):
     def setUp(self):
         self.today = date(2026, 6, 7)

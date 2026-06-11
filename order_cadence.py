@@ -48,6 +48,12 @@ _BANDS: list[tuple[float, float, str]] = [
 _MIN_GAPS = 2
 _MAX_CV = 0.75
 
+# A rhythm is "broken" — and must not assert a confident cadence/quantity — when
+# the last purchase is more than this many median gaps ago. A daily item silent
+# for 20 days, or a weekly item silent for 60, is stale (supplier switch, closure,
+# or aged history), so we downgrade it to NEEDS_REVIEW rather than print "daily".
+_STALE_GAP_MULTIPLE = 3
+
 # A day-of-week pattern is "clear" when a small set of weekdays covers at least
 # this fraction of all purchases (e.g. always Mon+Thu for sayur).
 _DOW_COVERAGE = 0.7
@@ -170,8 +176,19 @@ def detect_cadence(raw_dates, *, today=None, lookback_days=90) -> dict:
     cadence = _classify_gap(median_gap)
     dow = _dow_pattern(dates) if cadence in (TWICE_WEEKLY, WEEKLY) else None
 
-    needs_review = cadence == NEEDS_REVIEW or cv > _MAX_CV
-    if cadence == NEEDS_REVIEW:
+    # Broken-rhythm check: a stale last purchase invalidates the cadence even if
+    # the historical median looks tidy (e.g. a daily item not bought in 20 days).
+    days_since_last = (today - last).days if last is not None else None
+    stale = (median_gap > 0 and days_since_last is not None
+             and days_since_last > _STALE_GAP_MULTIPLE * median_gap)
+
+    needs_review = cadence == NEEDS_REVIEW or cv > _MAX_CV or stale
+    if stale:
+        cadence = NEEDS_REVIEW
+        dow = None
+        reason = ("rhythm broken: last buy %s, %d days ago vs ~%.0f-day cycle"
+                  % (last.isoformat(), days_since_last, median_gap))
+    elif cadence == NEEDS_REVIEW:
         reason = "median gap %.0f days — too sparse to treat as a cycle" % median_gap
     elif cv > _MAX_CV:
         reason = "irregular gaps (cv=%.2f) — rhythm unclear" % cv

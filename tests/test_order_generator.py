@@ -92,6 +92,31 @@ class GeneratorTests(unittest.TestCase):
         recs = ([{"merchant": "A"}] * 3) + ([{"merchant": "B"}] * 5)
         self.assertEqual(order_generator.dominant_supplier(recs), "B")
 
+    def test_qty_anomaly_capped_and_flagged(self):
+        # One OCR-merged quantity (40250) must not produce "order 5064" — the
+        # draft caps it and tags QTY_ANOMALY (receipt 2254 reproduction).
+        rows = self._daily_ayam(n=10, qty=40)
+        rows[0]["qty"] = 40250  # most recent receipt, column-merge misread
+        _seed_item_prices(self.fake, rows)
+        order_generator.gather_order_drafts(self.fake, today=self.today)
+        ayam = next(d for d in self.fake.rows("order_drafts") if d["item"] == "ayam")
+        self.assertIn("QTY_ANOMALY", ayam["flags"])
+        self.assertLess(ayam["qty"], 1000)  # capped, nowhere near 40250/5064
+
+    def test_future_dated_only_marks_history_expired(self):
+        # A row dated in the future is the only "history" -> no fabricated qty.
+        rows = [{
+            "outlet_code": "SEK20", "canonical_item": "ayam",
+            "qty": 10, "unit_price": 9.0, "merchant": "BESTARI FARM",
+            "raw_item_name": "AYAM",
+            "receipt_date": (self.today + timedelta(days=10 + i)).isoformat(),
+        } for i in range(3)]
+        _seed_item_prices(self.fake, rows)
+        order_generator.gather_order_drafts(self.fake, today=self.today)
+        ayam = next(d for d in self.fake.rows("order_drafts") if d["item"] == "ayam")
+        self.assertIn("HISTORY_EXPIRED", ayam["flags"])
+        self.assertIsNone(ayam["qty"])
+
     def test_outlet_exposes_messages_list(self):
         _seed_item_prices(self.fake, self._daily_ayam())
         out = order_generator.gather_order_drafts(self.fake, today=self.today)

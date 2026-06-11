@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import math
 import statistics
-from datetime import date
+from datetime import date, timedelta
 
 import order_cadence as oc
 import order_items
@@ -39,11 +39,25 @@ _WEEKEND_MULT_MIN = 1.0
 _WEEKEND_MULT_MAX = 2.0
 # How many recent buys feed the trailing average.
 _TRAILING_BUYS = 8
+# A forecast more than this many times the MEDIAN historical per-buy quantity is
+# treated as an anomaly (one OCR misread — e.g. qty 40250 instead of 40 — drags
+# the trailing MEAN sky-high while barely moving the median). We cap to this
+# multiple of the median and flag it for the manager rather than printing the
+# raw garbage number.
+_QTY_ANOMALY_FACTOR = 5.0
 
 
-def _per_buy_quantities(records: list[dict]) -> list[tuple[date, float]]:
+def _per_buy_quantities(records: list[dict], *, today: date | None = None,
+                        lookback_days: int | None = None) -> list[tuple[date, float]]:
     """Collapse raw line rows to one (date, total_qty) per purchase day, oldest
-    first. ``records`` rows have ``date`` (date/ISO) and ``qty`` (number)."""
+    first. ``records`` rows have ``date`` (date/ISO) and ``qty`` (number).
+
+    When ``today``/``lookback_days`` are given, rows dated in the future or
+    outside the lookback window are dropped — the SAME filter cadence detection
+    uses — so a stray future-dated receipt can't manufacture a quantity for an
+    item with no real history in the window."""
+    cutoff = (today - timedelta(days=lookback_days)) if (
+        today is not None and lookback_days is not None) else None
     by_day: dict[date, float] = {}
     for r in records or []:
         d = oc._to_date(r.get("date"))
@@ -51,6 +65,10 @@ def _per_buy_quantities(records: list[dict]) -> list[tuple[date, float]]:
         if d is None or not isinstance(qty, (int, float)) or isinstance(qty, bool):
             continue
         if qty <= 0:
+            continue
+        if today is not None and d > today:
+            continue
+        if cutoff is not None and d < cutoff:
             continue
         by_day[d] = by_day.get(d, 0.0) + float(qty)
     return sorted(by_day.items())
@@ -71,20 +89,28 @@ def weekend_multiplier(per_buy: list[tuple[date, float]]) -> float:
     return max(_WEEKEND_MULT_MIN, min(_WEEKEND_MULT_MAX, mult))
 
 
-def forecast_qty(records: list[dict], cadence_info: dict, *, target_day: date) -> dict:
+def forecast_qty(records: list[dict], cadence_info: dict, *, target_day: date,
+                 today: date | None = None, lookback_days: int | None = None) -> dict:
     """Forecast the quantity to order for ``target_day`` (tomorrow).
 
-    Returns ``{'qty', 'pack', 'pack_known', 'basis'}`` where ``qty`` is the
-    rounded order quantity, ``pack`` the unit noun, ``pack_known`` whether a real
-    pack size was applied, and ``basis`` a short human explanation. Returns
-    ``qty=None`` when there's no usable history.
+    Returns ``{'qty', 'pack', 'pack_known', 'basis', 'qty_anomaly', 'raw_qty',
+    'history_expired'}``. ``qty`` is the rounded order quantity (``None`` when
+    there's no in-window history — the line is rendered "history expired —
+    reorder?" rather than fabricating a number). ``qty_anomaly`` is True when the
+    forecast was capped because a garbage quantity poisoned the average.
+
+    ``today``/``lookback_days`` (when given) window the history exactly as cadence
+    detection does, so a future-dated or aged-out row can't manufacture a qty.
     """
-    per_buy = _per_buy_quantities(records)
+    per_buy = _per_buy_quantities(records, today=today, lookback_days=lookback_days)
     canonical = cadence_info.get("canonical_item")
     pack_noun = order_items.unit_noun(canonical)
     if not per_buy:
+        # No real purchases in the window (e.g. only a future-dated/aged-out row).
+        # Surface it for reorder, but never invent a quantity.
         return {"qty": None, "pack": pack_noun, "pack_known": False,
-                "basis": "no usable purchase quantities"}
+                "basis": "no purchases in window", "qty_anomaly": False,
+                "raw_qty": None, "history_expired": True}
 
     trailing = [q for _, q in per_buy[-_TRAILING_BUYS:]]
     base = statistics.fmean(trailing)
@@ -113,7 +139,21 @@ def forecast_qty(records: list[dict], cadence_info: dict, *, target_day: date) -
         pack_known = False
     qty = max(qty, 1)
 
-    return {"qty": qty, "pack": pack_noun, "pack_known": pack_known, "basis": basis}
+    # Plausibility guard: the median per-buy quantity is robust to a single
+    # OCR-merged outlier (qty 40250 vs a real ~40). If the forecast dwarfs it,
+    # cap to a sane bound and flag for review instead of printing the garbage.
+    median_buy = statistics.median([q for _, q in per_buy])
+    qty_anomaly = False
+    raw_qty_out = qty
+    if median_buy > 0 and qty > _QTY_ANOMALY_FACTOR * median_buy:
+        qty_anomaly = True
+        qty = max(1, int(math.ceil(_QTY_ANOMALY_FACTOR * median_buy)))
+        basis = "qty anomaly: forecast %d capped (median buy %.1f)" % (
+            raw_qty_out, median_buy)
+
+    return {"qty": qty, "pack": pack_noun, "pack_known": pack_known,
+            "basis": basis, "qty_anomaly": qty_anomaly, "raw_qty": raw_qty_out,
+            "history_expired": False}
 
 
 # --- formatting --------------------------------------------------------------
@@ -139,7 +179,10 @@ def format_item_line(line: dict) -> str:
     name = order_items.display_name(line["canonical_item"])
     qty = line.get("qty")
     pack = line.get("pack") or "unit"
-    qty_txt = ("%d %s" % (qty, pack)) if qty is not None else "qty?"
+    if line.get("history_expired") or qty is None:
+        qty_txt = "reorder?"
+    else:
+        qty_txt = "%d %s" % (qty, pack)
 
     head = "• %s — %s   (%s)" % (name, qty_txt, _cadence_tag(ci, line.get("due_info", {})))
     out = [head]
@@ -157,6 +200,11 @@ def format_item_line(line: dict) -> str:
         out.append("   ↳ supplier: %s" % supplier)
 
     # Flags.
+    if line.get("history_expired"):
+        out.append("   ❓ history expired — no buys in the window, reorder?")
+    if line.get("qty_anomaly"):
+        out.append("   ❗ qty anomaly — check history (saw %s)"
+                   % _fmt_qty(line.get("raw_qty")))
     if not line.get("pack_known", False):
         out.append("   ❓ confirm pack size (sack/carton/tin)")
     if ci.get("needs_review"):
@@ -170,6 +218,16 @@ def format_item_line(line: dict) -> str:
     return "\n".join(out)
 
 
+def _fmt_qty(value) -> str:
+    """Compact display of a raw forecast number for the anomaly flag."""
+    if value is None:
+        return "?"
+    try:
+        return "%d" % int(round(float(value)))
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def format_item_line_compact(line: dict) -> str:
     """A single-line draft entry — name, qty, cadence tag and flag emojis only.
 
@@ -181,14 +239,20 @@ def format_item_line_compact(line: dict) -> str:
     name = order_items.display_name(line["canonical_item"])
     qty = line.get("qty")
     pack = line.get("pack") or "unit"
-    qty_txt = ("%d %s" % (qty, pack)) if qty is not None else "qty?"
+    if line.get("history_expired") or qty is None:
+        qty_txt = "reorder?"
+    else:
+        qty_txt = "%d %s" % (qty, pack)
     cadence = ci.get("cadence")
     tag = {oc.DAILY: "harian", oc.TWICE_WEEKLY: "2×/mgg", oc.WEEKLY: "mingguan",
            oc.MONTHLY: "bulanan", oc.NEEDS_REVIEW: "semak"}.get(
                cadence, str(cadence).lower())
     marks: list[str] = []
-    if not line.get("pack_known", False) or ci.get("needs_review"):
+    if not line.get("pack_known", False) or ci.get("needs_review") \
+            or line.get("history_expired"):
         marks.append("❓")
+    if line.get("qty_anomaly"):
+        marks.append("❗")
     if line.get("alternate"):
         marks.append("💰")
     if line.get("spike"):

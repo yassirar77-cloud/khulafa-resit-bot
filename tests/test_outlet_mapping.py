@@ -11,7 +11,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from outlet_mapping import outlet_from_chat_title  # noqa: E402
+from outlet_mapping import outlet_display_name, outlet_from_chat_title  # noqa: E402
 
 
 class OutletFromChatTitleHappyPaths(unittest.TestCase):
@@ -74,6 +74,22 @@ class OutletFromChatTitleUnmapped(unittest.TestCase):
 
     def test_non_string_input_returns_none(self):
         self.assertIsNone(outlet_from_chat_title(12345))
+
+
+class OutletDisplayName(unittest.TestCase):
+    def test_d_renders_as_du_not_bare_letter(self):
+        # The draft-header bug: internal code "D" must read as "D.U".
+        self.assertEqual(outlet_display_name("D"), "D.U")
+
+    def test_known_codes_get_human_labels(self):
+        self.assertEqual(outlet_display_name("BISTRO7"), "Bistro")
+        self.assertEqual(outlet_display_name("VISTA"), "Vista")
+
+    def test_unmapped_code_falls_back_to_itself(self):
+        self.assertEqual(outlet_display_name("SEK99"), "SEK99")
+
+    def test_non_string_is_safe(self):
+        self.assertEqual(outlet_display_name(None), "?")
 
 
 if __name__ == "__main__":

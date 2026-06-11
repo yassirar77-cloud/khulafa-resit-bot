@@ -182,13 +182,17 @@ def build_lines_for_outlet(items: dict[str, list[dict]], *, today: date) -> list
         if not due["due"] and not cadence_info.get("needs_review"):
             continue
 
-        fc = order_draft.forecast_qty(records, cadence_info, target_day=tomorrow)
+        fc = order_draft.forecast_qty(records, cadence_info, target_day=tomorrow,
+                                      today=today, lookback_days=lookback_days())
         supplier = dominant_supplier(records)
         lines.append({
             "canonical_item": canonical,
             "qty": fc["qty"],
             "pack": fc["pack"],
             "pack_known": fc["pack_known"],
+            "qty_anomaly": fc.get("qty_anomaly", False),
+            "raw_qty": fc.get("raw_qty"),
+            "history_expired": fc.get("history_expired", False),
             "cadence_info": cadence_info,
             "due_info": due,
             "supplier": supplier,
@@ -229,6 +233,10 @@ def persist_drafts(supabase, outlet_code: str, due_date: date, lines: list[dict]
                 flags.append("CHEAPER_ALT")
             if ln.get("spike"):
                 flags.append("PRICE_SPIKE")
+            if ln.get("qty_anomaly"):
+                flags.append("QTY_ANOMALY")
+            if ln.get("history_expired"):
+                flags.append("HISTORY_EXPIRED")
             rows.append({
                 "outlet": outlet_code,
                 "supplier": ln.get("supplier"),
