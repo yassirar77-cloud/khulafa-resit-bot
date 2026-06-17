@@ -143,6 +143,8 @@ def detect_cadence(raw_dates, *, today=None, lookback_days=90) -> dict:
       sample_count       int (distinct purchase days in window)
       dow_pattern        list[str] | None  (e.g. ['Mon', 'Thu'])
       needs_review       bool
+      verify_only        bool  (too few buys to say anything — quiet "verify",
+                                NOT a loud cadence label or "rhythm broken")
       reason             short human string explaining the classification
     """
     today = today or date.today()
@@ -154,18 +156,23 @@ def detect_cadence(raw_dates, *, today=None, lookback_days=90) -> dict:
         return {
             "cadence": NEEDS_REVIEW, "median_gap_days": None,
             "last_purchase_date": None, "confidence": 0, "sample_count": 0,
-            "dow_pattern": None, "needs_review": True,
+            "dow_pattern": None, "needs_review": True, "verify_only": True,
             "reason": "no purchases in the last %d days" % lookback_days,
         }
 
     gaps = [(dates[i] - dates[i - 1]).days for i in range(1, sample_count)]
     if len(gaps) < _MIN_GAPS:
+        # Confidence gate: with fewer than 3 buys there is no rhythm to learn —
+        # two points 2 days apart are NOT a 2-day cycle. Emit no cadence label,
+        # no median gap, and no "rhythm broken" warning; just mark it quietly for
+        # the manager to verify. median_gap_days is None so the formatting layer
+        # cannot print "usually every N days" from a coin-flip.
         return {
-            "cadence": NEEDS_REVIEW,
-            "median_gap_days": (float(statistics.median(gaps)) if gaps else None),
-            "last_purchase_date": last, "confidence": _confidence(len(gaps), 1.0),
-            "sample_count": sample_count, "dow_pattern": None, "needs_review": True,
-            "reason": "only %d purchase(s) — too few to learn a rhythm" % sample_count,
+            "cadence": NEEDS_REVIEW, "median_gap_days": None,
+            "last_purchase_date": last, "confidence": 0,
+            "sample_count": sample_count, "dow_pattern": None,
+            "needs_review": True, "verify_only": True,
+            "reason": "verify — only %d buy(s) so far" % sample_count,
         }
 
     median_gap = float(statistics.median(gaps))
@@ -200,7 +207,7 @@ def detect_cadence(raw_dates, *, today=None, lookback_days=90) -> dict:
         "cadence": cadence, "median_gap_days": median_gap,
         "last_purchase_date": last, "confidence": confidence,
         "sample_count": sample_count, "dow_pattern": dow,
-        "needs_review": needs_review, "reason": reason,
+        "needs_review": needs_review, "verify_only": False, "reason": reason,
     }
 
 
