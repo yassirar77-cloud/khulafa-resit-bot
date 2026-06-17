@@ -192,6 +192,8 @@ def build_lines_for_outlet(items: dict[str, list[dict]], *, today: date) -> list
             "pack_known": fc["pack_known"],
             "qty_anomaly": fc.get("qty_anomaly", False),
             "raw_qty": fc.get("raw_qty"),
+            "excluded_count": fc.get("excluded_count", 0),
+            "excluded_qtys": fc.get("excluded_qtys"),
             "history_expired": fc.get("history_expired", False),
             "cadence_info": cadence_info,
             "due_info": due,
@@ -235,6 +237,8 @@ def persist_drafts(supabase, outlet_code: str, due_date: date, lines: list[dict]
                 flags.append("PRICE_SPIKE")
             if ln.get("qty_anomaly"):
                 flags.append("QTY_ANOMALY")
+            if ln.get("excluded_count"):
+                flags.append("QTY_OUTLIER_EXCLUDED")
             if ln.get("history_expired"):
                 flags.append("HISTORY_EXPIRED")
             rows.append({

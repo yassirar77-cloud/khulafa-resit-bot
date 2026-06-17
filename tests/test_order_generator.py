@@ -92,16 +92,17 @@ class GeneratorTests(unittest.TestCase):
         recs = ([{"merchant": "A"}] * 3) + ([{"merchant": "B"}] * 5)
         self.assertEqual(order_generator.dominant_supplier(recs), "B")
 
-    def test_qty_anomaly_capped_and_flagged(self):
+    def test_qty_outlier_excluded_and_flagged(self):
         # One OCR-merged quantity (40250) must not produce "order 5064" — the
-        # draft caps it and tags QTY_ANOMALY (receipt 2254 reproduction).
+        # offending day is dropped before averaging and tagged
+        # QTY_OUTLIER_EXCLUDED (receipt 2254 reproduction).
         rows = self._daily_ayam(n=10, qty=40)
         rows[0]["qty"] = 40250  # most recent receipt, column-merge misread
         _seed_item_prices(self.fake, rows)
         order_generator.gather_order_drafts(self.fake, today=self.today)
         ayam = next(d for d in self.fake.rows("order_drafts") if d["item"] == "ayam")
-        self.assertIn("QTY_ANOMALY", ayam["flags"])
-        self.assertLess(ayam["qty"], 1000)  # capped, nowhere near 40250/5064
+        self.assertIn("QTY_OUTLIER_EXCLUDED", ayam["flags"])
+        self.assertLess(ayam["qty"], 100)   # real ~40, nowhere near 40250/5064
 
     def test_future_dated_only_marks_history_expired(self):
         # A row dated in the future is the only "history" -> no fabricated qty.
