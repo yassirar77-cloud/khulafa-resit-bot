@@ -30,9 +30,10 @@ no longer implausible, so a second run changes nothing. Every change is logged.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -98,51 +99,115 @@ def _scan(client, table, *, today, max_drift_days):
     return repairs, flagged
 
 
-def run(client, *, apply: bool, max_drift_days: int) -> dict:
+def _default_journal_path() -> str:
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return "date_repair_journal_%s.jsonl" % ts
+
+
+def run(client, *, apply: bool, max_drift_days: int, journal_path: str | None = None) -> dict:
     today = _today_my()
     print("=" * 78)
     print("Corrupt receipt_date repair — today(MY)=%s  drift>%dd or future  (%s)"
           % (today, max_drift_days, "APPLY — WILL WRITE" if apply else "DRY RUN — no writes"))
     print("=" * 78)
 
-    totals = {"repairs": 0, "year_fix": 0, "ingest_fallback": 0,
-              "flagged": 0, "written": 0}
-    for table in _TABLES:
-        repairs, flagged = _scan(client, table, today=today, max_drift_days=max_drift_days)
-        yf = sum(1 for x in repairs if x["kind"] == "YEAR_FIX")
-        ifb = len(repairs) - yf
-        totals["repairs"] += len(repairs)
-        totals["year_fix"] += yf
-        totals["ingest_fallback"] += ifb
-        totals["flagged"] += len(flagged)
-        print("\n--- %s --- %d to repair (%d year-fix keep MM-DD, %d future->ingest), "
-              "%d flagged for review (untouched)"
-              % (table, len(repairs), yf, ifb, len(flagged)))
-        if repairs:
-            print("  id | merchant | receipt_date -> proposed | kind | reason")
-            for x in sorted(repairs, key=lambda d: str(d["old"]), reverse=True):
-                print("  %s | %-26s | %s -> %s | %-15s | %s" % (
-                    x["id"], str(x["merchant"])[:26], x["old"], x["new"],
-                    x["kind"], x["reason"]))
-        for x in flagged:
-            print("  ⚠️ id=%s merchant=%r receipt_date=%s — %s (left untouched)"
-                  % (x["id"], x["merchant"], x["old"], x["reason"]))
+    # Durable rollback journal: one JSON line per APPLIED row capturing the OLD
+    # value, so every change can be reverted with --revert even after the
+    # terminal scrollback is gone. Opened append-mode and flushed per row, so a
+    # mid-run crash still leaves a complete record of what was written so far.
+    journal = None
+    if apply:
+        journal_path = journal_path or _default_journal_path()
+        journal = open(journal_path, "a", encoding="utf-8")
+        print("Rollback journal: %s" % journal_path)
 
-        if apply and repairs:
-            for x in repairs:
-                client.table(table).update(
-                    {"receipt_date": x["new"]}).eq("id", x["id"]).execute()
-                totals["written"] += 1
-                print("  ✔ %s id=%s: %s -> %s" % (table, x["id"], x["old"], x["new"]))
+    totals = {"repairs": 0, "year_fix": 0, "ingest_fallback": 0,
+              "flagged": 0, "written": 0, "journal_path": journal_path}
+    try:
+        for table in _TABLES:
+            repairs, flagged = _scan(client, table, today=today, max_drift_days=max_drift_days)
+            yf = sum(1 for x in repairs if x["kind"] == "YEAR_FIX")
+            ifb = len(repairs) - yf
+            totals["repairs"] += len(repairs)
+            totals["year_fix"] += yf
+            totals["ingest_fallback"] += ifb
+            totals["flagged"] += len(flagged)
+            print("\n--- %s --- %d to repair (%d year-fix keep MM-DD, %d future->ingest), "
+                  "%d flagged for review (untouched)"
+                  % (table, len(repairs), yf, ifb, len(flagged)))
+            if repairs:
+                print("  id | merchant | receipt_date -> proposed | kind | reason")
+                for x in sorted(repairs, key=lambda d: str(d["old"]), reverse=True):
+                    print("  %s | %-26s | %s -> %s | %-15s | %s" % (
+                        x["id"], str(x["merchant"])[:26], x["old"], x["new"],
+                        x["kind"], x["reason"]))
+            for x in flagged:
+                print("  ⚠️ id=%s merchant=%r receipt_date=%s — %s (left untouched)"
+                      % (x["id"], x["merchant"], x["old"], x["reason"]))
+
+            if apply and repairs:
+                for x in repairs:
+                    # Journal the OLD value BEFORE the write, so a crash between
+                    # the append and the update can never leave an untracked
+                    # change (worst case the journal lists a row that wasn't
+                    # actually changed — revert simply skips it).
+                    journal.write(json.dumps({
+                        "table": table, "id": x["id"],
+                        "old": x["old"], "new": x["new"], "kind": x["kind"],
+                        "applied_at": datetime.now(timezone.utc).isoformat(),
+                    }) + "\n")
+                    journal.flush()
+                    client.table(table).update(
+                        {"receipt_date": x["new"]}).eq("id", x["id"]).execute()
+                    totals["written"] += 1
+                    print("  ✔ %s id=%s: %s -> %s" % (table, x["id"], x["old"], x["new"]))
+    finally:
+        if journal is not None:
+            journal.close()
 
     print("\n%s — %d row(s) %s (%d year-fix, %d future->ingest); %d flagged for review."
           % ("APPLIED" if apply else "DRY RUN",
              totals["written"] if apply else totals["repairs"],
              "written" if apply else "would be repaired",
              totals["year_fix"], totals["ingest_fallback"], totals["flagged"]))
-    if not apply:
+    if apply:
+        print("Rollback: python scripts/repair_corrupt_dates.py --revert %s"
+              % totals["journal_path"])
+    else:
         print("Re-run with --apply to write the proposed corrections.")
     return totals
+
+
+def revert(client, journal_path: str) -> dict:
+    """Restore receipt_date to the OLD value for every row in a journal.
+
+    Safe + idempotent: a row is only reverted when its current receipt_date
+    still equals the NEW value this run wrote (so a row changed by something
+    else, or already reverted, is skipped rather than clobbered)."""
+    print("Reverting from journal: %s" % journal_path)
+    with open(journal_path, encoding="utf-8") as f:
+        entries = [json.loads(line) for line in f if line.strip()]
+
+    stats = {"restored": 0, "skipped": 0, "missing": 0}
+    for e in entries:
+        resp = (client.table(e["table"]).select("receipt_date")
+                .eq("id", e["id"]).execute())
+        data = getattr(resp, "data", None) or []
+        if not data:
+            stats["missing"] += 1
+            continue
+        current = str(data[0].get("receipt_date"))[:10]
+        if current != str(e["new"])[:10]:
+            stats["skipped"] += 1  # changed since our write — don't clobber
+            continue
+        client.table(e["table"]).update(
+            {"receipt_date": e["old"]}).eq("id", e["id"]).execute()
+        stats["restored"] += 1
+        print("  ↩ %s id=%s: %s -> %s" % (e["table"], e["id"], e["new"], e["old"]))
+
+    print("\nReverted %d row(s); skipped %d (changed since), %d missing."
+          % (stats["restored"], stats["skipped"], stats["missing"]))
+    return stats
 
 
 def main() -> None:
@@ -153,8 +218,19 @@ def main() -> None:
     parser.add_argument("--max-drift-days", type=int,
                         default=date_utils.DEFAULT_MAX_DRIFT_DAYS,
                         help="days from ingestion day that count as corrupt (default 60)")
+    parser.add_argument("--journal",
+                        help="rollback journal path for --apply (default: "
+                             "date_repair_journal_<UTC timestamp>.jsonl)")
+    parser.add_argument("--revert", metavar="JOURNAL",
+                        help="restore receipt_date to the OLD values recorded in "
+                             "JOURNAL (undo a prior --apply)")
     args = parser.parse_args()
-    run(_build_client(), apply=args.apply, max_drift_days=args.max_drift_days)
+    client = _build_client()
+    if args.revert:
+        revert(client, args.revert)
+    else:
+        run(client, apply=args.apply, max_drift_days=args.max_drift_days,
+            journal_path=args.journal)
 
 
 if __name__ == "__main__":
