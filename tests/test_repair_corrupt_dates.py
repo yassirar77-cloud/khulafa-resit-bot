@@ -86,5 +86,40 @@ class RepairCorruptDatesTests(unittest.TestCase):
         self.assertEqual(self.fake.rows("item_prices")[0]["receipt_date"], "2026-03-15")
 
 
+    def test_apply_writes_journal_with_old_value_and_revert_restores(self):
+        import json
+        import tempfile
+        self._seed("receipts", [
+            {"merchant": "INBOIS", "receipt_date": "2026-08-22",
+             "created_at": "2026-05-22T02:00:00+00:00"},          # future -> ingested
+            {"merchant": "BESTARI", "receipt_date": "2026-06-14",
+             "created_at": "2026-06-15T02:00:00+00:00"},          # plausible, untouched
+        ])
+        journal = os.path.join(tempfile.mkdtemp(), "journal.jsonl")
+        rcd.run(self.fake, apply=True, max_drift_days=60, journal_path=journal)
+
+        # Journal captures the OLD value per applied row (the rollback contract).
+        with open(journal, encoding="utf-8") as f:
+            entries = [json.loads(line) for line in f if line.strip()]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["table"], "receipts")
+        self.assertEqual(entries[0]["old"], "2026-08-22")
+        self.assertEqual(entries[0]["new"], "2026-05-22")
+
+        # The write happened...
+        recs = {r["merchant"]: r["receipt_date"] for r in self.fake.rows("receipts")}
+        self.assertEqual(recs["INBOIS"], "2026-05-22")
+
+        # ...and --revert puts the OLD value back, idempotently.
+        stats = rcd.revert(self.fake, journal)
+        self.assertEqual(stats["restored"], 1)
+        recs = {r["merchant"]: r["receipt_date"] for r in self.fake.rows("receipts")}
+        self.assertEqual(recs["INBOIS"], "2026-08-22")
+        # Re-revert is a no-op (current no longer equals the new value).
+        again = rcd.revert(self.fake, journal)
+        self.assertEqual(again["restored"], 0)
+        self.assertEqual(again["skipped"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
