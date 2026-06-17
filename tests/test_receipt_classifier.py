@@ -83,6 +83,32 @@ class BriefTestCases(unittest.TestCase):
         self.assertEqual(r.receipt_type, ReceiptType.SUPPLIER_PURCHASE)
         self.assertEqual(r.extracted_vendor, "BABAS")
 
+    def test_diamond_ball_supplier_purchase(self):
+        # Roti/capati supplier — was falling to UNKNOWN (not whitelisted).
+        r = classify_receipt(
+            "DIAMOND BALL ENTERPRISE ... ROTI ... CAPATI ... 36.00",
+            parsed_items=[{"name": "ROTI", "qty": 6, "price": 5.0}],
+            total=36.0, merchant="DIAMOND BALL ENTERPRISE")
+        self.assertEqual(r.receipt_type, ReceiptType.SUPPLIER_PURCHASE)
+        self.assertEqual(r.extracted_vendor, "DIAMOND")
+
+    def test_ranau_petrogas_supplier_not_petty_cash(self):
+        # LPG cooking gas supplier — "PETROGAS" must NOT be read as PETROL/
+        # PETRONAS petty cash; the supplier whitelist (priority 2) wins.
+        r = classify_receipt(
+            "RANAU PETROGAS SDN BHD ... GAS ... 270.00",
+            parsed_items=[{"name": "GAS", "qty": 27, "price": 10.0}],
+            total=270.0, merchant="RANAU PETROGAS SDN BHD")
+        self.assertEqual(r.receipt_type, ReceiptType.SUPPLIER_PURCHASE)
+
+    def test_invois_word_not_misread_as_supplier(self):
+        # The Malay word "INVOIS"/"INBOIS" (invoice) must not be whitelisted as a
+        # supplier; with no real supplier token this stays UNKNOWN.
+        r = classify_receipt(
+            "INBOIS ... GAS ... 40.00", parsed_items=[], total=40.0,
+            merchant="INBOIS")
+        self.assertEqual(r.receipt_type, ReceiptType.UNKNOWN)
+
     def test_tnb_utility(self):
         r = classify_receipt(
             "TENAGA NASIONAL BERHAD ... INVOIS ELEKTRIK ... 1,234.50",
@@ -458,16 +484,16 @@ class MerchantArgGatingTests(unittest.TestCase):
                     f"{supplier!r} merchant-only failed: {result}",
                 )
 
-    def test_diamond_ball_unknown_merchant_stays_unknown(self):
-        # Production case the user cited (DIAMOND BALL): not on the
-        # whitelist -> UNKNOWN even with merchant kwarg supplied.
+    def test_diamond_ball_now_whitelisted_supplier(self):
+        # Previously UNKNOWN (not whitelisted) — the gap that blinded the order
+        # generator to roti/capati from ~2026-05-23. DIAMOND is now whitelisted.
         result = classify_receipt(
             ocr_text="Diamond Ball outlet\nTotal: 50",
             parsed_items=[{"name": "Item", "qty": 1, "price": 50.0}],
             total=50.0,
             merchant="DIAMOND BALL SDN BHD",
         )
-        self.assertEqual(result.receipt_type, ReceiptType.UNKNOWN)
+        self.assertEqual(result.receipt_type, ReceiptType.SUPPLIER_PURCHASE)
 
 
 class MerchantWhitelistOverrideTests(unittest.TestCase):
