@@ -25,6 +25,7 @@ import os
 import statistics
 from datetime import date, datetime, timedelta
 
+import date_utils
 import order_cadence as oc
 import order_draft
 import order_items
@@ -94,7 +95,7 @@ def fetch_item_price_rows(supabase, *, today: date, lookback: int) -> list[dict]
         resp = (
             supabase.table(_ITEM_PRICES_TABLE)
             .select("outlet_code, canonical_item, qty, unit_price, merchant, "
-                    "raw_item_name, receipt_date")
+                    "raw_item_name, receipt_date, created_at")
             .gte("receipt_date", cutoff)
             .execute()
         )
@@ -117,6 +118,7 @@ def group_rows(rows: list[dict]) -> dict[tuple[str, str], list[dict]]:
             continue
         grouped.setdefault((outlet, canonical), []).append({
             "date": d,
+            "created_at": r.get("created_at"),
             "qty": r.get("qty"),
             "unit_price": r.get("unit_price"),
             "merchant": r.get("merchant"),
@@ -163,6 +165,30 @@ def spike_note(records: list[dict]) -> str | None:
     return None
 
 
+def _effective_records(records: list[dict], *, today: date) -> tuple[list[dict], int]:
+    """Re-key each record onto a TRUSTWORTHY purchase date so OCR-corrupted
+    receipt dates (future / garbled) can never break rhythm detection.
+
+    For every record, ``date_utils.effective_purchase_date`` keeps a plausible
+    receipt_date but falls back to the ingestion day (``created_at``) when the
+    receipt_date is implausible. Returns ``(normalised_records, corrected_count)``
+    where each normalised record has ``date`` set to the effective (date) value.
+    The cadence + forecast layers then operate on clean dates without changing
+    their own logic (the <3-buys gate etc. are untouched)."""
+    out: list[dict] = []
+    corrected = 0
+    for r in records:
+        eff, was_corrected, _ = date_utils.effective_purchase_date(
+            r.get("date"), r.get("created_at"), today=today)
+        nr = dict(r)
+        if eff is not None:
+            nr["date"] = eff
+        if was_corrected:
+            corrected += 1
+        out.append(nr)
+    return out, corrected
+
+
 def build_lines_for_outlet(items: dict[str, list[dict]], *, today: date) -> list[dict]:
     """Build the due draft lines for one outlet.
 
@@ -175,6 +201,9 @@ def build_lines_for_outlet(items: dict[str, list[dict]], *, today: date) -> list
     for canonical, records in items.items():
         if not order_items.is_orderable(canonical):
             continue
+        # Re-key onto trustworthy dates BEFORE cadence/forecast so a corrupt OCR
+        # receipt_date can't fake "rhythm broken" or punch a hole in the window.
+        records, date_corrected = _effective_records(records, today=today)
         cadence_info = oc.detect_cadence(
             [r.get("date") for r in records], today=today, lookback_days=lookback_days())
         cadence_info["canonical_item"] = canonical
@@ -192,6 +221,7 @@ def build_lines_for_outlet(items: dict[str, list[dict]], *, today: date) -> list
             "pack_known": fc["pack_known"],
             "qty_anomaly": fc.get("qty_anomaly", False),
             "raw_qty": fc.get("raw_qty"),
+            "date_corrected_count": date_corrected,
             "history_expired": fc.get("history_expired", False),
             "cadence_info": cadence_info,
             "due_info": due,
@@ -229,6 +259,8 @@ def persist_drafts(supabase, outlet_code: str, due_date: date, lines: list[dict]
                 flags.append("PACK_UNKNOWN")
             if ci.get("needs_review"):
                 flags.append("NEEDS_REVIEW")
+            if ln.get("date_corrected_count"):
+                flags.append("DATE_CORRECTED")
             if ln.get("alternate"):
                 flags.append("CHEAPER_ALT")
             if ln.get("spike"):
@@ -264,6 +296,7 @@ def persist_cadence(supabase, outlet_code: str, items: dict[str, list[dict]],
     for canonical, records in items.items():
         if not order_items.is_orderable(canonical):
             continue
+        records, _ = _effective_records(records, today=today)
         ci = oc.detect_cadence([r.get("date") for r in records],
                                today=today, lookback_days=lookback_days())
         dow = ci.get("dow_pattern")

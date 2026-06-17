@@ -103,6 +103,22 @@ class GeneratorTests(unittest.TestCase):
         self.assertIn("QTY_ANOMALY", ayam["flags"])
         self.assertLess(ayam["qty"], 1000)  # capped, nowhere near 40250/5064
 
+    def test_corrupt_receipt_date_corrected_via_ingestion(self):
+        # A clean daily run, but the most-recent receipt has a corrupt FUTURE
+        # receipt_date with a trustworthy created_at. Without the guard the row
+        # is dropped (future) and rhythm looks broken; with it, the row is
+        # re-keyed onto its ingestion day, the item stays DAILY, and the draft
+        # carries DATE_CORRECTED.
+        rows = self._daily_ayam(n=14, qty=10)
+        for r in rows:  # give every row an ingestion timestamp = its receipt day
+            r["created_at"] = r["receipt_date"] + "T02:00:00+00:00"
+        rows[0]["receipt_date"] = (self.today + timedelta(days=70)).isoformat()  # corrupt future
+        _seed_item_prices(self.fake, rows)
+        order_generator.gather_order_drafts(self.fake, today=self.today)
+        ayam = next(d for d in self.fake.rows("order_drafts") if d["item"] == "ayam")
+        self.assertEqual(ayam["cadence"], "DAILY")          # rhythm not broken
+        self.assertIn("DATE_CORRECTED", ayam["flags"])
+
     def test_future_dated_only_marks_history_expired(self):
         # A row dated in the future is the only "history" -> no fabricated qty.
         rows = [{
