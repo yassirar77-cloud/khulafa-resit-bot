@@ -5,7 +5,7 @@ can import it without pulling in the full bot runtime.
 """
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 MIN_PLAUSIBLE_YEAR = 2024
@@ -19,6 +19,13 @@ _MY_TZ = ZoneInfo("Asia/Kuala_Lumpur")
 # year). If the OCR'd date lands more than this many days after the upload day
 # it's treated as an OCR error and the upload day is used instead.
 DEFAULT_MAX_FUTURE_DAYS = 3
+
+# A receipt_date this many days away from the ingestion day (in EITHER
+# direction) is treated as an OCR error. Bills are uploaded within days of
+# purchase, so a 2024 date on a 2026 upload, or a date months in the future,
+# is garbage. Used by effective_purchase_date / the corrupt-date repair.
+DEFAULT_MAX_DRIFT_DAYS = 60
+
 
 _ISO_RE = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})$")
 _DMY_RE = re.compile(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$")
@@ -122,3 +129,54 @@ def clamp_business_date(receipt_date, created_at, *, max_future_days=DEFAULT_MAX
     if ud is not None and (rd - ud).days > max_future_days:
         return ud, True
     return rd, False
+
+
+def effective_purchase_date(receipt_date, ingested_at, *, today=None,
+                            max_future_days=0,
+                            max_drift_days=DEFAULT_MAX_DRIFT_DAYS):
+    """The date a purchase should be keyed on, robust to OCR date corruption.
+
+    Returns ``(effective_date: date | None, corrected: bool, reason: str | None)``.
+
+    The ingestion day (``ingested_at`` -> MY-local) is the reliable signal: a bill
+    is uploaded within days of the purchase. So ``receipt_date`` is trusted unless
+    it is implausible, in which case we fall back to the ingestion day rather than
+    guess:
+
+      * implausible when it is in the FUTURE (> today + ``max_future_days``), or
+      * more than ``max_drift_days`` from the ingestion day in EITHER direction
+        (a 2024 date on a 2026 upload, a date months ahead).
+
+    Edge cases, handled deliberately:
+      * ``receipt_date`` missing/unparseable -> ingestion day (corrected=True),
+        or ``None`` if there is no ingestion day either.
+      * ``receipt_date`` implausible but NO ingestion day to fall back on ->
+        keep the (bad) receipt_date, corrected=False, reason flags it so a caller
+        can still surface it rather than silently trust it.
+      * a plausible receipt_date is returned unchanged (corrected=False).
+
+    Pure: used by BOTH the read path (cadence/forecast) and the one-time repair,
+    so they always agree on what "corrupt" means and what the fix is.
+    """
+    today = today or date.today()
+    rd = _parse_local_date(receipt_date)
+    ud = _parse_upload_date(ingested_at)
+
+    if rd is None:
+        if ud is not None:
+            return ud, True, "missing receipt_date -> ingestion day"
+        return None, False, "no receipt_date and no ingestion day"
+
+    future = rd > today + timedelta(days=max_future_days)
+    drift = abs((rd - ud).days) if ud is not None else None
+    implausible = future or (drift is not None and drift > max_drift_days)
+
+    if not implausible:
+        return rd, False, None
+    if ud is None:
+        # Can't correct without a reference day — flag, don't guess.
+        return rd, False, ("future receipt_date, no ingestion day" if future
+                           else "receipt_date implausible, no ingestion day")
+    reason = ("future receipt_date %s" % rd.isoformat() if future
+              else "receipt_date %s is %d days from ingestion" % (rd.isoformat(), drift))
+    return ud, True, reason

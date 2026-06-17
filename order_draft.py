@@ -207,6 +207,10 @@ def format_item_line(line: dict) -> str:
                    % _fmt_qty(line.get("raw_qty")))
     if not line.get("pack_known", False):
         out.append("   ❓ confirm pack size (sack/carton/tin)")
+    dc = line.get("date_corrected_count") or 0
+    if dc:
+        out.append("   ⓘ %d tarikh OCR luar julat dibetulkan ke tarikh terima "
+                   "(rhythm guard)" % dc)
     if ci.get("needs_review"):
         out.append("   ❓ NEEDS REVIEW — %s" % ci.get("reason", "erratic cadence"))
     alt = line.get("alternate")

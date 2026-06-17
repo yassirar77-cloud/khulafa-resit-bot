@@ -28,6 +28,7 @@ class _Query:
         self._range_filters: list[tuple[str, str, object]] = []
         self._order: tuple[str, bool] | None = None
         self._limit = None
+        self._range: tuple[int, int] | None = None
 
     # --- builders ---
     def select(self, *_cols):
@@ -85,6 +86,11 @@ class _Query:
         self._limit = n
         return self
 
+    def range(self, start, end):
+        # PostgREST range is inclusive on both ends.
+        self._range = (start, end)
+        return self
+
     # --- helpers ---
     def _matches(self, row):
         return (
@@ -115,6 +121,9 @@ class _Query:
             if self._order is not None:
                 col, desc = self._order
                 out = sorted(out, key=lambda r: (r.get(col) is None, r.get(col)), reverse=desc)
+            if self._range is not None:
+                start, end = self._range
+                out = out[start:end + 1]
             if self._limit is not None:
                 out = out[: self._limit]
             return _Result([dict(r) for r in out])

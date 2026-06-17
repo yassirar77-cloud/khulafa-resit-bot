@@ -13,7 +13,64 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datetime import date  # noqa: E402
 
-from date_utils import clamp_business_date, normalize_date  # noqa: E402
+from date_utils import (  # noqa: E402
+    clamp_business_date,
+    effective_purchase_date,
+    normalize_date,
+)
+
+
+class EffectivePurchaseDate(unittest.TestCase):
+    """Trustworthy purchase date: trust receipt_date unless implausible, then
+    fall back to the ingestion day."""
+
+    def setUp(self):
+        self.today = date(2026, 6, 17)
+        self.ingested = "2026-06-15T02:00:00+00:00"  # MY-local 2026-06-15
+
+    def test_plausible_date_kept(self):
+        eff, corrected, reason = effective_purchase_date(
+            "2026-06-14", self.ingested, today=self.today)
+        self.assertEqual(eff, date(2026, 6, 14))
+        self.assertFalse(corrected)
+        self.assertIsNone(reason)
+
+    def test_future_date_falls_back_to_ingestion(self):
+        eff, corrected, _ = effective_purchase_date(
+            "2026-08-22", self.ingested, today=self.today)
+        self.assertEqual(eff, date(2026, 6, 15))
+        self.assertTrue(corrected)
+
+    def test_far_future_year_falls_back(self):
+        eff, corrected, _ = effective_purchase_date(
+            "2029-05-29", self.ingested, today=self.today)
+        self.assertEqual(eff, date(2026, 6, 15))
+        self.assertTrue(corrected)
+
+    def test_stale_year_beyond_drift_falls_back(self):
+        eff, corrected, _ = effective_purchase_date(
+            "2024-05-08", self.ingested, today=self.today)
+        self.assertEqual(eff, date(2026, 6, 15))
+        self.assertTrue(corrected)
+
+    def test_missing_receipt_date_uses_ingestion(self):
+        eff, corrected, _ = effective_purchase_date(None, self.ingested, today=self.today)
+        self.assertEqual(eff, date(2026, 6, 15))
+        self.assertTrue(corrected)
+
+    def test_implausible_without_ingestion_is_flagged_not_changed(self):
+        eff, corrected, reason = effective_purchase_date(
+            "2026-08-22", None, today=self.today)
+        self.assertEqual(eff, date(2026, 8, 22))  # unchanged — nothing to anchor to
+        self.assertFalse(corrected)
+        self.assertIn("no ingestion", reason)
+
+    def test_small_recent_drift_kept(self):
+        # Ingested a few days after a real purchase — not corruption.
+        eff, corrected, _ = effective_purchase_date(
+            "2026-06-13", self.ingested, today=self.today)
+        self.assertEqual(eff, date(2026, 6, 13))
+        self.assertFalse(corrected)
 
 
 class ClampBusinessDate(unittest.TestCase):
