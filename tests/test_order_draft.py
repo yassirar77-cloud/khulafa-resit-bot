@@ -72,17 +72,36 @@ class QtyGuardTests(unittest.TestCase):
         return [{"date": self.today - timedelta(days=n - 1 - i), "qty": q}
                 for i, q in enumerate(qtys)]
 
-    def test_dominating_outlier_capped_and_flagged(self):
-        # Normal ~40/day with one OCR-merged 40250 (receipt 2254). The mean
-        # explodes; the median stays ~40, so the guard catches it.
+    def test_dominating_outlier_excluded_before_average(self):
+        # Normal ~40/day with one OCR-merged 40250 (receipt 2254). The offending
+        # DAY is dropped before averaging, so the forecast lands at the real ~40
+        # rather than a capped 200, and the excluded row is reported (not flagged
+        # as an anomaly, because exclusion already handled it).
         recs = self._recs([40, 41, 39, 40, 40250, 40, 41, 39])
         ci = {"cadence": oc.DAILY, "canonical_item": "ais_batu"}
         fc = order_draft.forecast_qty(recs, ci, target_day=self.wednesday,
                                       today=self.today, lookback_days=90)
-        self.assertTrue(fc["qty_anomaly"])
-        self.assertGreater(fc["raw_qty"], 4000)        # raw forecast was garbage
-        self.assertEqual(fc["qty"], 200)               # capped to ceil(5 × median≈40)
-        self.assertIn("anomaly", fc["basis"])
+        self.assertFalse(fc["qty_anomaly"])            # handled by exclusion
+        self.assertEqual(fc["excluded_count"], 1)
+        self.assertEqual(fc["excluded_qtys"], [40250])
+        self.assertLessEqual(fc["qty"], 45)            # real ~40, not a capped 200
+        self.assertIn("excluded", fc["basis"])
+
+    def test_outlier_note_in_manager_block_only(self):
+        # The excluded-row note appears in the full (manager) line, never in the
+        # compact (forwarded) line.
+        line = {
+            "canonical_item": "ais_batu", "qty": 40, "pack": "bag",
+            "pack_known": False, "history_expired": False, "qty_anomaly": False,
+            "excluded_count": 1, "excluded_qtys": [40250], "raw_qty": 40,
+            "cadence_info": {"cadence": oc.DAILY, "needs_review": False,
+                             "last_purchase_date": self.today, "median_gap_days": 1.0,
+                             "reason": "daily"},
+            "due_info": {"due": True}, "supplier": "EVEREST", "alternate": None,
+            "spike": None,
+        }
+        self.assertIn("diabaikan", order_draft.format_item_line(line))
+        self.assertNotIn("diabaikan", order_draft.format_item_line_compact(line))
 
     def test_clean_history_not_flagged(self):
         recs = self._recs([40, 41, 39, 40, 42, 38, 40, 41])
@@ -90,6 +109,7 @@ class QtyGuardTests(unittest.TestCase):
         fc = order_draft.forecast_qty(recs, ci, target_day=self.wednesday,
                                       today=self.today, lookback_days=90)
         self.assertFalse(fc["qty_anomaly"])
+        self.assertEqual(fc["excluded_count"], 0)
         self.assertLessEqual(fc["qty"], 45)
 
     def test_future_dated_only_is_history_expired(self):

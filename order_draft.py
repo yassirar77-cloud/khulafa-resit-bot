@@ -94,10 +94,18 @@ def forecast_qty(records: list[dict], cadence_info: dict, *, target_day: date,
     """Forecast the quantity to order for ``target_day`` (tomorrow).
 
     Returns ``{'qty', 'pack', 'pack_known', 'basis', 'qty_anomaly', 'raw_qty',
-    'history_expired'}``. ``qty`` is the rounded order quantity (``None`` when
-    there's no in-window history — the line is rendered "history expired —
-    reorder?" rather than fabricating a number). ``qty_anomaly`` is True when the
-    forecast was capped because a garbage quantity poisoned the average.
+    'history_expired', 'excluded_count', 'excluded_qtys'}``. ``qty`` is the
+    rounded order quantity (``None`` when there's no in-window history — the line
+    is rendered "history expired — reorder?" rather than fabricating a number).
+
+    OCR sometimes merges a quantity into a garbage number (qty 40250 for a real
+    ~40, ais_batu 5062/904/404). Such a row drags the trailing MEAN sky-high
+    while barely moving the MEDIAN, so BEFORE averaging we drop any per-buy day
+    whose quantity exceeds ``_QTY_ANOMALY_FACTOR`` × the median per-buy quantity
+    and report it via ``excluded_count`` / ``excluded_qtys`` (shown in the
+    manager block, never on the forwarded supplier line). ``qty_anomaly`` remains
+    as a last-resort cap for the degenerate case where the median itself is
+    poisoned.
 
     ``today``/``lookback_days`` (when given) window the history exactly as cadence
     detection does, so a future-dated or aged-out row can't manufacture a qty.
@@ -110,14 +118,31 @@ def forecast_qty(records: list[dict], cadence_info: dict, *, target_day: date,
         # Surface it for reorder, but never invent a quantity.
         return {"qty": None, "pack": pack_noun, "pack_known": False,
                 "basis": "no purchases in window", "qty_anomaly": False,
-                "raw_qty": None, "history_expired": True}
+                "raw_qty": None, "history_expired": True,
+                "excluded_count": 0, "excluded_qtys": []}
 
-    trailing = [q for _, q in per_buy[-_TRAILING_BUYS:]]
+    # --- outlier exclusion (before any averaging) ---------------------------
+    # The median per-buy quantity is robust to a single OCR-merged outlier; use
+    # it as the yardstick and drop the offending DAYS so they never reach the
+    # trailing mean or the weekend multiplier.
+    median_buy = statistics.median([q for _, q in per_buy])
+    excluded_qtys: list[float] = []
+    kept = per_buy
+    if median_buy > 0:
+        cap = _QTY_ANOMALY_FACTOR * median_buy
+        filtered = [(d, q) for d, q in per_buy if q <= cap]
+        excluded_qtys = [q for _, q in per_buy if q > cap]
+        if filtered:  # never strip the history down to nothing
+            kept = filtered
+        else:
+            excluded_qtys = []
+
+    trailing = [q for _, q in kept[-_TRAILING_BUYS:]]
     base = statistics.fmean(trailing)
     cadence = cadence_info.get("cadence")
 
     if cadence == oc.DAILY:
-        mult = weekend_multiplier(per_buy)
+        mult = weekend_multiplier(kept)
         applied = mult if target_day.weekday() in _WEEKEND_WEEKDAYS else 1.0
         raw_qty = base * applied
         if applied > 1.0:
@@ -139,10 +164,8 @@ def forecast_qty(records: list[dict], cadence_info: dict, *, target_day: date,
         pack_known = False
     qty = max(qty, 1)
 
-    # Plausibility guard: the median per-buy quantity is robust to a single
-    # OCR-merged outlier (qty 40250 vs a real ~40). If the forecast dwarfs it,
-    # cap to a sane bound and flag for review instead of printing the garbage.
-    median_buy = statistics.median([q for _, q in per_buy])
+    # Last-resort cap: if the median itself is poisoned (so exclusion couldn't
+    # help), still refuse to print a garbage number — cap and flag for review.
     qty_anomaly = False
     raw_qty_out = qty
     if median_buy > 0 and qty > _QTY_ANOMALY_FACTOR * median_buy:
@@ -150,10 +173,14 @@ def forecast_qty(records: list[dict], cadence_info: dict, *, target_day: date,
         qty = max(1, int(math.ceil(_QTY_ANOMALY_FACTOR * median_buy)))
         basis = "qty anomaly: forecast %d capped (median buy %.1f)" % (
             raw_qty_out, median_buy)
+    elif excluded_qtys:
+        basis += " (%d outlier buy%s excluded)" % (
+            len(excluded_qtys), "" if len(excluded_qtys) == 1 else "s")
 
     return {"qty": qty, "pack": pack_noun, "pack_known": pack_known,
             "basis": basis, "qty_anomaly": qty_anomaly, "raw_qty": raw_qty_out,
-            "history_expired": False}
+            "history_expired": False,
+            "excluded_count": len(excluded_qtys), "excluded_qtys": excluded_qtys}
 
 
 # --- formatting --------------------------------------------------------------
@@ -205,6 +232,11 @@ def format_item_line(line: dict) -> str:
     if line.get("qty_anomaly"):
         out.append("   ❗ qty anomaly — check history (saw %s)"
                    % _fmt_qty(line.get("raw_qty")))
+    exc = line.get("excluded_count") or 0
+    if exc:
+        biggest = _fmt_qty(max(line.get("excluded_qtys") or [0]))
+        out.append("   ⓘ %d baris luar julat diabaikan (cth qty %s) — purata dari baki"
+                   % (exc, biggest))
     if not line.get("pack_known", False):
         out.append("   ❓ confirm pack size (sack/carton/tin)")
     if ci.get("needs_review"):
