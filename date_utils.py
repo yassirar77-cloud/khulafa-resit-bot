@@ -26,6 +26,13 @@ DEFAULT_MAX_FUTURE_DAYS = 3
 # is garbage. Used by effective_purchase_date / the corrupt-date repair.
 DEFAULT_MAX_DRIFT_DAYS = 60
 
+# Most corruption seen in the wild is a pure YEAR misread (2024/2025/2086 on a
+# 2026 upload) where the month+day are correct. When swapping the year to the
+# ingestion year lands the date within this many days of the ingestion day, we
+# treat it as a year-OCR-fix and KEEP the real month/day rather than collapsing
+# to the upload day — preserving the true purchase day that cadence depends on.
+DEFAULT_YEAR_FIX_TOLERANCE_DAYS = 14
+
 
 _ISO_RE = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})$")
 _DMY_RE = re.compile(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$")
@@ -131,29 +138,56 @@ def clamp_business_date(receipt_date, created_at, *, max_future_days=DEFAULT_MAX
     return rd, False
 
 
+def _year_fix_candidate(rd, ud, *, today, max_future_days, tolerance_days):
+    """If ``rd`` is a pure year-OCR-error, return the year-corrected date that
+    keeps rd's month/day and lands closest to the ingestion day ``ud`` (within
+    ``tolerance_days``), else ``None``. Tries the ingestion year and the year
+    before it; never returns a future date. Adding whole years (not
+    ``date.replace``) clamps Feb-29 onto Feb-28 instead of raising."""
+    best = None
+    for year in (ud.year, ud.year - 1):
+        # Shift rd's year (clamps Feb-29 -> Feb-28 when the target isn't a leap year).
+        try:
+            cand = rd.replace(year=year)
+        except ValueError:
+            try:
+                cand = rd.replace(year=year, day=28)
+            except ValueError:
+                continue
+        if cand > today + timedelta(days=max_future_days):
+            continue
+        if abs((cand - ud).days) <= tolerance_days:
+            if best is None or abs((cand - ud).days) < abs((best - ud).days):
+                best = cand
+    return best
+
+
 def effective_purchase_date(receipt_date, ingested_at, *, today=None,
                             max_future_days=0,
-                            max_drift_days=DEFAULT_MAX_DRIFT_DAYS):
+                            max_drift_days=DEFAULT_MAX_DRIFT_DAYS,
+                            year_fix_tolerance_days=DEFAULT_YEAR_FIX_TOLERANCE_DAYS):
     """The date a purchase should be keyed on, robust to OCR date corruption.
 
     Returns ``(effective_date: date | None, corrected: bool, reason: str | None)``.
 
-    The ingestion day (``ingested_at`` -> MY-local) is the reliable signal: a bill
-    is uploaded within days of the purchase. So ``receipt_date`` is trusted unless
-    it is implausible, in which case we fall back to the ingestion day rather than
-    guess:
+    A plausible ``receipt_date`` is trusted. When it is implausible — in the
+    FUTURE (> today + ``max_future_days``) or more than ``max_drift_days`` from
+    the ingestion day — we correct it with a deliberate priority that AVOIDS
+    guessing wildly (the bulk of real corruption is a pure year misread):
 
-      * implausible when it is in the FUTURE (> today + ``max_future_days``), or
-      * more than ``max_drift_days`` from the ingestion day in EITHER direction
-        (a 2024 date on a 2026 upload, a date months ahead).
+      1. YEAR-FIX: swap the year to the ingestion year (or the year before). If
+         that lands within ``year_fix_tolerance_days`` of the ingestion day, keep
+         it — this preserves the true month/day (e.g. 2024-05-14 -> 2026-05-14),
+         which is what cadence needs.
+      2. FUTURE fallback: a future date with no good year-fix can't be trusted at
+         all, so fall back to the ingestion day.
+      3. FLAG ONLY: an implausibly OLD date whose month/day is far from ingestion
+         even after a year-fix is ambiguous (could be a genuinely late upload), so
+         it is returned UNCHANGED with corrected=False and a reason — surfaced for
+         review, never silently rewritten.
 
-    Edge cases, handled deliberately:
-      * ``receipt_date`` missing/unparseable -> ingestion day (corrected=True),
-        or ``None`` if there is no ingestion day either.
-      * ``receipt_date`` implausible but NO ingestion day to fall back on ->
-        keep the (bad) receipt_date, corrected=False, reason flags it so a caller
-        can still surface it rather than silently trust it.
-      * a plausible receipt_date is returned unchanged (corrected=False).
+    Edge cases: missing/unparseable receipt_date -> ingestion day (or None if no
+    ingestion day); implausible with NO ingestion anchor -> flagged, unchanged.
 
     Pure: used by BOTH the read path (cadence/forecast) and the one-time repair,
     so they always agree on what "corrupt" means and what the fix is.
@@ -175,8 +209,19 @@ def effective_purchase_date(receipt_date, ingested_at, *, today=None,
         return rd, False, None
     if ud is None:
         # Can't correct without a reference day — flag, don't guess.
-        return rd, False, ("future receipt_date, no ingestion day" if future
-                           else "receipt_date implausible, no ingestion day")
-    reason = ("future receipt_date %s" % rd.isoformat() if future
-              else "receipt_date %s is %d days from ingestion" % (rd.isoformat(), drift))
-    return ud, True, reason
+        return rd, False, ("future receipt_date, no ingestion anchor" if future
+                           else "implausible receipt_date, no ingestion anchor")
+
+    # 1. Year-OCR fix (preserves the real month/day).
+    yf = _year_fix_candidate(rd, ud, today=today, max_future_days=max_future_days,
+                             tolerance_days=year_fix_tolerance_days)
+    if yf is not None:
+        return yf, True, "year fix %s -> %s (month/day kept)" % (rd.isoformat(), yf.isoformat())
+
+    # 2. Future with no plausible year-fix -> ingestion day is the safest guess.
+    if future:
+        return ud, True, "future %s -> ingestion day %s" % (rd.isoformat(), ud.isoformat())
+
+    # 3. Implausibly old, month/day far from ingestion -> ambiguous, don't guess.
+    return rd, False, ("old date %s, %d days from ingestion — needs review"
+                       % (rd.isoformat(), drift))

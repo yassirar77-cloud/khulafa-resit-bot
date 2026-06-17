@@ -54,10 +54,12 @@ class RepairCorruptDatesTests(unittest.TestCase):
         self.assertEqual(totals["written"], 3)
 
         recs = {r["merchant"]: r["receipt_date"] for r in self.fake.rows("receipts")}
-        self.assertEqual(recs["INBOIS"], "2026-05-22")   # future -> ingested
-        self.assertEqual(recs["AYAM CO"], "2026-05-08")  # stale -> ingested
+        self.assertEqual(recs["INBOIS"], "2026-05-22")   # future, no year-fix -> ingested
+        self.assertEqual(recs["AYAM CO"], "2026-05-08")  # year fix keeps 05-08
         self.assertEqual(recs["BESTARI"], "2026-06-14")  # plausible untouched
         self.assertEqual(self.fake.rows("item_prices")[0]["receipt_date"], "2026-06-10")
+        self.assertEqual(totals["year_fix"], 1)          # AYAM CO 2024-05-08 -> 2026-05-08
+        self.assertEqual(totals["ingest_fallback"], 2)   # INBOIS future x2
 
         # Idempotent: nothing left to repair.
         again = rcd.run(self.fake, apply=True, max_drift_days=60)
@@ -69,8 +71,19 @@ class RepairCorruptDatesTests(unittest.TestCase):
         ])
         totals = rcd.run(self.fake, apply=True, max_drift_days=60)
         self.assertEqual(totals["written"], 0)
-        self.assertEqual(totals["unfixable"], 1)
+        self.assertEqual(totals["flagged"], 1)
         self.assertEqual(self.fake.rows("receipts")[0]["receipt_date"], "2026-06-26")
+
+    def test_ambiguous_old_date_flagged_not_rewritten(self):
+        # Real-looking old date far from ingestion (late upload?) -> don't guess.
+        self._seed("item_prices", [
+            {"merchant": "EVEREST", "canonical_item": "ais_batu",
+             "receipt_date": "2026-03-15", "created_at": "2026-05-31T02:00:00+00:00"},
+        ])
+        totals = rcd.run(self.fake, apply=True, max_drift_days=60)
+        self.assertEqual(totals["written"], 0)
+        self.assertEqual(totals["flagged"], 1)
+        self.assertEqual(self.fake.rows("item_prices")[0]["receipt_date"], "2026-03-15")
 
 
 if __name__ == "__main__":

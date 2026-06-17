@@ -64,17 +64,19 @@ def _fetch_all(client, table, columns, page=1000):
 
 
 def _scan(client, table, *, today, max_drift_days):
-    """Return (repairs, unfixable) for one table.
+    """Return (repairs, flagged) for one table.
 
-    repairs:   rows we WOULD change -> dicts with id/merchant/old/new/ingested/reason
-    unfixable: implausible rows with no created_at anchor -> reported, untouched
+    repairs:  rows we WOULD change (year-fix or future->ingestion) -> dicts with
+              id/merchant/old/new/ingested/reason
+    flagged:  implausible rows we DON'T change — ambiguous old dates or rows with
+              no ingestion anchor -> reported for manual review, left untouched
     """
     rows = _fetch_all(client, table, "id, merchant, receipt_date, created_at")
-    repairs, unfixable = [], []
+    repairs, flagged = [], []
     for r in rows:
         eff, corrected, reason = date_utils.effective_purchase_date(
             r.get("receipt_date"), r.get("created_at"),
-            today=today, max_future_days=0, max_drift_days=max_drift_days)
+            today=today, max_drift_days=max_drift_days)
         if corrected and eff is not None:
             old = date_utils._parse_local_date(r.get("receipt_date"))
             if old == eff:
@@ -83,14 +85,17 @@ def _scan(client, table, *, today, max_drift_days):
                 "id": r.get("id"), "merchant": r.get("merchant"),
                 "old": r.get("receipt_date"),
                 "ingested": date_utils._parse_upload_date(r.get("created_at")),
-                "new": eff.isoformat(), "reason": reason,
+                "new": eff.isoformat(),
+                "kind": "YEAR_FIX" if "year fix" in (reason or "") else "INGEST_FALLBACK",
+                "reason": reason,
             })
-        elif reason is not None and "no ingestion" in (reason or ""):
-            unfixable.append({
+        elif reason is not None:
+            # Implausible but we won't guess (ambiguous old / no anchor).
+            flagged.append({
                 "id": r.get("id"), "merchant": r.get("merchant"),
                 "old": r.get("receipt_date"), "reason": reason,
             })
-    return repairs, unfixable
+    return repairs, flagged
 
 
 def run(client, *, apply: bool, max_drift_days: int) -> dict:
@@ -100,20 +105,26 @@ def run(client, *, apply: bool, max_drift_days: int) -> dict:
           % (today, max_drift_days, "APPLY — WILL WRITE" if apply else "DRY RUN — no writes"))
     print("=" * 78)
 
-    totals = {"repairs": 0, "unfixable": 0, "written": 0}
+    totals = {"repairs": 0, "year_fix": 0, "ingest_fallback": 0,
+              "flagged": 0, "written": 0}
     for table in _TABLES:
-        repairs, unfixable = _scan(client, table, today=today, max_drift_days=max_drift_days)
+        repairs, flagged = _scan(client, table, today=today, max_drift_days=max_drift_days)
+        yf = sum(1 for x in repairs if x["kind"] == "YEAR_FIX")
+        ifb = len(repairs) - yf
         totals["repairs"] += len(repairs)
-        totals["unfixable"] += len(unfixable)
-        print("\n--- %s --- %d to repair, %d unfixable (no ingestion anchor)"
-              % (table, len(repairs), len(unfixable)))
+        totals["year_fix"] += yf
+        totals["ingest_fallback"] += ifb
+        totals["flagged"] += len(flagged)
+        print("\n--- %s --- %d to repair (%d year-fix keep MM-DD, %d future->ingest), "
+              "%d flagged for review (untouched)"
+              % (table, len(repairs), yf, ifb, len(flagged)))
         if repairs:
-            print("  id | merchant | receipt_date -> proposed (ingested) | reason")
+            print("  id | merchant | receipt_date -> proposed | kind | reason")
             for x in sorted(repairs, key=lambda d: str(d["old"]), reverse=True):
-                print("  %s | %-26s | %s -> %s (%s) | %s" % (
+                print("  %s | %-26s | %s -> %s | %-15s | %s" % (
                     x["id"], str(x["merchant"])[:26], x["old"], x["new"],
-                    x["ingested"], x["reason"]))
-        for x in unfixable:
+                    x["kind"], x["reason"]))
+        for x in flagged:
             print("  ⚠️ id=%s merchant=%r receipt_date=%s — %s (left untouched)"
                   % (x["id"], x["merchant"], x["old"], x["reason"]))
 
@@ -124,11 +135,11 @@ def run(client, *, apply: bool, max_drift_days: int) -> dict:
                 totals["written"] += 1
                 print("  ✔ %s id=%s: %s -> %s" % (table, x["id"], x["old"], x["new"]))
 
-    print("\n%s — %d row(s) %s; %d unfixable flagged." % (
-        "APPLIED" if apply else "DRY RUN",
-        totals["written"] if apply else totals["repairs"],
-        "written" if apply else "would be repaired",
-        totals["unfixable"]))
+    print("\n%s — %d row(s) %s (%d year-fix, %d future->ingest); %d flagged for review."
+          % ("APPLIED" if apply else "DRY RUN",
+             totals["written"] if apply else totals["repairs"],
+             "written" if apply else "would be repaired",
+             totals["year_fix"], totals["ingest_fallback"], totals["flagged"]))
     if not apply:
         print("Re-run with --apply to write the proposed corrections.")
     return totals

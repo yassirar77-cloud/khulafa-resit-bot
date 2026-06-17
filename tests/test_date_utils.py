@@ -35,23 +35,39 @@ class EffectivePurchaseDate(unittest.TestCase):
         self.assertFalse(corrected)
         self.assertIsNone(reason)
 
-    def test_future_date_falls_back_to_ingestion(self):
+    def test_year_error_aligned_is_year_fixed(self):
+        # 2024-05-14 ingested 2026-05-19 -> year fix to 2026-05-14 (month/day kept,
+        # NOT collapsed to the upload day 2026-05-19).
+        eff, corrected, reason = effective_purchase_date(
+            "2024-05-14", "2026-05-19T02:00:00+00:00", today=self.today)
+        self.assertEqual(eff, date(2026, 5, 14))
+        self.assertTrue(corrected)
+        self.assertIn("year fix", reason)
+
+    def test_wild_future_year_with_real_month_day_is_year_fixed(self):
+        # 2086-05-30 ingested 2026-05-20 -> 2026-05-30 (real month/day preserved).
         eff, corrected, _ = effective_purchase_date(
-            "2026-08-22", self.ingested, today=self.today)
-        self.assertEqual(eff, date(2026, 6, 15))
+            "2086-05-30", "2026-05-20T02:00:00+00:00", today=self.today)
+        self.assertEqual(eff, date(2026, 5, 30))
         self.assertTrue(corrected)
 
-    def test_far_future_year_falls_back(self):
-        eff, corrected, _ = effective_purchase_date(
-            "2029-05-29", self.ingested, today=self.today)
-        self.assertEqual(eff, date(2026, 6, 15))
+    def test_future_no_yearfix_falls_back_to_ingestion(self):
+        # 2026-08-22 ingested 2026-05-22: year-fix candidates are future or far,
+        # so fall back to the ingestion day.
+        eff, corrected, reason = effective_purchase_date(
+            "2026-08-22", "2026-05-22T02:00:00+00:00", today=self.today)
+        self.assertEqual(eff, date(2026, 5, 22))
         self.assertTrue(corrected)
+        self.assertIn("ingestion day", reason)
 
-    def test_stale_year_beyond_drift_falls_back(self):
-        eff, corrected, _ = effective_purchase_date(
-            "2024-05-08", self.ingested, today=self.today)
-        self.assertEqual(eff, date(2026, 6, 15))
-        self.assertTrue(corrected)
+    def test_ambiguous_old_date_flagged_not_rewritten(self):
+        # 2026-03-15 ingested 2026-05-31 (77d): not future, no near year-fix ->
+        # left UNCHANGED, flagged for review (don't guess wildly).
+        eff, corrected, reason = effective_purchase_date(
+            "2026-03-15", "2026-05-31T02:00:00+00:00", today=self.today)
+        self.assertEqual(eff, date(2026, 3, 15))
+        self.assertFalse(corrected)
+        self.assertIn("needs review", reason)
 
     def test_missing_receipt_date_uses_ingestion(self):
         eff, corrected, _ = effective_purchase_date(None, self.ingested, today=self.today)
