@@ -175,10 +175,21 @@ def format_item_line(line: dict) -> str:
     ``line`` keys: canonical_item, qty, pack, pack_known, cadence_info,
     due_info, supplier, alternate (dict|None), spike (str|None).
     """
-    ci = line["cadence_info"]
     name = order_items.display_name(line["canonical_item"])
-    qty = line.get("qty")
     pack = line.get("pack") or "unit"
+
+    # Standing orders bypass OCR/forecast entirely: a clean fixed-baseline line,
+    # no cadence tag, no flags, no reasoning. Manager can still edit the qty.
+    if line.get("standing"):
+        out = ["• %s — %s %s   (standing order)"
+               % (name, _fmt_standing_qty(line.get("qty")), pack)]
+        supplier = line.get("supplier")
+        if supplier:
+            out.append("   ↳ supplier: %s" % supplier)
+        return "\n".join(out)
+
+    ci = line["cadence_info"]
+    qty = line.get("qty")
     if line.get("history_expired") or qty is None:
         qty_txt = "reorder?"
     else:
@@ -232,6 +243,15 @@ def _fmt_qty(value) -> str:
         return str(value)
 
 
+def _fmt_standing_qty(value) -> str:
+    """Display a configured standing-order qty: whole numbers as ints, else 1dp."""
+    try:
+        f = float(value)
+        return "%d" % int(f) if f == int(f) else "%.1f" % f
+    except (TypeError, ValueError):
+        return str(value) if value is not None else "?"
+
+
 def format_item_line_compact(line: dict) -> str:
     """A single-line draft entry — name, qty, cadence tag and flag emojis only.
 
@@ -239,10 +259,13 @@ def format_item_line_compact(line: dict) -> str:
     Telegram messages: the manager gets a compact, scannable list and the full
     reasoning stays in ``order_drafts`` / the dashboard. Supplier is shown by the
     group header, so it is omitted from the line itself."""
-    ci = line["cadence_info"]
     name = order_items.display_name(line["canonical_item"])
-    qty = line.get("qty")
     pack = line.get("pack") or "unit"
+    if line.get("standing"):
+        return "• %s — %s %s  (tetap)" % (
+            name, _fmt_standing_qty(line.get("qty")), pack)
+    ci = line["cadence_info"]
+    qty = line.get("qty")
     if line.get("history_expired") or qty is None:
         qty_txt = "reorder?"
     else:

@@ -29,6 +29,7 @@ import date_utils
 import order_cadence as oc
 import order_draft
 import order_items
+import standing_orders
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +256,8 @@ def persist_drafts(supabase, outlet_code: str, due_date: date, lines: list[dict]
         for ln in lines:
             ci = ln["cadence_info"]
             flags = []
+            if ln.get("standing"):
+                flags.append("STANDING")
             if not ln.get("pack_known"):
                 flags.append("PACK_UNKNOWN")
             if ci.get("needs_review"):
@@ -345,11 +348,28 @@ def gather_order_drafts(supabase, *, today: date | None = None,
     for (outlet, canonical), records in grouped.items():
         by_outlet.setdefault(outlet, {})[canonical] = records
 
+    # Standing orders (roti/capati/gas …): fixed daily staples emitted straight
+    # from config, bypassing the OCR/forecast path entirely.
+    standing_by_outlet = standing_orders.group_by_outlet(
+        standing_orders.fetch_standing_orders(supabase))
+
     outlets_out: list[dict] = []
-    for outlet_code in sorted(by_outlet):
+    # Include outlets that ONLY have standing orders (no item_prices history) —
+    # the whole point is to surface them even when OCR captured nothing.
+    for outlet_code in sorted(set(by_outlet) | set(standing_by_outlet)):
+        items = by_outlet.get(outlet_code, {})
+        standing = standing_by_outlet.get(outlet_code, [])
+        standing_items = {s["item"] for s in standing}
+        # Standing items supersede the forecast path — drop them so they're never
+        # double-emitted or marked NEEDS_REVIEW from corrupt OCR history.
+        forecast_items = {c: recs for c, recs in items.items()
+                          if c not in standing_items}
+
         if persist:
-            persist_cadence(supabase, outlet_code, by_outlet[outlet_code], today=today)
-        lines = build_lines_for_outlet(by_outlet[outlet_code], today=today)
+            persist_cadence(supabase, outlet_code, forecast_items, today=today)
+        standing_lines = [standing_orders.build_standing_line(s) for s in standing]
+        forecast_lines = build_lines_for_outlet(forecast_items, today=today)
+        lines = standing_lines + forecast_lines
         if not lines:
             continue
         display = display_for(outlet_code)
@@ -372,5 +392,5 @@ def gather_order_drafts(supabase, *, today: date | None = None,
     return {
         "target_day": target_day,
         "outlets": outlets_out,
-        "has_data": bool(rows),
+        "has_data": bool(rows) or bool(standing_by_outlet),
     }
