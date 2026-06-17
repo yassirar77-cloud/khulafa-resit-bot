@@ -101,12 +101,20 @@ class BriefTestCases(unittest.TestCase):
             total=270.0, merchant="RANAU PETROGAS SDN BHD")
         self.assertEqual(r.receipt_type, ReceiptType.SUPPLIER_PURCHASE)
 
-    def test_invois_word_not_misread_as_supplier(self):
-        # The Malay word "INVOIS"/"INBOIS" (invoice) must not be whitelisted as a
-        # supplier; with no real supplier token this stays UNKNOWN.
+    def test_inbois_gas_supplier_whitelisted(self):
+        # Confirmed real LPG gas supplier (recurring 2-day cycle, months of
+        # history) — must classify SUPPLIER_PURCHASE.
         r = classify_receipt(
-            "INBOIS ... GAS ... 40.00", parsed_items=[], total=40.0,
-            merchant="INBOIS")
+            "INBOIS ... GAS ... 40.00", parsed_items=[{"name": "GAS", "qty": 4, "price": 10.0}],
+            total=40.0, merchant="INBOIS")
+        self.assertEqual(r.receipt_type, ReceiptType.SUPPLIER_PURCHASE)
+
+    def test_invois_word_alone_stays_unknown(self):
+        # The invoice WORD "INVOIS" (with a V) is distinct from supplier "INBOIS"
+        # (with a B): an invoice body with no real supplier token stays UNKNOWN.
+        r = classify_receipt(
+            "INVOIS ... THING ... 40.00", parsed_items=[], total=40.0,
+            merchant="INVOIS")
         self.assertEqual(r.receipt_type, ReceiptType.UNKNOWN)
 
     def test_tnb_utility(self):

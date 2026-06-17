@@ -158,13 +158,17 @@ SUPPLIER_WHITELIST = [
     # so their receipts fell to UNKNOWN and never reached item_prices (the
     # order generator went blind on roti/capati/gas from ~2026-05-23). These
     # are real supplier merchants confirmed in item_prices history.
-    #   "DIAMOND BALL"  -> roti/capati (all outlets)
-    #   "RANAU PETROGAS"-> LPG cooking gas
-    # NOTE: a "merchant" of INBOIS is deliberately NOT added — it is almost
-    # certainly OCR of "INVOIS" (Malay for invoice), not a real supplier; see
-    # docs/briefs/classification-gap-investigation.md before whitelisting it.
+    #   "DIAMOND BALL"   -> roti/capati (all outlets)
+    #   "RANAU PETROGAS" -> LPG cooking gas
+    #   "INBOIS"         -> LPG cooking gas (recurring ~2-day cycle across
+    #                       Vista/Jakel/Signature/SEK-20, months of history;
+    #                       confirmed a real supplier, NOT OCR of "INVOIS").
+    # Note the spelling: the whitelist token "INBOIS" (with a B) does NOT match
+    # the Malay invoice word "INVOIS" (with a V) that prints on bill bodies, so
+    # this does not misclassify invoices.
     "DIAMOND",
     "RANAU PETROGAS",
+    "INBOIS",
     # MYMOON'S KITCHEN OCR variants. Both substrings are kept (MOON
     # listed first so the canonical "MYMOON'S" matches the shorter, more
     # generic token). Coverage: 6 of 10 observed variants — the four

@@ -42,10 +42,25 @@ underlying whitelist gap.
   cooking-gas supply. Correctly excluded from supplier orders.
 - **Victory** → `STAFF_ADVANCE`: staff advances at Damansara, **not** a gas
   supplier.
-- **"Inbois"** → almost certainly OCR of **"INVOIS"** (Malay for *invoice*), the
-  word printed on bill bodies (cf. `test_tnb_utility` uses "INVOIS ELEKTRIK"),
-  not a real merchant. **Deliberately NOT whitelisted** — needs raw-text
-  confirmation first (query below).
+- **"Inbois"** → **CONFIRMED a real LPG gas supplier** (recurring ~2-day cycle
+  across Vista/Jakel/Signature/SEK-20, months of history) — now whitelisted.
+  Note the spelling: token `INBOIS` (with a **B**) is distinct from the Malay
+  invoice word `INVOIS` (with a **V**) that prints on bill bodies, so it does not
+  misclassify invoices (test `test_invois_word_alone_stays_unknown`).
+
+## Open: extraction quality varies by receipt format / outlet (not just date)
+`lines 0` is **not** a clean 23–24 May regression. Diamond Ball shows `lines 0`
+consistently for **Kl Sg Besi** and **HJ SHARFUDDIN SEK 6** going back to early
+May, while **Bistro / SEK-20** get `lines 2` — so extraction quality tracks the
+**receipt format/outlet**, not only the date. Whether the fix is the item_prices
+backfill (#85) or a **re-extraction/re-OCR** depends on case A vs B:
+- **Case A** — `receipts.items` *has* line rows but they don't reach
+  `item_prices` (canonical null, or header gated UNKNOWN): backfill/reclassify
+  recovers them.
+- **Case B** — the item block is **absent from the OCR/parse** for that format:
+  backfill cannot help; those receipts need re-OCR/re-parse.
+
+Raw-text samples to decide this are pending (one `lines 2` + two `lines 0`).
 
 ## Fix shipped in this PR (durable, live-path)
 Added to `SUPPLIER_WHITELIST` so **new** receipts classify correctly at
