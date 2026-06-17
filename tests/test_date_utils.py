@@ -13,7 +13,47 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datetime import date  # noqa: E402
 
-from date_utils import clamp_business_date, normalize_date  # noqa: E402
+from date_utils import (  # noqa: E402
+    clamp_business_date,
+    normalize_date,
+    plausible_receipt_date,
+)
+
+
+class PlausibleReceiptDate(unittest.TestCase):
+    """Guard the OCR date corruption seen feeding the order generator."""
+
+    def setUp(self):
+        self.today = date(2026, 6, 17)
+
+    def test_normal_date_is_plausible(self):
+        ok, reason = plausible_receipt_date("2026-05-22", today=self.today)
+        self.assertTrue(ok)
+        self.assertIsNone(reason)
+
+    def test_wildly_future_date_flagged(self):
+        ok, reason = plausible_receipt_date("2026-08-22", today=self.today)
+        self.assertFalse(ok)
+        self.assertIn("masa depan", reason)
+
+    def test_far_future_year_flagged(self):
+        ok, _ = plausible_receipt_date("2029-05-29", today=self.today)
+        self.assertFalse(ok)
+
+    def test_prehistoric_year_flagged(self):
+        ok, reason = plausible_receipt_date("2019-01-01", today=self.today)
+        self.assertFalse(ok)
+        self.assertIn("sebelum", reason)
+
+    def test_unparseable_flagged(self):
+        ok, reason = plausible_receipt_date("not-a-date", today=self.today)
+        self.assertFalse(ok)
+        self.assertIn("dibaca", reason)
+
+    def test_valid_but_old_is_still_plausible(self):
+        # Aged out of a lookback window is a separate concern, not corruption.
+        ok, _ = plausible_receipt_date("2025-06-15", today=self.today)
+        self.assertTrue(ok)
 
 
 class ClampBusinessDate(unittest.TestCase):
