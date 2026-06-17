@@ -59,6 +59,21 @@ class GeneratorTests(unittest.TestCase):
         out = order_generator.gather_order_drafts(self.fake, today=self.today)
         self.assertEqual(out["outlets"], [])
 
+    def test_corrupt_future_dates_flagged_not_silent(self):
+        rows = self._daily_ayam(n=20, qty=10)
+        # Two OCR-corrupted future dates (e.g. 2026-08-22 ingested in June).
+        rows += [{
+            "outlet_code": "SEK20", "canonical_item": "ayam",
+            "qty": 10, "unit_price": 9.0, "merchant": "BESTARI FARM",
+            "raw_item_name": "AYAM",
+            "receipt_date": (self.today + timedelta(days=60 + i)).isoformat(),
+        } for i in range(2)]
+        _seed_item_prices(self.fake, rows)
+        out = order_generator.gather_order_drafts(self.fake, today=self.today)
+        ayam = next(d for d in self.fake.rows("order_drafts") if d["item"] == "ayam")
+        self.assertIn("BAD_DATE", ayam["flags"])
+        self.assertIn("luar julat", out["outlets"][0]["message"])
+
     def test_lookback_excludes_old_rows(self):
         old = [{
             "outlet_code": "SEK20", "canonical_item": "ayam",

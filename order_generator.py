@@ -25,6 +25,7 @@ import os
 import statistics
 from datetime import date, datetime, timedelta
 
+import date_utils
 import order_cadence as oc
 import order_draft
 import order_items
@@ -163,6 +164,23 @@ def spike_note(records: list[dict]) -> str | None:
     return None
 
 
+def _bad_date_stats(records: list[dict], *, today: date) -> tuple[int, str | None]:
+    """Count records whose receipt_date is implausible (OCR-corrupted future /
+    pre-history dates) and return one example. These rows are already dropped
+    from the cadence/forecast window, but we surface the count so a silent drop
+    becomes a visible "verify" note rather than a mystery gap."""
+    count = 0
+    example: str | None = None
+    for r in records or []:
+        ok, _ = date_utils.plausible_receipt_date(r.get("date"), today=today)
+        if not ok:
+            count += 1
+            if example is None:
+                d = oc._to_date(r.get("date"))
+                example = d.isoformat() if d else str(r.get("date"))
+    return count, example
+
+
 def build_lines_for_outlet(items: dict[str, list[dict]], *, today: date) -> list[dict]:
     """Build the due draft lines for one outlet.
 
@@ -185,6 +203,7 @@ def build_lines_for_outlet(items: dict[str, list[dict]], *, today: date) -> list
         fc = order_draft.forecast_qty(records, cadence_info, target_day=tomorrow,
                                       today=today, lookback_days=lookback_days())
         supplier = dominant_supplier(records)
+        bad_date_count, bad_date_example = _bad_date_stats(records, today=today)
         lines.append({
             "canonical_item": canonical,
             "qty": fc["qty"],
@@ -192,6 +211,8 @@ def build_lines_for_outlet(items: dict[str, list[dict]], *, today: date) -> list
             "pack_known": fc["pack_known"],
             "qty_anomaly": fc.get("qty_anomaly", False),
             "raw_qty": fc.get("raw_qty"),
+            "bad_date_count": bad_date_count,
+            "bad_date_example": bad_date_example,
             "history_expired": fc.get("history_expired", False),
             "cadence_info": cadence_info,
             "due_info": due,
@@ -229,6 +250,8 @@ def persist_drafts(supabase, outlet_code: str, due_date: date, lines: list[dict]
                 flags.append("PACK_UNKNOWN")
             if ci.get("needs_review"):
                 flags.append("NEEDS_REVIEW")
+            if ln.get("bad_date_count"):
+                flags.append("BAD_DATE")
             if ln.get("alternate"):
                 flags.append("CHEAPER_ALT")
             if ln.get("spike"):

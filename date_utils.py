@@ -104,6 +104,27 @@ def _parse_upload_date(value):
     return dt.astimezone(_MY_TZ).date()
 
 
+def plausible_receipt_date(value, *, today=None,
+                           max_future_days=DEFAULT_MAX_FUTURE_DAYS,
+                           min_year=MIN_PLAUSIBLE_YEAR) -> tuple[bool, str | None]:
+    """Is ``value`` a believable receipt date? Returns ``(ok, reason)``.
+
+    Flags the OCR date corruption seen in the wild — wildly future dates
+    (``2026-08-22`` ingested in May, ``2029-05-29``) and pre-history years — so
+    callers can surface/reject them rather than silently dropping the row. A
+    valid-but-old date (e.g. last year) is NOT implausible; it's just aged out of
+    a lookback window, which is a separate concern."""
+    today = today or date.today()
+    d = _parse_local_date(value)
+    if d is None:
+        return False, "tarikh tak boleh dibaca"
+    if d.year < min_year:
+        return False, "tahun %d sebelum %d" % (d.year, min_year)
+    if (d - today).days > max_future_days:
+        return False, "%s di masa depan" % d.isoformat()
+    return True, None
+
+
 def clamp_business_date(receipt_date, created_at, *, max_future_days=DEFAULT_MAX_FUTURE_DAYS):
     """Effective business date for a receipt, guarding against future OCR dates.
 
