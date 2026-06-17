@@ -160,6 +160,9 @@ def forecast_qty(records: list[dict], cadence_info: dict, *, target_day: date,
 
 def _cadence_tag(cadence_info: dict, due_info: dict) -> str:
     cadence = cadence_info.get("cadence")
+    if cadence_info.get("verify_only"):
+        # Too few buys to claim a rhythm — say nothing confident.
+        return "cadence: verify"
     if cadence == oc.DAILY:
         return "cadence: daily"
     if cadence == oc.NEEDS_REVIEW:
@@ -207,7 +210,10 @@ def format_item_line(line: dict) -> str:
                    % _fmt_qty(line.get("raw_qty")))
     if not line.get("pack_known", False):
         out.append("   ❓ confirm pack size (sack/carton/tin)")
-    if ci.get("needs_review"):
+    if ci.get("verify_only"):
+        # Quiet manager-block note — not a loud NEEDS REVIEW, no invented cycle.
+        out.append("   ❓ verify — %s" % ci.get("reason", "too few buys"))
+    elif ci.get("needs_review"):
         out.append("   ❓ NEEDS REVIEW — %s" % ci.get("reason", "erratic cadence"))
     alt = line.get("alternate")
     if alt:

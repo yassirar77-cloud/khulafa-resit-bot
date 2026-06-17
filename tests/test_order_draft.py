@@ -176,6 +176,20 @@ class FormatTests(unittest.TestCase):
         self.assertIn("💰", txt)
         self.assertIn("⚠️", txt)
 
+    def test_verify_only_is_quiet_no_invented_cycle(self):
+        # <3 buys: quiet "verify", no "usually every N days", no loud NEEDS REVIEW.
+        line = self._line(
+            cadence_info={"cadence": oc.NEEDS_REVIEW, "needs_review": True,
+                          "verify_only": True, "last_purchase_date": self.today,
+                          "median_gap_days": None,
+                          "reason": "verify — only 2 buy(s) so far"},
+        )
+        txt = order_draft.format_item_line(line)
+        self.assertIn("cadence: verify", txt)
+        self.assertIn("verify — only 2", txt)
+        self.assertNotIn("usually every", txt)
+        self.assertNotIn("NEEDS REVIEW", txt)
+
     def test_outlet_message_groups_by_supplier(self):
         lines = [self._line(supplier="BESTARI FARM"),
                  self._line(canonical_item="udang", supplier="FOOK LEONG")]

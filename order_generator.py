@@ -227,7 +227,9 @@ def persist_drafts(supabase, outlet_code: str, due_date: date, lines: list[dict]
             flags = []
             if not ln.get("pack_known"):
                 flags.append("PACK_UNKNOWN")
-            if ci.get("needs_review"):
+            if ci.get("verify_only"):
+                flags.append("VERIFY")
+            elif ci.get("needs_review"):
                 flags.append("NEEDS_REVIEW")
             if ln.get("alternate"):
                 flags.append("CHEAPER_ALT")
