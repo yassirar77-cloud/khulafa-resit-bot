@@ -50,24 +50,34 @@ Paste the result; correct any numbers (the median is a starting point, not
 gospel — e.g. a 2-day gas cycle may want the per-day equivalent or stay as the
 per-delivery qty with `cadence='EVERY_2_DAYS'` for documentation).
 
-## Step 2 — seed the table (after approval)
-One row per outlet/item, e.g.:
+## Step 2 — seed (SHIPPED in migration 0030)
+The confirmed baselines are seeded by `migrations/0030_standing_orders.sql`
+itself (idempotent `ON CONFLICT`), so applying the migration creates AND seeds:
 
-```sql
-INSERT INTO public.standing_orders (outlet, supplier, item, default_qty, unit, cadence)
-VALUES
-  ('SEK6',    'DIAMOND BALL', 'roti',   6, 'pack', 'DAILY'),
-  ('SEK6',    'DIAMOND BALL', 'capati', 1, 'pack', 'DAILY'),
-  ('BISTRO7', 'DIAMOND BALL', 'roti',   6, 'pack', 'DAILY'),
-  ('VISTA',   'INBOIS',       'gas',    4, 'tong', 'DAILY')
-ON CONFLICT (outlet, item) DO UPDATE
-  SET supplier = EXCLUDED.supplier, default_qty = EXCLUDED.default_qty,
-      unit = EXCLUDED.unit, cadence = EXCLUDED.cadence, active = true,
-      updated_at = now();
-```
+| outlet | supplier | item | default_qty | unit | note |
+|---|---|---|---|---|---|
+| BISTRO7 | DIAMOND BALL | roti | 6 | pack | clean history |
+| BISTRO7 | DIAMOND BALL | capati | 1 | pack | clean history |
+| JAKEL | DIAMOND BALL | roti | 6 | pack | clean history |
+| JAKEL | DIAMOND BALL | capati | 1 | pack | clean history |
+| D | DIAMOND BALL | roti | 6 | pack | median n=4 |
+| D | DIAMOND BALL | capati | 1 | pack | clean history |
+| VISTA | INBOIS | gas | 4 | tong | 4×4 consistent |
+| JAKEL | INBOIS | gas | 4 | tong | corrected 5→4 (align Vista) |
+| SEK20 | RANAU PETROGAS | gas | 5 | tong | corrected 27→5 (27 was n=3 outlier) |
 
 `ON CONFLICT` makes re-seeding idempotent and lets you adjust a baseline later.
 Set `active=false` to pause a standing order without deleting it.
+
+## PENDING_MANAGER — gaps still missing real numbers
+No clean history exists for these; the owner is collecting real baselines from
+outlet managers. **Deliberately not seeded** (a guessed baseline is worse than
+none). Add via the same `ON CONFLICT` upsert once confirmed:
+
+- **roti + capati**: SEK6, SBESI (Kl Sg Besi), SEK15, SEK20, VISTA, SIGNATURE
+- **gas**: every outlet other than VISTA / JAKEL / SEK20
+
+Until added, these items fall through to the normal forecast path.
 
 ## Notes / scope
 - Standing orders are emitted **every run** (these are daily staples); `cadence`

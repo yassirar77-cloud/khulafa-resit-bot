@@ -29,6 +29,36 @@ CREATE TABLE IF NOT EXISTS public.standing_orders (
 CREATE INDEX IF NOT EXISTS idx_standing_orders_outlet
     ON public.standing_orders (outlet);
 
--- Seed rows are intentionally NOT included here: the per-outlet baselines are
--- confirmed from clean pre-2026-05-24 history first (see
--- docs/briefs/standing-orders.md) and inserted once the owner approves them.
+-- --- Seed: CONFIRMED baselines ----------------------------------------------
+-- Confident rows from clean pre-2026-05-24 history, owner-approved (with two
+-- corrections: SEK20 gas 5 not 27 — the 27 was the n=3 outlier, median is 5;
+-- JAKEL gas 4 not 5 — aligned to Vista, manager adjusts up if needed).
+-- Idempotent: re-running updates the baseline rather than duplicating.
+INSERT INTO public.standing_orders (outlet, supplier, item, default_qty, unit, cadence)
+VALUES
+  ('BISTRO7', 'DIAMOND BALL',   'roti',   6, 'pack', 'DAILY'),
+  ('BISTRO7', 'DIAMOND BALL',   'capati', 1, 'pack', 'DAILY'),
+  ('JAKEL',   'DIAMOND BALL',   'roti',   6, 'pack', 'DAILY'),
+  ('JAKEL',   'DIAMOND BALL',   'capati', 1, 'pack', 'DAILY'),
+  ('D',       'DIAMOND BALL',   'roti',   6, 'pack', 'DAILY'),
+  ('D',       'DIAMOND BALL',   'capati', 1, 'pack', 'DAILY'),
+  ('VISTA',   'INBOIS',         'gas',    4, 'tong', 'DAILY'),
+  ('JAKEL',   'INBOIS',         'gas',    4, 'tong', 'DAILY'),  -- corrected 5 -> 4
+  ('SEK20',   'RANAU PETROGAS', 'gas',    5, 'tong', 'DAILY')   -- corrected 27 -> 5
+ON CONFLICT (outlet, item) DO UPDATE
+  SET supplier = EXCLUDED.supplier, default_qty = EXCLUDED.default_qty,
+      unit = EXCLUDED.unit, cadence = EXCLUDED.cadence, active = true,
+      updated_at = now();
+
+-- --- PENDING_MANAGER: gaps still needing real numbers -----------------------
+-- No clean lines-2 history exists for these; the owner is collecting the real
+-- daily baselines from outlet managers. They are deliberately NOT seeded (an
+-- empty/guessed baseline is worse than none). Add via the same ON CONFLICT
+-- upsert once confirmed:
+--
+--   roti + capati : SEK6, SBESI (Kl Sg Besi), SEK15, SEK20, VISTA, SIGNATURE
+--   gas           : every outlet other than VISTA / JAKEL / SEK20
+--
+-- Until added, these items fall through to the normal forecast path (which will
+-- surface them as reorder?/verify rather than a confident quantity).
+
