@@ -96,12 +96,20 @@ resolved `outlet_code`, plus which expected outlets are still missing.
 
 ## Calculation & mismatch flag
 
-`Used = Cooked − Left` per item. POS quantity comes from `sales_daily_itemwise`
-for the same `business_date` (matched by base + style keyword in
-`ITEM_POS_KEYWORDS`; the bot only canonicalizes to the bare "ayam", so per-style
-splitting happens here). kg items convert POS portions to kg using locked
-portion sizes (`KG_PORTION_GRAMS`): **Kambing 180 g, Daging 60 g, Telur Ikan
-100 g** *(confirm the Telur Ikan portion — it lives in one place to adjust)*.
+`Used = Cooked − Left` per item. Most items are compared against **POS sold**
+(`sales_daily_itemwise` for the same `business_date`, matched by base + style
+keyword in `ITEM_POS_KEYWORDS`; the bot only canonicalizes to the bare "ayam",
+so per-style splitting happens here). **Kambing / Daging** convert POS portions
+to kg using locked portion sizes (`KG_PORTION_GRAMS`): **Kambing 180 g, Daging
+60 g**.
+
+**Telur Ikan is the exception** — it is not a POS dish, it is bought by weight.
+So it is compared against **kg PURCHASED** (pulled from `receipts`, matching the
+raw "telur ikan" / fish-roe line — the resit pipeline only canonicalizes it to
+the coarse `ikan`, so the raw name is matched directly), NOT against POS, and
+there is no portion-size guess. Approach **(b)** for v1: show both numbers and
+only flag when a **same-day** purchase exists — purchases aren't daily, so a day
+with no buy shows **"tiada rekod beli"** (➖) and is never flagged.
 
 Dual-gate flag (both gates must trip):
 
@@ -110,8 +118,10 @@ Dual-gate flag (both gates must trip):
 | pcs | `> 8%` | `> 5 pcs` |
 | kg | `> 10%` | `> 1.5 kg` |
 
-- **Used > POS → 🔴 LEAK** — possible leakage / unrecorded sale / over-portion.
-- **Used < POS → ⚠️ DATA** — likely a key-in error or carryover.
+- **Used > comparison → 🔴 LEAK** — possible leakage / unrecorded sale / over-portion.
+- **Used < comparison → ⚠️ DATA** — likely a key-in error or carryover.
+- The comparison is POS sold for every item except **Telur Ikan**, which is kg
+  purchased ("X kg guna vs Y kg beli").
 
 Right after LEFT is submitted, a mini Used-vs-POS recap is posted to the group
 (`render_mini_summary`). `pos_qty` and `mismatch_flag` are persisted on the

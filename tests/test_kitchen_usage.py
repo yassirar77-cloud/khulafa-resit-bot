@@ -201,6 +201,74 @@ def test_evaluate_usage_full():
     assert ev["flag"] == "LEAK"
     assert ev["unit"] == "pcs"
     assert ev["label"] == "Ayam Goreng"
+    assert ev["source"] == "pos"
+
+
+# --- Telur Ikan: consumption vs PURCHASE (not POS) ---------------------------
+
+def test_telur_ikan_not_in_pos_or_portion_config():
+    # No portion-size guess and no POS keyword entry for Telur Ikan anymore.
+    assert "telur_ikan" not in ku.KG_PORTION_GRAMS
+    assert "telur_ikan" not in ku.ITEM_POS_KEYWORDS
+    # Kambing/Daging POS portions are untouched.
+    assert ku.KG_PORTION_GRAMS["kambing"] == 180.0
+    assert ku.KG_PORTION_GRAMS["daging"] == 60.0
+
+
+def test_compare_source():
+    assert ku.compare_source("telur_ikan") == "purchase"
+    for code in ("ayam_goreng", "kambing", "daging", "ikan_kari"):
+        assert ku.compare_source(code) == "pos"
+
+
+def test_purchased_kg_sums_matching_lines():
+    receipts = [
+        {"items": [{"name": "TELUR IKAN SEJUK BEKU", "qty": 4, "price": 120}]},
+        {"items": [{"name": "Telur Ikan", "qty": 2.5, "price": 80},
+                   {"name": "Ayam 4 KG", "qty": 4, "price": 40}]},
+    ]
+    assert ku.purchased_kg_from_receipts(receipts) == 6.5
+
+
+def test_purchased_kg_ignores_eggs_and_other_fish():
+    receipts = [
+        {"items": [{"name": "Telur Ayam", "qty": 30, "price": 15},   # eggs, not roe
+                   {"name": "Ikan Tenggiri", "qty": 5, "price": 90}]},  # other fish
+    ]
+    # No telur-ikan line at all -> None (not 0), so the digest shows "tiada rekod beli".
+    assert ku.purchased_kg_from_receipts(receipts) is None
+
+
+def test_purchased_kg_none_when_no_receipts():
+    assert ku.purchased_kg_from_receipts([]) is None
+    assert ku.purchased_kg_from_receipts(None) is None
+
+
+def test_evaluate_telur_ikan_vs_purchase_flags():
+    # Used 8 kg vs bought 5 kg: Δ3 = 60% (>10%) and 3 kg (>1.5) -> LEAK.
+    ev = ku.evaluate_usage("telur_ikan", cooked=10.0, left=2.0,
+                           itemwise_rows=[], purchased_kg=5.0)
+    assert ev["source"] == "purchase"
+    assert ev["used"] == 8.0
+    assert ev["pos"] == 5.0
+    assert ev["flag"] == "LEAK"
+
+
+def test_evaluate_telur_ikan_ignores_pos_rows():
+    # Even if POS-looking ikan rows are passed, Telur Ikan never reads them.
+    pos_rows = [{"item_name": "Telur Ikan Goreng", "qty": 999}]
+    ev = ku.evaluate_usage("telur_ikan", cooked=3.0, left=1.0,
+                           itemwise_rows=pos_rows, purchased_kg=2.0)
+    assert ev["pos"] == 2.0  # purchased, not the 999 POS qty
+
+
+def test_evaluate_telur_ikan_no_purchase_no_flag():
+    # No same-day purchase -> pos None, no flag (approach b: don't false-alarm).
+    ev = ku.evaluate_usage("telur_ikan", cooked=5.0, left=0.5,
+                           itemwise_rows=[], purchased_kg=None)
+    assert ev["pos"] is None
+    assert ev["flag"] is None
+    assert ev["used"] == 4.5
 
 
 # --- form completeness -------------------------------------------------------
@@ -244,6 +312,40 @@ def test_render_mini_summary_all_match():
     evals = [ku.evaluate_usage("ayam_goreng", 80, 0, [{"item_name": "Ayam Goreng", "qty": 80}])]
     text = ku.render_mini_summary("SEK-6", "2026-06-22", evals)
     assert "Semua padan" in text
+
+
+def test_render_mini_summary_telur_ikan_purchase_wording():
+    # With a same-day purchase -> "guna vs beli"; the Telur line says no "POS".
+    evals = [ku.evaluate_usage("telur_ikan", 5.0, 1.0, [], purchased_kg=4.0)]
+    text = ku.render_mini_summary("SEK-6", "2026-06-22", evals)
+    telur_line = next(ln for ln in text.splitlines() if "Telur Ikan" in ln)
+    assert "beli" in telur_line
+    assert "POS" not in telur_line
+
+
+def test_render_mini_summary_telur_ikan_no_purchase():
+    evals = [ku.evaluate_usage("telur_ikan", 5.0, 1.0, [], purchased_kg=None)]
+    text = ku.render_mini_summary("SEK-6", "2026-06-22", evals)
+    assert "tiada rekod beli" in text
+
+
+def test_digest_block_telur_ikan_lines():
+    import digest
+    usage = [{
+        "outlet_code": "SEK6", "complete": True,
+        "items": [
+            {"item_code": "telur_ikan", "item_label": "Telur Ikan", "unit": "kg",
+             "used_qty": 4.0, "pos_qty": 3.0, "mismatch_flag": None},
+        ],
+    }]
+    text = digest._kitchen_usage_block(usage)
+    telur_line = next(ln for ln in text.splitlines() if "Telur Ikan" in ln)
+    assert "beli" in telur_line
+    assert "POS" not in telur_line  # the line itself, not the section header
+
+    usage[0]["items"][0]["pos_qty"] = None
+    text2 = digest._kitchen_usage_block(usage)
+    assert "tiada rekod beli" in text2
 
 
 def test_format_value_kg_trims():

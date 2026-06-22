@@ -488,12 +488,18 @@ def _kitchen_usage_block(usage):
     that logged anything for the digest's business day.
 
     Per outlet: list each item's Used vs POS and flag 🔴 (Used>POS, leakage) or
-    ⚠️ (Used<POS, data/carryover). When COOKED or LEFT is missing for the outlet
-    the row reads 'Rekod tak lengkap' instead of a false mismatch."""
+    ⚠️ (Used<POS, data/carryover). Telur Ikan is consumption-vs-PURCHASE
+    ("X kg guna vs Y kg beli"), not vs sales — and is never flagged on a day with
+    no purchase ("tiada rekod beli"). When COOKED or LEFT is missing for the
+    outlet the row reads 'Rekod tak lengkap' instead of a false mismatch."""
     try:
         from outlet_mapping import outlet_display_name
     except Exception:  # pragma: no cover - defensive
         outlet_display_name = lambda c: c  # noqa: E731
+    try:
+        from kitchen_usage import PURCHASE_COMPARE_CODES
+    except Exception:  # pragma: no cover - defensive
+        PURCHASE_COMPARE_CODES = frozenset()
 
     lines = [KITCHEN_USAGE_HEADER]
     if not usage:
@@ -511,7 +517,6 @@ def _kitchen_usage_block(usage):
         for it in outlet.get("items", []):
             unit = it.get("unit")
             used = _fmt_qty(it.get("used_qty"), unit)
-            pos = _fmt_qty(it.get("pos_qty"), unit)
             flag = it.get("mismatch_flag")
             if flag == "LEAK":
                 mark, flagged = "🔴", True
@@ -519,9 +524,19 @@ def _kitchen_usage_block(usage):
                 mark, flagged = "⚠️", True
             else:
                 mark = "✅"
-            lines.append(
-                f"- {mark} {_name(it.get('item_label'))}: guna {used} vs POS {pos} {_html(unit)}"
-            )
+            label = _name(it.get("item_label"))
+            if it.get("item_code") in PURCHASE_COMPARE_CODES:
+                # Telur Ikan: consumption vs purchase (kg bought), not vs sales.
+                if it.get("pos_qty") is None:
+                    lines.append(f"- ➖ {label}: {used} {_html(unit)} guna vs tiada rekod beli")
+                else:
+                    beli = _fmt_qty(it.get("pos_qty"), unit)
+                    lines.append(
+                        f"- {mark} {label}: {used} {_html(unit)} guna vs {beli} {_html(unit)} beli"
+                    )
+            else:
+                pos = _fmt_qty(it.get("pos_qty"), unit)
+                lines.append(f"- {mark} {label}: guna {used} vs POS {pos} {_html(unit)}")
         if not flagged:
             lines.append("- Semua padan 👍")
     return "\n".join(lines)

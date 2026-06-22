@@ -198,6 +198,10 @@ def is_form_complete(entries: dict, outlet_code) -> bool:
 # base keyword AND the style keyword. This reuses the same "ayam/ikan" base that
 # item_canonicalization_v2 keys on, refined by style — the bot already only
 # canonicalizes to the bare "ayam", so per-style splitting is done here.
+#
+# NOTE: Telur Ikan is NOT here — it is not sold as a POS dish, it is BOUGHT by
+# weight. It is compared against kg purchased (from receipts), not POS. See
+# PURCHASE_COMPARE_CODES / purchased_kg_from_receipts below.
 ITEM_POS_KEYWORDS: dict[str, dict] = {
     "ayam_goreng": {"base": "ayam", "style": ["goreng"]},
     "ayam_bawang": {"base": "ayam", "style": ["bawang"]},
@@ -207,20 +211,33 @@ ITEM_POS_KEYWORDS: dict[str, dict] = {
     "ayam_tandoori": {"base": "ayam", "style": ["tandoori"]},
     "ikan_goreng": {"base": "ikan", "style": ["goreng"]},
     "ikan_kari": {"base": "ikan", "style": ["kari", "curry"]},
-    "telur_ikan": {"base": "telur", "style": ["ikan"]},
     "kambing": {"base": "kambing", "style": []},
     "daging": {"base": "daging", "style": []},
 }
 
-# Locked portion sizes for the kg items: POS sells these by the portion, so the
-# POS piece-count is converted to kg before comparing with the weighed Used.
-#   Kambing 180 g/portion, Daging 60 g/portion (owner-locked).
-#   Telur Ikan: per the existing rule — confirm/adjust here in one place.
+# Locked portion sizes for the POS-compared kg items: POS sells these by the
+# portion, so the POS piece-count is converted to kg before comparing with the
+# weighed Used. Kambing 180 g/portion, Daging 60 g/portion (owner-locked).
+# Telur Ikan is deliberately ABSENT — it is compared vs kg purchased, not POS,
+# so it needs no portion-size guess.
 KG_PORTION_GRAMS: dict[str, float] = {
     "kambing": 180.0,
     "daging": 60.0,
-    "telur_ikan": 100.0,
 }
+
+# Items compared against kg PURCHASED (from receipts) instead of POS sold.
+# Telur Ikan (fish roe) is bought by weight; the resit pipeline already stores
+# every supplier purchase, so Used (cooked − left) is compared with what was
+# bought that day. v1 uses approach (b): show both numbers and only flag when a
+# same-day purchase exists (purchases aren't daily, so absence is NOT a flag).
+PURCHASE_COMPARE_CODES = frozenset({"telur_ikan"})
+
+
+def compare_source(item_code: str) -> str:
+    """Where an item's comparison quantity comes from: 'purchase' (kg bought,
+    from receipts) for Telur Ikan, else 'pos' (dishes sold)."""
+    return "purchase" if item_code in PURCHASE_COMPARE_CODES else "pos"
+
 
 # Dual-gate thresholds (mamak-tuned): a flag needs BOTH the % gate and the
 # absolute gate to trip, so tiny outlets don't false-alarm on a few pcs.
@@ -294,14 +311,73 @@ def mismatch_flag(used, pos, unit) -> str | None:
     return None
 
 
-def evaluate_usage(item_code: str, cooked, left, itemwise_rows: list) -> dict:
-    """Full per-item evaluation: Used, POS qty (kg-converted for kg items), and
-    the dual-gate flag. Returns {code,label,unit,cooked,left,used,pos,flag}."""
+# Telur Ikan purchase lines: the resit pipeline canonicalises "TELUR IKAN" to the
+# coarse "ikan" key, so it can't be separated from other fish by canonical alone.
+# Match the raw line name directly: fish roe is always written "telur ikan" (or
+# "telur ... ikan" / "roe").
+def _is_telur_ikan_line(name) -> bool:
+    n = str(name or "").lower()
+    if not n:
+        return False
+    if "telur ikan" in n or "telur" in n and "ikan" in n:
+        return True
+    return "roe" in n
+
+
+def purchased_kg_from_receipts(receipts_rows: list, item_code: str = "telur_ikan"):
+    """Sum kg PURCHASED for a weight-bought item from receipts.
+
+    Each receipt row carries an ``items`` jsonb list of {name, qty, price}. For a
+    weight-priced line the ``qty`` is the kg bought. Returns the summed kg, or
+    ``None`` when NO matching purchase line exists at all — the caller shows
+    "tiada rekod beli" and does NOT flag (purchases aren't daily, so a missing
+    same-day buy is not a mismatch)."""
+    if item_code != "telur_ikan":
+        return None
+    found = False
+    total = 0.0
+    for r in receipts_rows or []:
+        items = r.get("items")
+        if not isinstance(items, list):
+            continue
+        for line in items:
+            if not isinstance(line, dict):
+                continue
+            if not _is_telur_ikan_line(line.get("name")):
+                continue
+            found = True
+            try:
+                total += float(line.get("qty") or 0)
+            except (TypeError, ValueError):
+                continue
+    if not found:
+        return None
+    return round(total, 1)
+
+
+def evaluate_usage(item_code: str, cooked, left, itemwise_rows: list,
+                   purchased_kg=None) -> dict:
+    """Full per-item evaluation: Used, the comparison qty, and the dual-gate flag.
+
+    For POS items the comparison qty is POS sold (kg-converted for Kambing/Daging
+    via portion sizes). For Telur Ikan (``compare_source`` == 'purchase') it is
+    ``purchased_kg`` — kg bought that day from receipts — and the flag is skipped
+    when that is ``None`` (no same-day purchase). Returns
+    {code,label,unit,cooked,left,used,pos,flag,source}; ``pos`` holds whichever
+    comparison qty applies (stored in the kitchen_daily_usage.pos_qty column)."""
     meta = ITEM_BY_CODE.get(item_code, {})
     unit = meta.get("unit", "pcs")
     used = used_qty(cooked, left)
-    pos = pos_qty_for_item(item_code, itemwise_rows)
-    flag = mismatch_flag(used, pos, unit) if used is not None else None
+    source = compare_source(item_code)
+    if source == "purchase":
+        compared = purchased_kg
+    else:
+        compared = pos_qty_for_item(item_code, itemwise_rows)
+    flag = (
+        mismatch_flag(used, compared, unit)
+        if used is not None and compared is not None
+        else None
+    )
     return {
         "code": item_code,
         "label": meta.get("label", item_code),
@@ -309,8 +385,9 @@ def evaluate_usage(item_code: str, cooked, left, itemwise_rows: list) -> dict:
         "cooked": cooked,
         "left": left,
         "used": used,
-        "pos": pos,
+        "pos": compared,
         "flag": flag,
+        "source": source,
     }
 
 
@@ -432,6 +509,7 @@ SESSION_TABLE = "kitchen_log_session"
 USAGE_TABLE = "kitchen_daily_usage"
 SALES_SUMMARY_TABLE = "sales_daily_summary"
 SALES_ITEMWISE_TABLE = "sales_daily_itemwise"
+RECEIPTS_TABLE = "receipts"
 
 _supabase = None
 
@@ -531,6 +609,39 @@ def _fetch_itemwise(client, outlet_code, business_date) -> list:
     return rows
 
 
+def _fetch_purchased_kg(client, outlet_code, business_date, item_code="telur_ikan"):
+    """kg of a weight-bought item purchased for an outlet's business_date.
+
+    Reads receipts for that calendar date, keeps the ones whose (free-form)
+    outlet resolves to the same canonical outlet as ``outlet_code``, and sums the
+    matching purchase lines. Returns ``None`` when there is no matching purchase
+    that day (Telur Ikan is bought every few days, not daily)."""
+    try:
+        from outlet_resolver import canonical_outlet
+        target = canonical_outlet(outlet_code)
+    except Exception:
+        target = None
+    rows = _rows(
+        client.table(RECEIPTS_TABLE)
+        .select("outlet, items, receipt_date")
+        .eq("receipt_date", str(business_date))
+        .execute()
+    )
+    matched = []
+    for r in rows:
+        raw = r.get("outlet")
+        try:
+            from outlet_resolver import canonical_outlet
+            rc = canonical_outlet(raw)
+        except Exception:
+            rc = None
+        # Match on canonical outlet; if neither side resolves, fall back to the
+        # raw code so a same-named outlet still lines up.
+        if (target is not None and rc == target) or (raw == outlet_code):
+            matched.append(r)
+    return purchased_kg_from_receipts(matched, item_code)
+
+
 def finalize_submission(client, session: dict, submitter: str):
     """Upsert a completed phase into kitchen_daily_usage. On the LEFT phase also
     compute POS qty + the mismatch flag. Returns the list of per-item evaluation
@@ -573,8 +684,13 @@ def finalize_submission(client, session: dict, submitter: str):
     if phase != PHASE_LEFT:
         return []
 
-    # LEFT just landed -> compute Used vs POS for the whole day and persist.
+    # LEFT just landed -> compute Used vs comparison qty for the whole day.
+    # POS items use sales itemwise; Telur Ikan uses kg purchased from receipts.
     itemwise = _fetch_itemwise(client, outlet_code, business_date)
+    purchased = {
+        code: _fetch_purchased_kg(client, outlet_code, business_date, code)
+        for code in PURCHASE_COMPARE_CODES
+    }
     usage_rows = _rows(
         client.table(USAGE_TABLE)
         .select("item_code, cooked_qty, left_qty")
@@ -589,7 +705,10 @@ def finalize_submission(client, session: dict, submitter: str):
         rec = by_code.get(code)
         if rec is None:
             continue
-        ev = evaluate_usage(code, rec.get("cooked_qty"), rec.get("left_qty"), itemwise)
+        ev = evaluate_usage(
+            code, rec.get("cooked_qty"), rec.get("left_qty"), itemwise,
+            purchased_kg=purchased.get(code),
+        )
         evaluations.append(ev)
         try:
             client.table(USAGE_TABLE).update(
@@ -614,7 +733,6 @@ def render_mini_summary(outlet_label, business_date, evaluations: list) -> str:
     flagged = 0
     for ev in evaluations:
         used = format_value(ev["used"], ev["unit"])
-        pos = format_value(ev["pos"], ev["unit"])
         unit = ev["unit"]
         if ev["flag"] == "LEAK":
             mark = "🔴"
@@ -624,7 +742,16 @@ def render_mini_summary(outlet_label, business_date, evaluations: list) -> str:
             flagged += 1
         else:
             mark = "✅"
-        lines.append(f"{mark} {ev['label']}: guna {used} vs POS {pos} {unit}")
+        if ev.get("source") == "purchase":
+            # Telur Ikan: consumption vs purchase, not vs sales.
+            if ev["pos"] is None:
+                lines.append(f"➖ {ev['label']}: guna {used} {unit} vs tiada rekod beli")
+            else:
+                beli = format_value(ev["pos"], unit)
+                lines.append(f"{mark} {ev['label']}: {used} {unit} guna vs {beli} {unit} beli")
+        else:
+            pos = format_value(ev["pos"], unit)
+            lines.append(f"{mark} {ev['label']}: guna {used} vs POS {pos} {unit}")
     if flagged == 0:
         lines.append("")
         lines.append("Semua padan 👍")
