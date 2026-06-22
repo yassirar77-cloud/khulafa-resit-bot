@@ -58,8 +58,29 @@ Both jobs run on the same in-process APScheduler as the 23:00 digest
 - **18:00** — post the COOKED form (`post_cooked_forms`).
 - **02:00** — post the LEFT form (`post_left_forms`).
 
-They iterate `config/kitchen_groups.py`. **Until the 10 real group chat IDs are
-pasted there the jobs no-op** — nothing is posted to the wrong place.
+They iterate the kitchen groups from `config/kitchen_groups.py`, which
+**auto-resolves the chat IDs from the `receipts` table** — the same chats the
+resit pipeline already receives receipts from (nobody pastes IDs). It groups
+receipts by `chat_id`, resolves each chat's stored `outlet` string to a kitchen
+`outlet_code` via `outlet_code_from_text`, keeps only group chats (negative
+`chat_id`), and when one outlet has multiple chats the busiest wins. A manual
+`KITCHEN_GROUPS` override still takes precedence if ever populated. The jobs
+no-op cleanly until at least one group resolves.
+
+Group title → outlet_code:
+
+| group | code |
+|-------|------|
+| Khulafa Bistro | `BISTRO7` |
+| Khulafa Sek 20 | `SEK20` |
+| Khulafa Signature | `SEK14` |
+| Khulafa Sek 15 (One Bistro) | `SEK15` |
+| Hj Sharfuddin Klang Bayu Emas | `SEK6` |
+| Khulafa Vista | `VISTA` |
+| Khulafa Jakel | `JAKEL` |
+| Khulafa Damansara | `D` |
+| Khulafa Klang | `KLANG` |
+| Khulafa KL Razak | `KLRAZAK` (→ "K.L Razak", matches sales' `S-RAZAK`) |
 
 ## Calculation & mismatch flag
 

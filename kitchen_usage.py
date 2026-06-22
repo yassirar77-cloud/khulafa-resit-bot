@@ -787,12 +787,12 @@ async def _post_forms(application, phase: str) -> None:
     cleanly when config/kitchen_groups.py has no IDs yet."""
     from config.kitchen_groups import configured_groups
 
-    groups = configured_groups()
-    if not groups:
-        logger.info("kitchen: no groups configured — %s post skipped", phase)
-        return
     if _supabase is None:
         logger.warning("kitchen: supabase not initialised — %s post skipped", phase)
+        return
+    groups = await asyncio.to_thread(configured_groups, _supabase)
+    if not groups:
+        logger.info("kitchen: no groups resolved — %s post skipped", phase)
         return
 
     now_my = datetime.now(MY_TZ)

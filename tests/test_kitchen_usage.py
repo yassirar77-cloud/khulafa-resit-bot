@@ -251,3 +251,84 @@ def test_format_value_kg_trims():
     assert ku.format_value(3.5, "kg") == "3.5"
     assert ku.format_value(12, "pcs") == "12"
     assert ku.format_value(None, "pcs") == "—"
+
+
+# --- chat_id -> outlet_code resolution from receipts -------------------------
+
+import importlib  # noqa: E402
+
+from tests.fake_supabase import FakeSupabase  # noqa: E402
+
+
+def _fresh_kitchen_groups():
+    # Reload so the process-level resolution cache starts empty per test.
+    import config.kitchen_groups as kg
+    importlib.reload(kg)
+    return kg
+
+
+def test_outlet_code_from_text_titles():
+    kg = _fresh_kitchen_groups()
+    cases = {
+        "Khulafa Bistro Resit": "BISTRO7",
+        "Khulafa Sek 20 Resit": "SEK20",
+        "Khulafa Signature Resit": "SEK14",
+        "Khulafa Sek 15 Receipt": "SEK15",
+        "Hj Sharfuddin Klang Bayu Emas": "SEK6",  # sharfuddin wins over klang
+        "Khulafa Vista Resit": "VISTA",
+        "Khulafa Jakel Receipt": "JAKEL",
+        "Khulafa Damansara Uptown": "D",
+        "Khulafa Klang Bayu Emas": "KLANG",
+        "Khulafa KL Razak": "KLRAZAK",
+    }
+    for text, code in cases.items():
+        assert kg.outlet_code_from_text(text) == code, text
+    assert kg.outlet_code_from_text("UNKNOWN") is None
+    assert kg.outlet_code_from_text("") is None
+    assert kg.outlet_code_from_text(None) is None
+
+
+def test_resolve_groups_from_receipts():
+    kg = _fresh_kitchen_groups()
+    fake = FakeSupabase()
+    fake._store["receipts"] = [
+        {"chat_id": -1001, "outlet": "Bistro"},
+        {"chat_id": -1001, "outlet": "Bistro"},
+        {"chat_id": -1002, "outlet": "SEK 20"},
+        {"chat_id": -1003, "outlet": "Signature"},
+        {"chat_id": -1004, "outlet": "Hj Sharfuddin Klang Bayu Emas"},
+        {"chat_id": 555, "outlet": "Bistro"},      # private DM -> skipped
+        {"chat_id": -1009, "outlet": "UNKNOWN"},   # unresolved -> skipped
+    ]
+    groups = dict(kg.configured_groups(fake))
+    assert groups == {
+        -1001: "BISTRO7",
+        -1002: "SEK20",
+        -1003: "SEK14",
+        -1004: "SEK6",
+    }
+    # outlet_for_chat reads the cached resolution.
+    assert kg.outlet_for_chat(-1002) == "SEK20"
+    assert kg.outlet_for_chat(999) is None
+
+
+def test_resolve_groups_busiest_chat_wins_per_outlet():
+    kg = _fresh_kitchen_groups()
+    fake = FakeSupabase()
+    fake._store["receipts"] = [
+        {"chat_id": -2001, "outlet": "Vista"},
+        {"chat_id": -2001, "outlet": "Vista"},
+        {"chat_id": -2001, "outlet": "Vista"},
+        {"chat_id": -2002, "outlet": "Vista"},  # fewer receipts -> loses
+    ]
+    groups = dict(kg.configured_groups(fake))
+    assert groups == {-2001: "VISTA"}
+
+
+def test_manual_override_wins():
+    kg = _fresh_kitchen_groups()
+    kg.KITCHEN_GROUPS = {-3001: "JAKEL"}
+    fake = FakeSupabase()
+    fake._store["receipts"] = [{"chat_id": -3001, "outlet": "Vista"}]
+    groups = dict(kg.configured_groups(fake))
+    assert groups[-3001] == "JAKEL"
