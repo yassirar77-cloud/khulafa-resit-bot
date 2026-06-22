@@ -531,9 +531,20 @@ def gather_digest_data(client, now_my) -> dict:
         "outlet_spending": _safe(_outlet_spending_week, [], client, now_my),
         "top_items_yesterday": _safe(_top_items_yesterday, {}, client, now_my),
         "dead_letter_emails": _safe(_dead_letter_emails, [], client, now_my),
+        "kitchen_usage": _safe(_kitchen_usage, [], client, now_my),
     }
     data.update(_food_cost_sections(client, now_my))
     return data
+
+
+def _kitchen_usage(client, now_my) -> list:
+    """Per-outlet Daily Kitchen Usage Log rollup for the just-completed business
+    day. At the 23:00 digest the most recently completed kitchen day (COOKED
+    18:00, LEFT 02:00) is YESTERDAY's business_date."""
+    import kitchen_usage as ku
+
+    business_date = (now_my.date() - timedelta(days=1)).isoformat()
+    return ku.gather_digest_usage(client, business_date)
 
 
 def log_digest(client, recipient, message_text, status, error_msg=None, message_bytes=None) -> None:

@@ -97,6 +97,7 @@ from backfill_items import (
 import analytics
 import digest
 import food_cost_analytics
+import kitchen_usage
 import manager_registration
 import order_generator
 import reconciliation_service
@@ -4367,6 +4368,11 @@ async def run_bot() -> None:
     app.add_handler(
         CallbackQueryHandler(backfill_apply_all_callback, pattern=r"^backfill_applyall:(yes|no)$")
     )
+    # Daily Kitchen Usage Log: tap-only numpad form (kdu: namespace). Init the
+    # module with the shared Supabase client, then register its single callback
+    # handler.
+    kitchen_usage.init_kitchen_usage(supabase)
+    kitchen_usage.register_handlers(app)
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     # PR #29b manual review: the edit conversation must be registered before
     # the audit-reply handler so a reviewer's in-flow text replies are routed
@@ -4439,6 +4445,27 @@ async def run_bot() -> None:
         minute=0,
         args=[app],
         id="order_drafts",
+        replace_existing=True,
+    )
+    # Daily Kitchen Usage Log — same in-process scheduler as the 23:00 digest.
+    # 18:00 COOKED form, 02:00 (next day) LEFT form, to each configured kitchen
+    # group. Both no-op cleanly until config/kitchen_groups.py has the chat IDs.
+    scheduler.add_job(
+        kitchen_usage.post_cooked_forms,
+        trigger="cron",
+        hour=18,
+        minute=0,
+        args=[app],
+        id="kitchen_cooked_form",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        kitchen_usage.post_left_forms,
+        trigger="cron",
+        hour=2,
+        minute=0,
+        args=[app],
+        id="kitchen_left_form",
         replace_existing=True,
     )
 

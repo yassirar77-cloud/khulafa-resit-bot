@@ -61,6 +61,9 @@ NEW_SECTION_HEADERS = (
 # spam. Only rendered when there's something to report.
 DEAD_LETTER_HEADER = "📭 <b>UNINGESTED SALES EMAILS</b>"
 
+# Daily Kitchen Usage Log — Used (Cooked − Left) vs POS, per outlet.
+KITCHEN_USAGE_HEADER = "🍳 <b>KITCHEN USAGE vs POS</b>"
+
 
 def _num(value):
     try:
@@ -468,6 +471,62 @@ def _dead_letter_block(dead_letters):
     return "\n".join(lines)
 
 
+def _fmt_qty(value, unit) -> str:
+    """Render a kitchen qty: pcs as a whole number, kg trimmed (3.0 -> '3')."""
+    if value is None:
+        return "—"
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    return str(int(round(num))) if unit == "pcs" else f"{num:g}"
+
+
+def _kitchen_usage_block(usage):
+    """``usage``: list of {outlet_code, complete, items:[{item_label, unit,
+    used_qty, pos_qty, mismatch_flag, cooked_qty, left_qty}]} — one per outlet
+    that logged anything for the digest's business day.
+
+    Per outlet: list each item's Used vs POS and flag 🔴 (Used>POS, leakage) or
+    ⚠️ (Used<POS, data/carryover). When COOKED or LEFT is missing for the outlet
+    the row reads 'Rekod tak lengkap' instead of a false mismatch."""
+    try:
+        from outlet_mapping import outlet_display_name
+    except Exception:  # pragma: no cover - defensive
+        outlet_display_name = lambda c: c  # noqa: E731
+
+    lines = [KITCHEN_USAGE_HEADER]
+    if not usage:
+        lines.append("- (no kitchen usage logged)")
+        return "\n".join(lines)
+
+    for outlet in usage:
+        name = _html(outlet_display_name(outlet.get("outlet_code")))
+        lines.append("")
+        lines.append(f"<b>{name}</b>")
+        if not outlet.get("complete"):
+            lines.append("- ⚠️ Rekod tak lengkap (Masak atau Baki belum siap)")
+            continue
+        flagged = False
+        for it in outlet.get("items", []):
+            unit = it.get("unit")
+            used = _fmt_qty(it.get("used_qty"), unit)
+            pos = _fmt_qty(it.get("pos_qty"), unit)
+            flag = it.get("mismatch_flag")
+            if flag == "LEAK":
+                mark, flagged = "🔴", True
+            elif flag == "DATA":
+                mark, flagged = "⚠️", True
+            else:
+                mark = "✅"
+            lines.append(
+                f"- {mark} {_name(it.get('item_label'))}: guna {used} vs POS {pos} {_html(unit)}"
+            )
+        if not flagged:
+            lines.append("- Semua padan 👍")
+    return "\n".join(lines)
+
+
 def _footer_block(now_my):
     return "\n".join([
         SECTION_SEP,
@@ -515,6 +574,7 @@ def render_blocks(data, now_my):
         _data_quality_block(data.get("data_quality", {})),
         _outlier_block(data.get("outliers", {})),
         _new_suppliers_block(data.get("new_suppliers", [])),
+        _kitchen_usage_block(data.get("kitchen_usage", [])),
         _dead_letter_block(data.get("dead_letter_emails", [])),
         _footer_block(now_my),
     ]
