@@ -17,7 +17,7 @@ MY = ZoneInfo("Asia/Kuala_Lumpur")
 def test_ayam_rempah_only_for_bistro():
     bistro = [it["code"] for it in ku.items_for_outlet("BISTRO7")]
     assert "ayam_rempah" in bistro
-    for outlet in ("SEK6", "SEK20", "VISTA", "JAKEL", "D", "KLANG", "SBESI"):
+    for outlet in ("SEK6", "SEK20", "VISTA", "JAKEL", "D", "KLANG", "KLRAZAK"):
         codes = [it["code"] for it in ku.items_for_outlet(outlet)]
         assert "ayam_rempah" not in codes, outlet
         # every other tracked item is still present
@@ -402,14 +402,29 @@ def test_outlet_code_from_text_titles():
         "Khulafa Damansara Uptown": "D",
         "Khulafa Klang Bayu Emas": "KLANG",
         "Khulafa KL Razak": "KLRAZAK",
+        # "Kl Sg Besi" is the SAME outlet as K.L Razak -> KLRAZAK, not SBESI.
+        "Kl Sg Besi": "KLRAZAK",
+        "Khulafa Sungai Besi": "KLRAZAK",
         # SEK6 only matches a genuine Jalan Murai / Sek 6 titled group.
         "Khulafa Sek 6 Jalan Murai": "SEK6",
     }
     for text, code in cases.items():
         assert kg.outlet_code_from_text(text) == code, text
+    # SBESI must never be emitted as a kitchen outlet_code anymore.
+    assert "SBESI" not in {kg.outlet_code_from_text(t) for t in cases}
     assert kg.outlet_code_from_text("UNKNOWN") is None
     assert kg.outlet_code_from_text("") is None
     assert kg.outlet_code_from_text(None) is None
+
+
+def test_kl_sg_besi_resolves_to_klrazak_not_sbesi():
+    # Regression: group -5163000846 "Kl Sg Besi" is K.L Razak.
+    kg = _fresh_kitchen_groups()
+    fake = FakeSupabase()
+    fake._store["receipts"] = [{"chat_id": -5163000846, "outlet": "Kl Sg Besi"}]
+    groups = dict(kg.configured_groups(fake))
+    assert groups == {-5163000846: "KLRAZAK"}
+    assert "SBESI" not in groups.values()
 
 
 def test_sharfuddin_klang_not_sek6():

@@ -88,7 +88,7 @@ Group title → outlet_code:
 | Khulafa Vista | `VISTA` |
 | Khulafa Jakel | `JAKEL` |
 | Khulafa Damansara | `D` |
-| Khulafa KL Razak | `KLRAZAK` (→ "K.L Razak", matches sales' `S-RAZAK`) |
+| Khulafa KL Razak / "Kl Sg Besi" | `KLRAZAK` (one outlet, two names; → "K.L Razak", matches sales' `S-RAZAK`) |
 | Khulafa Sek 6 / Jalan Murai | `SEK6` (only a genuine Sek 6 group) |
 
 `SEK6` only resolves from a real "Sek 6"/"Jalan Murai" titled group — the

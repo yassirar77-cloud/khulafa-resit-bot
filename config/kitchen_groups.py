@@ -52,13 +52,16 @@ _CODE_RULES: list[tuple[str, str]] = [
     ("sek 6", "SEK6"),
     ("sek6", "SEK6"),
     ("bistro", "BISTRO7"),
+    # K.L Razak == "Kl Sg Besi" — ONE physical outlet, two names. All of these
+    # resolve to KLRAZAK (the "K.L Razak" canonical / sales' S-RAZAK), so the POS
+    # comparison joins correctly. SBESI is NOT a separate kitchen outlet.
     ("razak", "KLRAZAK"),
+    ("sungai besi", "KLRAZAK"),
+    ("sg besi", "KLRAZAK"),
+    ("sbesi", "KLRAZAK"),
     ("vista", "VISTA"),
     ("jakel", "JAKEL"),
     ("damansara", "D"),
-    ("sungai besi", "SBESI"),
-    ("sg besi", "SBESI"),
-    ("sbesi", "SBESI"),
     # KLANG group: "Hj Sharfuddin Klang Bayu Emas" — keep these LAST so a more
     # specific outlet keyword above always wins first.
     ("bayu emas", "KLANG"),
