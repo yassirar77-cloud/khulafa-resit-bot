@@ -2393,6 +2393,40 @@ async def cloudinary_check_command(update: Update, context: ContextTypes.DEFAULT
     await message.reply_text(f"{icon} Cloudinary: {detail}")
 
 
+async def kitchen_groups_debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin-only: dump every group chat the bot has seen in receipts with its
+    stored outlet text and the resolved kitchen outlet_code, plus which expected
+    kitchen outlets are still missing. Lets the owner verify the chat_id ->
+    outlet mapping (esp. the Klang/Sharfuddin group) against the live data."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    from config.kitchen_groups import (
+        EXPECTED_CODES,
+        diagnostic_dump,
+        missing_outlets,
+        resolve_groups,
+    )
+
+    rows = await asyncio.to_thread(diagnostic_dump, supabase)
+    mapping = await asyncio.to_thread(resolve_groups, supabase, True)
+    missing = missing_outlets(mapping)
+
+    lines = ["🍳 Kitchen groups (chat_id → outlet):"]
+    if not rows:
+        lines.append("- (no group receipts seen yet)")
+    for r in rows:
+        code = r["code"] or "—(unresolved)"
+        outlet_text = r["outlets"][0] if r["outlets"] else "(blank)"
+        lines.append(f"- {r['chat_id']} → {code}  [{outlet_text}, {r['count']} receipts]")
+    lines.append("")
+    lines.append(
+        f"Resolved {len(EXPECTED_CODES) - len(missing)}/{len(EXPECTED_CODES)} expected outlets"
+        + (f" — missing: {', '.join(missing)}" if missing else " — all present")
+    )
+    await message.reply_text("\n".join(lines))
+
+
 def _parse_reparse_n(args, default: int, maximum: int) -> int:
     if not args:
         return default
@@ -4306,6 +4340,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("advances", advances_command))
     app.add_handler(CommandHandler("dashboard", dashboard))
     app.add_handler(CommandHandler("cloudinary_check", cloudinary_check_command))
+    app.add_handler(CommandHandler("kitchen_groups_debug", kitchen_groups_debug_command))
     app.add_handler(CommandHandler("reparse_status", reparse_status_command))
     app.add_handler(CommandHandler("reparse_preview", reparse_preview_command))
     app.add_handler(CommandHandler("reparse_apply", reparse_apply_command))
@@ -4500,6 +4535,15 @@ async def run_bot() -> None:
                 logger.warning("CLOUDINARY PROBE: %s", probe_detail)
         except Exception:
             logger.warning("CLOUDINARY PROBE: probe errored; continuing", exc_info=True)
+
+        # Kitchen-usage group resolution summary. Off-thread (it reads receipts)
+        # and fully wrapped — surfaces any expected outlet that didn't resolve
+        # (e.g. a group with no recent receipts) so it isn't silently skipped.
+        try:
+            from config.kitchen_groups import log_resolution_summary
+            await asyncio.to_thread(log_resolution_summary, supabase)
+        except Exception:
+            logger.warning("KITCHEN GROUPS: resolution summary failed; continuing", exc_info=True)
 
         try:
             await stop.wait()

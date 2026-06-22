@@ -30,24 +30,27 @@ KITCHEN_GROUPS: dict[int, str] = {}
 # Ordered (substring, outlet_code) rules matched case-insensitively against a
 # chat title / stored receipts.outlet string. ORDER MATTERS — more specific
 # patterns come first so they win:
-#   * "sharfuddin" before "klang": the SEK-6 group is "Hj Sharfuddin Klang Bayu
-#     Emas" and would otherwise be mis-tagged KLANG.
 #   * "sek 15" before "bistro": SEK-15 is "One Bistro" but its group is titled
 #     "...sek 15...", while BISTRO7's group is "...bistro...".
+#   * the KLANG group is "Hj Sharfuddin Klang Bayu Emas" (Klang B.Emas / Bayu
+#     Emas in the outlet master list) — so "sharfuddin"/"bayu emas"/"klang" all
+#     map to KLANG. SEK-6 (Jalan Murai) only matches a genuine "sek 6"/"jalan
+#     murai" titled group; if no such group exists it simply won't resolve and
+#     the startup summary surfaces it as missing.
 # Codes match item_prices.outlet_code / outlet_mapping (KLRAZAK resolves to the
 # "K.L Razak" canonical via outlet_resolver, matching sales' S-RAZAK).
 _CODE_RULES: list[tuple[str, str]] = [
-    ("sharfuddin", "SEK6"),
     ("sek 15", "SEK15"),
     ("sek15", "SEK15"),
+    ("one bistro", "SEK15"),
     ("sek 20", "SEK20"),
     ("sek20", "SEK20"),
     ("sek 14", "SEK14"),
     ("sek14", "SEK14"),
+    ("signature", "SEK14"),
+    ("jalan murai", "SEK6"),
     ("sek 6", "SEK6"),
     ("sek6", "SEK6"),
-    ("signature", "SEK14"),
-    ("one bistro", "SEK15"),
     ("bistro", "BISTRO7"),
     ("razak", "KLRAZAK"),
     ("vista", "VISTA"),
@@ -56,8 +59,20 @@ _CODE_RULES: list[tuple[str, str]] = [
     ("sungai besi", "SBESI"),
     ("sg besi", "SBESI"),
     ("sbesi", "SBESI"),
+    # KLANG group: "Hj Sharfuddin Klang Bayu Emas" — keep these LAST so a more
+    # specific outlet keyword above always wins first.
+    ("bayu emas", "KLANG"),
+    ("sharfuddin", "KLANG"),
     ("klang", "KLANG"),
 ]
+
+# The full set of kitchen outlets a complete deployment should resolve. Used by
+# the startup summary so a group with no recent receipts (hence unresolved) is
+# noticed instead of silently getting no kitchen form.
+EXPECTED_CODES: tuple[str, ...] = (
+    "BISTRO7", "SEK20", "SEK14", "SEK15", "SEK6",
+    "VISTA", "JAKEL", "D", "KLANG", "KLRAZAK",
+)
 
 _RECEIPTS_TABLE = "receipts"
 
@@ -163,3 +178,73 @@ def outlet_for_chat(chat_id, client=None) -> str | None:
     if client is not None:
         return resolve_groups(client).get(key)
     return (_resolved_cache or {}).get(key)
+
+
+def missing_outlets(mapping: dict[int, str]) -> list[str]:
+    """Expected kitchen outlet_codes that did NOT resolve to any chat, in the
+    canonical ``EXPECTED_CODES`` order."""
+    resolved_codes = set(mapping.values())
+    return [code for code in EXPECTED_CODES if code not in resolved_codes]
+
+
+def log_resolution_summary(client) -> dict:
+    """Resolve the kitchen groups and log one startup line: how many of the
+    expected outlets resolved and which (if any) are missing. WARNING when any
+    are missing (a group probably has no recent receipts), INFO when all present.
+
+    Returns {"resolved": {chat_id: code}, "missing": [code, ...]}."""
+    mapping = resolve_groups(client, refresh=True)
+    missing = missing_outlets(mapping)
+    found = len(EXPECTED_CODES) - len(missing)
+    total = len(EXPECTED_CODES)
+    if missing:
+        logger.warning(
+            "Kitchen groups resolved: %d/%d — missing: %s",
+            found, total, ", ".join(missing),
+        )
+    else:
+        logger.info("Kitchen groups resolved: %d/%d — all present", found, total)
+    return {"resolved": mapping, "missing": missing}
+
+
+def diagnostic_dump(client) -> list[dict]:
+    """Per group chat the bot has seen in receipts, return a diagnostic row:
+    {chat_id, outlets (distinct stored outlet texts, most-seen first), count,
+    code (resolved kitchen outlet_code or None)}. Sorted by resolved code then
+    chat_id so an admin can eyeball the chat_id -> outlet mapping live."""
+    by_chat: dict[int, dict[str, int]] = {}
+    try:
+        rows = client.table(_RECEIPTS_TABLE).select("chat_id, outlet").execute()
+        data = getattr(rows, "data", None) or []
+    except Exception:
+        logger.warning("kitchen_groups: diagnostic receipts lookup failed", exc_info=True)
+        data = []
+    for r in data:
+        chat_id = r.get("chat_id")
+        try:
+            chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            continue
+        if chat_id >= 0:
+            continue
+        outlet_text = (r.get("outlet") or "").strip() or "(blank)"
+        slot = by_chat.setdefault(chat_id, {})
+        slot[outlet_text] = slot.get(outlet_text, 0) + 1
+
+    out = []
+    for chat_id, texts in by_chat.items():
+        ordered = sorted(texts.items(), key=lambda kv: (-kv[1], kv[0]))
+        # Resolve on the most-seen outlet text (matches resolve_groups' intent).
+        code = None
+        for text, _ in ordered:
+            code = outlet_code_from_text(text)
+            if code is not None:
+                break
+        out.append({
+            "chat_id": chat_id,
+            "outlets": [t for t, _ in ordered],
+            "count": sum(texts.values()),
+            "code": code,
+        })
+    out.sort(key=lambda d: (d["code"] is None, d["code"] or "", d["chat_id"]))
+    return out

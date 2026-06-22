@@ -274,18 +274,29 @@ def test_outlet_code_from_text_titles():
         "Khulafa Sek 20 Resit": "SEK20",
         "Khulafa Signature Resit": "SEK14",
         "Khulafa Sek 15 Receipt": "SEK15",
-        "Hj Sharfuddin Klang Bayu Emas": "SEK6",  # sharfuddin wins over klang
+        # The Sharfuddin/Klang Bayu Emas group IS the KLANG outlet, not SEK6.
+        "Hj Sharfuddin Klang Bayu Emas": "KLANG",
         "Khulafa Vista Resit": "VISTA",
         "Khulafa Jakel Receipt": "JAKEL",
         "Khulafa Damansara Uptown": "D",
         "Khulafa Klang Bayu Emas": "KLANG",
         "Khulafa KL Razak": "KLRAZAK",
+        # SEK6 only matches a genuine Jalan Murai / Sek 6 titled group.
+        "Khulafa Sek 6 Jalan Murai": "SEK6",
     }
     for text, code in cases.items():
         assert kg.outlet_code_from_text(text) == code, text
     assert kg.outlet_code_from_text("UNKNOWN") is None
     assert kg.outlet_code_from_text("") is None
     assert kg.outlet_code_from_text(None) is None
+
+
+def test_sharfuddin_klang_not_sek6():
+    # Regression: the one Klang-ish group must not be inverted onto SEK6.
+    kg = _fresh_kitchen_groups()
+    assert kg.outlet_code_from_text("Hj Sharfuddin Klang Bayu Emas") == "KLANG"
+    # ...and SEK6 doesn't resolve from a bare Sharfuddin/Klang title.
+    assert kg.outlet_code_from_text("Hj Sharfuddin Klang Bayu Emas") != "SEK6"
 
 
 def test_resolve_groups_from_receipts():
@@ -305,7 +316,7 @@ def test_resolve_groups_from_receipts():
         -1001: "BISTRO7",
         -1002: "SEK20",
         -1003: "SEK14",
-        -1004: "SEK6",
+        -1004: "KLANG",  # Sharfuddin/Klang Bayu Emas -> KLANG
     }
     # outlet_for_chat reads the cached resolution.
     assert kg.outlet_for_chat(-1002) == "SEK20"
@@ -332,3 +343,73 @@ def test_manual_override_wins():
     fake._store["receipts"] = [{"chat_id": -3001, "outlet": "Vista"}]
     groups = dict(kg.configured_groups(fake))
     assert groups[-3001] == "JAKEL"
+
+
+def test_missing_outlets_listed_in_expected_order():
+    kg = _fresh_kitchen_groups()
+    # Only two outlets resolve; the other eight should be reported missing in
+    # EXPECTED_CODES order.
+    mapping = {-1: "BISTRO7", -2: "KLANG"}
+    missing = kg.missing_outlets(mapping)
+    assert "BISTRO7" not in missing and "KLANG" not in missing
+    assert missing == [c for c in kg.EXPECTED_CODES if c not in ("BISTRO7", "KLANG")]
+
+
+def test_log_resolution_summary_warns_when_missing(caplog):
+    import logging
+
+    kg = _fresh_kitchen_groups()
+    fake = FakeSupabase()
+    # Only 3 of the 10 expected outlets have receipts -> WARNING with the rest.
+    fake._store["receipts"] = [
+        {"chat_id": -1001, "outlet": "Bistro"},
+        {"chat_id": -1002, "outlet": "SEK 20"},
+        {"chat_id": -1004, "outlet": "Hj Sharfuddin Klang Bayu Emas"},
+    ]
+    with caplog.at_level(logging.WARNING, logger="config.kitchen_groups"):
+        result = kg.log_resolution_summary(fake)
+    assert "SEK6" in result["missing"]
+    assert "KLRAZAK" in result["missing"]
+    assert "BISTRO7" not in result["missing"]
+    msgs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "Kitchen groups resolved: 3/10" in msgs
+    assert "missing:" in msgs
+
+
+def test_log_resolution_summary_info_when_all_present(caplog):
+    import logging
+
+    kg = _fresh_kitchen_groups()
+    fake = FakeSupabase()
+    titles = {
+        "BISTRO7": "Bistro", "SEK20": "SEK 20", "SEK14": "Signature",
+        "SEK15": "SEK 15", "SEK6": "Sek 6 Jalan Murai", "VISTA": "Vista",
+        "JAKEL": "Jakel", "D": "Damansara", "KLANG": "Hj Sharfuddin Klang Bayu Emas",
+        "KLRAZAK": "KL Razak",
+    }
+    fake._store["receipts"] = [
+        {"chat_id": -(i + 1), "outlet": title} for i, title in enumerate(titles.values())
+    ]
+    with caplog.at_level(logging.INFO, logger="config.kitchen_groups"):
+        result = kg.log_resolution_summary(fake)
+    assert result["missing"] == []
+    msgs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "Kitchen groups resolved: 10/10 — all present" in msgs
+
+
+def test_diagnostic_dump_shape():
+    kg = _fresh_kitchen_groups()
+    fake = FakeSupabase()
+    fake._store["receipts"] = [
+        {"chat_id": -1001, "outlet": "Bistro"},
+        {"chat_id": -1001, "outlet": "Bistro"},
+        {"chat_id": -1009, "outlet": "UNKNOWN"},  # group chat, unresolved code
+        {"chat_id": 42, "outlet": "Bistro"},       # private DM -> skipped
+    ]
+    rows = kg.diagnostic_dump(fake)
+    chat_ids = {r["chat_id"] for r in rows}
+    assert chat_ids == {-1001, -1009}  # DM excluded
+    by_id = {r["chat_id"]: r for r in rows}
+    assert by_id[-1001]["code"] == "BISTRO7"
+    assert by_id[-1001]["count"] == 2
+    assert by_id[-1009]["code"] is None  # seen but unresolved

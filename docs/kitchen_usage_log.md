@@ -75,12 +75,24 @@ Group title → outlet_code:
 | Khulafa Sek 20 | `SEK20` |
 | Khulafa Signature | `SEK14` |
 | Khulafa Sek 15 (One Bistro) | `SEK15` |
-| Hj Sharfuddin Klang Bayu Emas | `SEK6` |
+| Hj Sharfuddin Klang Bayu Emas | `KLANG` (this *is* the Klang B.Emas outlet) |
 | Khulafa Vista | `VISTA` |
 | Khulafa Jakel | `JAKEL` |
 | Khulafa Damansara | `D` |
-| Khulafa Klang | `KLANG` |
 | Khulafa KL Razak | `KLRAZAK` (→ "K.L Razak", matches sales' `S-RAZAK`) |
+| Khulafa Sek 6 / Jalan Murai | `SEK6` (only a genuine Sek 6 group) |
+
+`SEK6` only resolves from a real "Sek 6"/"Jalan Murai" titled group — the
+Sharfuddin/Klang Bayu Emas group is KLANG, not SEK6.
+
+### Startup visibility & live debug
+
+At startup the bot logs one line, e.g.
+`Kitchen groups resolved: 9/10 — missing: SEK6` (WARNING when any expected
+outlet is missing — usually a group with no recent receipts — INFO when all 10
+resolve). Admins can run **`/kitchen_groups_debug`** on the live bot to dump
+every group chat the bot has seen with its `chat_id`, stored outlet text, and
+resolved `outlet_code`, plus which expected outlets are still missing.
 
 ## Calculation & mismatch flag
 
