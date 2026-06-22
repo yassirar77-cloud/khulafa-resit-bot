@@ -2428,7 +2428,8 @@ async def kitchen_groups_debug_command(update: Update, context: ContextTypes.DEF
         )
 
         rows = await asyncio.to_thread(diagnostic_dump, supabase)
-        mapping = await asyncio.to_thread(resolve_groups, supabase, True)
+        # force=True: bypass the process cache so the dump reflects current receipts.
+        mapping = await asyncio.to_thread(resolve_groups, supabase, force=True)
         missing = missing_outlets(mapping)
     except Exception:
         logger.exception("kitchen_groups_debug failed to build the dump")

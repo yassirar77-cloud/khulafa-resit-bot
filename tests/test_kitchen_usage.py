@@ -466,6 +466,30 @@ def test_manual_override_wins():
     assert groups[-3001] == "JAKEL"
 
 
+def test_resolve_groups_force_positional_and_keyword():
+    # Regression for the /kitchen_groups_debug TypeError: force is a
+    # positional-or-keyword arg, so both call styles must work.
+    kg = _fresh_kitchen_groups()
+    fake = FakeSupabase()
+    fake._store["receipts"] = [{"chat_id": -1001, "outlet": "Bistro"}]
+    assert kg.resolve_groups(fake, True) == {-1001: "BISTRO7"}    # positional
+    assert kg.resolve_groups(fake, force=True) == {-1001: "BISTRO7"}  # keyword
+
+
+def test_resolve_groups_force_bypasses_cache():
+    kg = _fresh_kitchen_groups()
+    fake = FakeSupabase()
+    fake._store["receipts"] = [{"chat_id": -1001, "outlet": "Bistro"}]
+    # First call populates and caches.
+    assert kg.resolve_groups(fake) == {-1001: "BISTRO7"}
+    # New receipts arrive for a second outlet.
+    fake._store["receipts"].append({"chat_id": -1002, "outlet": "Vista"})
+    # Cached call still shows the stale single mapping...
+    assert kg.resolve_groups(fake) == {-1001: "BISTRO7"}
+    # ...force=True re-reads receipts fresh and now includes Vista.
+    assert kg.resolve_groups(fake, force=True) == {-1001: "BISTRO7", -1002: "VISTA"}
+
+
 def test_missing_outlets_listed_in_expected_order():
     kg = _fresh_kitchen_groups()
     # Only two outlets resolve; the other eight should be reported missing in

@@ -95,15 +95,19 @@ def outlet_code_from_text(text) -> str | None:
     return None
 
 
-def resolve_groups(client, *, refresh: bool = False) -> dict[int, str]:
+def resolve_groups(client, force: bool = False) -> dict[int, str]:
     """Build (and cache) the chat_id -> outlet_code map from the receipts table.
 
     Reuses the chat IDs the resit pipeline already receives. Only group chats
     (negative chat_id) that resolve to a known outlet_code are kept; when an
     outlet has several chats the busiest one wins. The manual ``KITCHEN_GROUPS``
-    override is layered on top. Cached after the first successful build."""
+    override is layered on top. Cached after the first successful build.
+
+    ``force=True`` bypasses the process cache and re-reads receipts fresh — used
+    by /kitchen_groups_debug so the dump always reflects the current data.
+    ``force`` is a positional-or-keyword arg so callers may pass it either way."""
     global _resolved_cache
-    if _resolved_cache is not None and not refresh:
+    if _resolved_cache is not None and not force:
         return _resolved_cache
     if client is None:
         return dict(KITCHEN_GROUPS)
@@ -193,7 +197,7 @@ def log_resolution_summary(client) -> dict:
     are missing (a group probably has no recent receipts), INFO when all present.
 
     Returns {"resolved": {chat_id: code}, "missing": [code, ...]}."""
-    mapping = resolve_groups(client, refresh=True)
+    mapping = resolve_groups(client, force=True)
     missing = missing_outlets(mapping)
     found = len(EXPECTED_CODES) - len(missing)
     total = len(EXPECTED_CODES)
