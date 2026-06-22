@@ -33,6 +33,25 @@ def test_required_codes_count():
     assert len(ku.required_codes("BISTRO7")) == len(ku.required_codes("SEK6")) + 1
 
 
+# --- KITCHEN_LOG_ENABLED safety gate -----------------------------------------
+
+def test_kitchen_log_enabled_default_off(monkeypatch):
+    monkeypatch.delenv("KITCHEN_LOG_ENABLED", raising=False)
+    assert ku.kitchen_log_enabled() is False
+
+
+def test_kitchen_log_enabled_truthy_values(monkeypatch):
+    for val in ("true", "TRUE", "1", "yes", "on", "Y"):
+        monkeypatch.setenv("KITCHEN_LOG_ENABLED", val)
+        assert ku.kitchen_log_enabled() is True, val
+
+
+def test_kitchen_log_enabled_falsy_values(monkeypatch):
+    for val in ("", "false", "0", "no", "off", "nope"):
+        monkeypatch.setenv("KITCHEN_LOG_ENABLED", val)
+        assert ku.kitchen_log_enabled() is False, val
+
+
 # --- business_date span (18:00 -> 02:00 next day = same business day) --------
 
 def test_business_date_cooked_evening():

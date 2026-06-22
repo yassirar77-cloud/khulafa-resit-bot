@@ -50,6 +50,15 @@ collides with the existing `review:` / `reparse:` / `backfill:` handlers. The
 in-progress form (committed values **and** the half-typed numpad buffer) lives in
 `kitchen_log_session`, so a bot restart never loses a partially filled form.
 
+## Enabling the scheduled forms (`KITCHEN_LOG_ENABLED`)
+
+The 18:00 COOKED / 02:00 LEFT posters are **OFF by default** and only run when
+the env var `KITCHEN_LOG_ENABLED` is truthy (`true`/`1`/`yes`/`on`). This lets
+the feature ship — and `/kitchen_groups_debug` verify the chat→outlet mapping —
+without blasting a possibly-mis-mapped form to 10 groups. Flip it to `true` on
+Render once the mapping is confirmed. `/kitchen_groups_debug` (DM only,
+read-only) shows the current flag state in its reply.
+
 ## Schedule
 
 Both jobs run on the same in-process APScheduler as the 23:00 digest

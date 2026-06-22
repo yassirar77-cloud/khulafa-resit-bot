@@ -2394,25 +2394,54 @@ async def cloudinary_check_command(update: Update, context: ContextTypes.DEFAULT
 
 
 async def kitchen_groups_debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin-only: dump every group chat the bot has seen in receipts with its
-    stored outlet text and the resolved kitchen outlet_code, plus which expected
-    kitchen outlets are still missing. Lets the owner verify the chat_id ->
-    outlet mapping (esp. the Klang/Sharfuddin group) against the live data."""
+    """Read-only debug: dump every group chat the bot has seen in receipts with
+    its stored outlet text and the resolved kitchen outlet_code, plus which
+    expected kitchen outlets are still missing. Lets the owner verify the
+    chat_id -> outlet mapping (esp. the Klang/Sharfuddin group) against live data.
+
+    Deliberately NOT reviewer-gated: it performs no mutation and only reads the
+    chat->outlet mapping, and the silent reviewer guard was hiding it from the
+    owner when YASSIR_CHAT_ID wasn't set. It still only replies in PRIVATE chats
+    (so the chat_id list isn't dumped into a group) and logs every invocation."""
     message = update.effective_message
-    if not message or not is_reviewer(_command_owner_id(update)):
+    if not message:
         return
-    from config.kitchen_groups import (
-        EXPECTED_CODES,
-        diagnostic_dump,
-        missing_outlets,
-        resolve_groups,
+    user = update.effective_user
+    user_id = user.id if user else None
+    chat = update.effective_chat
+    chat_type = chat.type if chat else None
+    logger.info(
+        "kitchen_groups_debug invoked by user_id=%s chat_type=%s reviewer=%s",
+        user_id, chat_type, is_reviewer(user_id),
     )
+    # Read-only, but keep the chat_id list out of group chats.
+    if chat_type not in ("private", None):
+        await message.reply_text("DM me /kitchen_groups_debug in a private chat to see the mapping.")
+        return
 
-    rows = await asyncio.to_thread(diagnostic_dump, supabase)
-    mapping = await asyncio.to_thread(resolve_groups, supabase, True)
-    missing = missing_outlets(mapping)
+    try:
+        from config.kitchen_groups import (
+            EXPECTED_CODES,
+            diagnostic_dump,
+            missing_outlets,
+            resolve_groups,
+        )
 
-    lines = ["🍳 Kitchen groups (chat_id → outlet):"]
+        rows = await asyncio.to_thread(diagnostic_dump, supabase)
+        mapping = await asyncio.to_thread(resolve_groups, supabase, True)
+        missing = missing_outlets(mapping)
+    except Exception:
+        logger.exception("kitchen_groups_debug failed to build the dump")
+        await message.reply_text("⚠️ Couldn't build the kitchen-groups dump — check the logs.")
+        return
+
+    enabled = kitchen_usage.kitchen_log_enabled()
+    lines = [
+        "🍳 Kitchen groups (chat_id → outlet):",
+        f"(your user_id: {user_id} • reviewer: {is_reviewer(user_id)} • "
+        f"KITCHEN_LOG_ENABLED: {enabled})",
+        "",
+    ]
     if not rows:
         lines.append("- (no group receipts seen yet)")
     for r in rows:
@@ -2424,6 +2453,9 @@ async def kitchen_groups_debug_command(update: Update, context: ContextTypes.DEF
         f"Resolved {len(EXPECTED_CODES) - len(missing)}/{len(EXPECTED_CODES)} expected outlets"
         + (f" — missing: {', '.join(missing)}" if missing else " — all present")
     )
+    if not enabled:
+        lines.append("")
+        lines.append("⚠️ Scheduled forms are OFF (set KITCHEN_LOG_ENABLED=true to turn on).")
     await message.reply_text("\n".join(lines))
 
 

@@ -29,6 +29,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -47,6 +48,18 @@ BISTRO_OUTLET = "BISTRO7"
 CALLBACK_PREFIX = "kdu"
 # Pseudo item_code used by the final "Hantar" (submit) button.
 FORM_TOKEN = "_form"
+
+# Master kill-switch for the scheduled forms. The 18:00 COOKED / 02:00 LEFT
+# posters NO-OP unless KITCHEN_LOG_ENABLED is truthy. Default OFF so the bot can
+# ship (and /kitchen_groups_debug can verify the chat->outlet mapping) WITHOUT
+# blasting a possibly-mis-mapped form to 10 groups. Flip the env var to 'true'
+# once the mapping is confirmed.
+_ENABLED_TRUTHY = {"1", "true", "yes", "on", "y"}
+
+
+def kitchen_log_enabled() -> bool:
+    """True only when KITCHEN_LOG_ENABLED is explicitly set truthy. Default OFF."""
+    return os.environ.get("KITCHEN_LOG_ENABLED", "").strip().lower() in _ENABLED_TRUTHY
 
 
 # --- item catalogue ---------------------------------------------------------
@@ -914,6 +927,11 @@ async def _post_forms(application, phase: str) -> None:
     cleanly when config/kitchen_groups.py has no IDs yet."""
     from config.kitchen_groups import configured_groups
 
+    if not kitchen_log_enabled():
+        logger.info(
+            "kitchen: KITCHEN_LOG_ENABLED not set — %s post skipped (safety gate)", phase
+        )
+        return
     if _supabase is None:
         logger.warning("kitchen: supabase not initialised — %s post skipped", phase)
         return
