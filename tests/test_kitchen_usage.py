@@ -500,88 +500,171 @@ def test_digest_incomplete_when_left_session_missing():
     assert len(out) == 1 and out[0]["complete"] is False
 
 
-# --- FIX 2: fast typed (ForceReply) entry ------------------------------------
 
-def test_parse_typed_number():
-    assert ku._parse_typed_number("50", "pcs") == 50
-    assert isinstance(ku._parse_typed_number("50", "pcs"), int)
-    assert ku._parse_typed_number("3.5", "kg") == 3.5
-    assert ku._parse_typed_number("3,5", "kg") == 3.5   # comma decimal tolerated
-    assert ku._parse_typed_number("12", "kg") == 12
-    assert ku._parse_typed_number("abc", "pcs") is None
-    assert ku._parse_typed_number("", "pcs") is None
-    assert ku._parse_typed_number("50pcs", "pcs") is None  # no stray text
+# --- bulk free-text parsing -------------------------------------------------
+
+def test_bulk_parse_multiline():
+    text = "ayam goreng 50\nayam bawang 40\nkambing 8\ndaging 5"
+    out = ku.parse_bulk_entry(text, "SEK20")
+    assert out["matched"] == {
+        "ayam_goreng": 50, "ayam_bawang": 40, "kambing": 8.0, "daging": 5.0,
+    }
+    assert out["unmatched"] == []
 
 
-def _typed_reply_update(chat_id, reply_to_id, text):
+def test_bulk_parse_comma_separated():
+    out = ku.parse_bulk_entry("ayam goreng 50, ayam bawang 40", "SEK20")
+    assert out["matched"] == {"ayam_goreng": 50, "ayam_bawang": 40}
+
+
+def test_bulk_parse_fuzzy_names():
+    assert ku.match_item_name("ayamgoreng") == "ayam_goreng"
+    assert ku.match_item_name("a goreng") == "ayam_goreng"
+    assert ku.match_item_name("telurikan") == "telur_ikan"
+    assert ku.match_item_name("madu") == "ayam_madu"
+    assert ku.match_item_name("kari") == "ikan_kari"
+    # bare "goreng" is ambiguous (ayam vs ikan) -> no match
+    assert ku.match_item_name("goreng") is None
+
+
+def test_bulk_parse_kg_decimal_incl_comma():
+    out = ku.parse_bulk_entry("kambing 3.5\ndaging 2,5\ntelur ikan 4", "SEK20")
+    assert out["matched"] == {"kambing": 3.5, "daging": 2.5, "telur_ikan": 4.0}
+    # pcs stays whole even if a decimal is typed
+    out2 = ku.parse_bulk_entry("ayam goreng 50.9", "SEK20")
+    assert out2["matched"]["ayam_goreng"] == 51
+
+
+def test_bulk_parse_reports_unmatched():
+    out = ku.parse_bulk_entry("ayam goreng 50\nxyz 5\nnasi 10", "SEK20")
+    assert out["matched"] == {"ayam_goreng": 50}
+    assert "xyz 5" in out["unmatched"] and "nasi 10" in out["unmatched"]
+
+
+def test_bulk_parse_rempah_bistro_only():
+    assert ku.parse_bulk_entry("ayam rempah 50", "BISTRO7")["matched"] == {"ayam_rempah": 50}
+    out = ku.parse_bulk_entry("ayam rempah 50", "SEK20")
+    assert out["matched"] == {}
+    assert "ayam rempah 50" in out["unmatched"]
+
+
+def _bulk_update(chat_id, text, reply_to_id=None):
     import types
     replies = []
 
     async def _reply(t, **k):
-        replies.append(t)
+        replies.append((t, k))
 
+    reply_to = types.SimpleNamespace(message_id=reply_to_id) if reply_to_id else None
     msg = types.SimpleNamespace(
-        chat_id=chat_id,
-        text=text,
-        reply_to_message=types.SimpleNamespace(message_id=reply_to_id),
-        reply_text=_reply,
+        chat_id=chat_id, text=text, reply_to_message=reply_to, reply_text=_reply,
     )
-    update = types.SimpleNamespace(effective_message=msg)
-    return update, replies
+    return types.SimpleNamespace(effective_message=msg), replies
 
 
-def test_typed_reply_saves_value_and_updates_form(monkeypatch):
-    import asyncio
+def _bulk_ctx():
     import types
+    return types.SimpleNamespace(bot=types.SimpleNamespace())
 
+
+def _run_bulk(ku_mod, update, ctx):
+    import asyncio
     from telegram.ext import ApplicationHandlerStop
+    try:
+        asyncio.run(ku_mod.handle_kitchen_bulk_text(update, ctx))
+        return False  # passed through (no stop)
+    except ApplicationHandlerStop:
+        return True   # consumed
+
+
+def _freeze_cooked_window(monkeypatch):
+    import kitchen_usage
+    real_dt = kitchen_usage.datetime
+
+    class _DT(real_dt):
+        @classmethod
+        def now(cls, tz=None):
+            return real_dt(2026, 6, 24, 18, 30, tzinfo=tz)
+    monkeypatch.setattr(kitchen_usage, "datetime", _DT)
+
+
+def test_bulk_handler_merges_and_confirms(monkeypatch):
     from tests.fake_supabase import FakeSupabase
 
     fake = FakeSupabase()
     fake._store["kitchen_log_session"] = [{
-        "id": "s9", "chat_id": -1, "outlet_code": "SEK20",
-        "business_date": "2026-06-24", "phase": "cooked", "status": "open",
-        "entries": {}, "message_id": 1000,
+        "id": "b1", "chat_id": -50, "outlet_code": "SEK20",
+        "business_date": "2026-06-24",
+        "phase": "cooked", "status": "open", "entries": {}, "message_id": 1,
     }]
     monkeypatch.setattr(ku, "_supabase", fake)
-    ku._pending_typed_inputs[(-1, 2000)] = ("s9", "ayam_goreng")
+    monkeypatch.setattr(ku, "_kitchen_group_chat_ids", lambda: {-50})
+    _freeze_cooked_window(monkeypatch)
 
-    edits = []
+    update, replies = _bulk_update(-50, "ayam goreng 50\nkambing 8")
+    consumed = _run_bulk(ku, update, _bulk_ctx())
 
-    class _Bot:
-        async def edit_message_text(self, **k):
-            edits.append(k)
-
-    context = types.SimpleNamespace(bot=_Bot())
-    update, _ = _typed_reply_update(-1, 2000, "50")
-
-    try:
-        asyncio.run(ku.handle_kitchen_typed_reply(update, context))
-        stopped = False
-    except ApplicationHandlerStop:
-        stopped = True
-
-    assert stopped is True  # consumed the reply
+    assert consumed is True
     sess = fake.rows("kitchen_log_session")[0]
-    assert sess["entries"]["ayam_goreng"] == 50
-    assert (-1, 2000) not in ku._pending_typed_inputs  # mapping cleared
-    assert edits and edits[0]["message_id"] == 1000  # form refreshed
+    assert sess["entries"] == {"ayam_goreng": 50, "kambing": 8.0}
+    assert replies and "Captured" in replies[0][0]
+    assert replies[0][1].get("reply_markup") is not None  # Sahkan button
+
+    # Correction message MERGES (updates) the same session.
+    update2, _ = _bulk_update(-50, "kambing 9\nayam bawang 12")
+    _run_bulk(ku, update2, _bulk_ctx())
+    sess = fake.rows("kitchen_log_session")[0]
+    assert sess["entries"] == {"ayam_goreng": 50, "kambing": 9.0, "ayam_bawang": 12}
 
 
-def test_typed_reply_ignores_non_kitchen_reply(monkeypatch):
-    import asyncio
-    import types
-
+def test_bulk_handler_night_additive_via_message(monkeypatch):
     from tests.fake_supabase import FakeSupabase
 
-    monkeypatch.setattr(ku, "_supabase", FakeSupabase())
-    ku._pending_typed_inputs.clear()
-    context = types.SimpleNamespace(bot=types.SimpleNamespace())
-    update, _ = _typed_reply_update(-1, 9999, "hello")  # not one of our prompts
+    fake = FakeSupabase()
+    # 6PM already recorded ayam_goreng=50.
+    fake._store["kitchen_daily_usage"] = [{
+        "id": 1, "outlet_code": "SEK20", "business_date": "2026-06-24",
+        "item_code": "ayam_goreng", "item_label": "Ayam Goreng", "unit": "pcs",
+        "cooked_qty": 50, "left_qty": None,
+    }]
+    fake._store["kitchen_log_session"] = [{
+        "id": "n1", "chat_id": -50, "outlet_code": "SEK20",
+        "business_date": "2026-06-24", "phase": "cooked_night", "status": "open",
+        "entries": {}, "message_id": 5,
+    }]
+    monkeypatch.setattr(ku, "_supabase", fake)
+    monkeypatch.setattr(ku, "_kitchen_group_chat_ids", lambda: {-50})
+    _freeze_cooked_window(monkeypatch)
 
-    # Returns normally (no ApplicationHandlerStop) so other handlers can process.
-    result = asyncio.run(ku.handle_kitchen_typed_reply(update, context))
-    assert result is None
+    # Staff types night addition, then confirms (finalize).
+    update, _ = _bulk_update(-50, "ayam goreng 20")
+    _run_bulk(ku, update, _bulk_ctx())
+    sess = fake.rows("kitchen_log_session")[0]
+    ku.finalize_submission(fake, dict(sess), submitter="NightChef")
+    row = [r for r in fake.rows("kitchen_daily_usage") if r["item_code"] == "ayam_goreng"][0]
+    assert row["cooked_qty"] == 70  # 50 + 20 additive
+
+
+def test_bulk_handler_ignores_non_kitchen_chat(monkeypatch):
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    monkeypatch.setattr(ku, "_supabase", fake)
+    monkeypatch.setattr(ku, "_kitchen_group_chat_ids", lambda: {-50})
+    update, replies = _bulk_update(-999, "ayam goreng 50")  # not a kitchen group
+    assert _run_bulk(ku, update, _bulk_ctx()) is False  # passes through to OCR etc.
+    assert replies == []
+
+
+def test_bulk_handler_ignores_chatter_with_no_open_session(monkeypatch):
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()  # kitchen group but NO open session
+    monkeypatch.setattr(ku, "_supabase", fake)
+    monkeypatch.setattr(ku, "_kitchen_group_chat_ids", lambda: {-50})
+    _freeze_cooked_window(monkeypatch)
+    update, _ = _bulk_update(-50, "hello boss")
+    assert _run_bulk(ku, update, _bulk_ctx()) is False  # passes through
 
 
 # --- business_date span (18:00 -> 02:00 next day = same business day) --------

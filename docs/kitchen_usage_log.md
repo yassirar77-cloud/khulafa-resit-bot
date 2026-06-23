@@ -38,30 +38,46 @@ local time before noon folds back to the previous calendar day
 `pcs` items are whole numbers; `kg` items allow one decimal. **Ayam Rempah only
 appears on the BISTRO7 form** (`items_for_outlet`).
 
-## Key-in UX
+## Key-in UX (single-message bulk entry)
 
-The bot posts **one** message with an inline keyboard — one button per item
-showing its value (`—` empty, the number when filled, a `✓` prefix when done).
+The bot posts **one** message: the title, the **item list** (so staff know the
+names), and instructions to **reply with ONE free-text message** — one item per
+line, or comma-separated:
 
-**Tapping an item prompts for a typed number** via Telegram **ForceReply**
-("Ayam Goreng — taip jumlah (pcs, cth 50)"): staff type `50` on their normal
-phone keyboard and the bot saves it and updates the button to `✓ Ayam Goreng:
-50`. This is much faster than tapping a button grid. The inline **numpad**
-(`1 2 3 / 4 5 6 / 7 8 9 / ⌫ 0 ✓`, plus `.` for kg) remains as an automatic
-fallback if the ForceReply prompt can't be sent.
+```
+ayam goreng 50
+ayam bawang 40
+kambing 8
+daging 5
+```
 
-**Hantar needs only ONE item filled** (every phase). Outlets don't cook every
-item daily, so untouched items are **saved as 0** automatically on submit — no
-need to key zeros by hand. (The night form is additive, so it only writes the
-items actually keyed.) The form copy reads "Isi yang dimasak sahaja. Yang tak
-isi = 0."
+The bot parses the whole message at once (`parse_bulk_entry`):
 
-`callback_data` is namespaced `kdu:{session_id}:{item_code}:{action}` so it never
-collides with the existing `review:` / `reparse:` / `backfill:` handlers. The
-typed-reply handler runs in an earlier handler group and only consumes replies
-to a kitchen prompt (tracked by prompt message-id), so it never swallows receipt
-OCR / audit replies or commands. Committed values live in `kitchen_log_session`,
-so a bot restart never loses a partially filled form.
+- **Name matching** is normalized + variant-based (`match_item_name`):
+  `ayam goreng` / `ayamgoreng` / `a goreng` → `ayam_goreng`, `telur ikan` /
+  `telurikan` → `telur_ikan`, single-style words (`bawang`, `madu`, `kari`, …)
+  resolve to their item. Bare `goreng` is ambiguous (ayam vs ikan) → unmatched.
+- **Value** is the trailing number; kg items accept a decimal incl. comma-decimal
+  (`3,5` → 3.5), pcs are whole numbers.
+- **Separators:** newline and comma both split items; a `digit,digit` comma is
+  treated as a decimal, not a separator.
+- **Unmatched lines aren't dropped** — the bot lists them ("⚠️ Tak faham: 'xyz
+  5'") and saves the matched ones, so staff send a correction message that
+  **merges/updates the same session** (doesn't reset).
+- **Ayam Rempah** is only accepted for BISTRO7; for other outlets the line is
+  reported unmatched.
+
+The bot replies with a **captured summary + a "✅ Sahkan & Hantar" button**, so a
+typo isn't auto-committed — finalize happens on confirm (the existing
+`kdu:{session}:_form:send` path). **Untouched items save as 0** on a COOKED/LEFT
+submit (the night form is additive and only writes the items keyed).
+
+The bulk handler runs in handler **group -1** (before the receipt/audit text
+handlers) and only consumes a message when the chat is a **kitchen group with an
+open session** for the current business day AND the text actually matched an item
+(or was a reply to the form). Everything else — receipts, OCR replies, chatter,
+commands — passes through untouched. The legacy inline numpad
+(`kdu:…:open`/digit callbacks) remains as a dormant fallback.
 
 ## Enabling the scheduled forms (`KITCHEN_LOG_ENABLED`)
 

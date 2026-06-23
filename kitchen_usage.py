@@ -30,6 +30,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -220,6 +221,109 @@ def can_submit(entries: dict, outlet_code, phase: str = PHASE_COOKED) -> bool:
     The day is only "incomplete" in the digest when a whole COOKED or LEFT
     session was never submitted, never because some items were 0."""
     return any(entries.get(c) is not None for c in required_codes(outlet_code))
+
+
+# --- bulk free-text parsing (one message, all items) ------------------------
+# Staff reply to a posted form with one message, one item per line OR
+# comma-separated ("ayam goreng 50, kambing 8"). Each segment is matched to an
+# item by normalized name + curated variants, and the trailing number is the
+# value (kg items allow a decimal, incl. comma-decimal).
+
+# Curated name variants per item. Single-style words (bawang/rempah/kicap/madu/
+# tandoori/kari) are unique to one item so they're safe; "goreng" is NOT listed
+# alone because it's ambiguous between ayam_goreng and ikan_goreng.
+_ITEM_VARIANTS: dict[str, list[str]] = {
+    "ayam_goreng": ["ayam goreng", "a goreng", "ag", "goreng ayam"],
+    "ayam_bawang": ["ayam bawang", "a bawang", "ab", "bawang"],
+    "ayam_rempah": ["ayam rempah", "a rempah", "ar", "rempah"],
+    "ayam_kicap": ["ayam kicap", "a kicap", "ak", "kicap"],
+    "ayam_madu": ["ayam madu", "a madu", "am", "madu"],
+    "ayam_tandoori": ["ayam tandoori", "a tandoori", "at", "tandoori", "tandori"],
+    "ikan_goreng": ["ikan goreng", "i goreng", "ig"],
+    "ikan_kari": ["ikan kari", "i kari", "ik", "kari ikan", "ikan curry", "kari", "curry"],
+    "telur_ikan": ["telur ikan", "telurikan", "telur", "roe", "fish roe"],
+    "kambing": ["kambing", "mutton", "goat"],
+    "daging": ["daging", "beef"],
+}
+
+
+def _normalize_name(s) -> str:
+    s = (s or "").lower()
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+_NAME_TO_CODE: dict[str, str] = {}
+_NOSPACE_TO_CODE: dict[str, str] = {}
+for _code, _variants in _ITEM_VARIANTS.items():
+    for _v in _variants:
+        _n = _normalize_name(_v)
+        if _n:
+            _NAME_TO_CODE.setdefault(_n, _code)
+            _NOSPACE_TO_CODE.setdefault(_n.replace(" ", ""), _code)
+
+
+def match_item_name(name) -> str | None:
+    """Resolve a free-text item name to an item_code, or None when it's
+    unrecognised / ambiguous (e.g. bare "goreng")."""
+    n = _normalize_name(name)
+    if not n:
+        return None
+    if n in _NAME_TO_CODE:
+        return _NAME_TO_CODE[n]
+    ns = n.replace(" ", "")
+    if ns in _NOSPACE_TO_CODE:
+        return _NOSPACE_TO_CODE[ns]
+    # Substring fallback — only when it resolves to exactly ONE item.
+    cands = set()
+    for vname, code in _NAME_TO_CODE.items():
+        vns = vname.replace(" ", "")
+        if vname in n or n in vname or vns in ns or ns in vns:
+            cands.add(code)
+    return next(iter(cands)) if len(cands) == 1 else None
+
+
+_NUM_RE = re.compile(r"\d+(?:[.,]\d+)?")
+
+
+def _value_from_str(num_str: str, unit: str):
+    return commit_value(num_str.replace(",", "."), unit)
+
+
+def _split_segments(text) -> list[str]:
+    # A comma is both a decimal mark ("3,5") and an item separator
+    # ("ayam goreng 50, kambing 8"). Protect decimal commas (digit,digit -> .)
+    # first, then split on newlines and the remaining (separator) commas.
+    protected = re.sub(r"(?<=\d),(?=\d)", ".", text or "")
+    return [s.strip() for s in re.split(r"[\n,]+", protected) if s.strip()]
+
+
+def parse_bulk_entry(text, outlet_code) -> dict:
+    """Parse a free-text bulk message into {matched: {code: value}, unmatched:
+    [segment, ...]}. Untouched items aren't included (they become 0 on submit).
+    Ayam Rempah is only accepted for BISTRO7 (otherwise the segment is reported
+    as unmatched). The number is the trailing numeric token in each segment."""
+    allowed = set(required_codes(outlet_code))
+    matched: dict[str, float] = {}
+    unmatched: list[str] = []
+    for seg in _split_segments(text):
+        nums = list(_NUM_RE.finditer(seg))
+        if not nums:
+            unmatched.append(seg)
+            continue
+        m = nums[-1]
+        name = (seg[: m.start()] + " " + seg[m.end():]).strip()
+        code = match_item_name(name)
+        if code is None or code not in allowed:
+            unmatched.append(seg)
+            continue
+        unit = ITEM_BY_CODE[code]["unit"]
+        val = _value_from_str(m.group(0), unit)
+        if val is None:
+            unmatched.append(seg)
+            continue
+        matched[code] = val
+    return {"matched": matched, "unmatched": unmatched}
 
 
 # --- POS matching + Used arithmetic (pure) ----------------------------------
@@ -452,23 +556,67 @@ def numpad_prompt(phase: str) -> str:
 
 
 def form_text(phase: str, business_date, outlet_label, entries: dict, outlet_code) -> str:
-    """Header text shown above the item-list keyboard."""
-    done = sum(1 for c in required_codes(outlet_code) if entries.get(c) is not None)
+    """The posted form: title, the item list (so staff know the names), and
+    instructions to reply with ONE free-text message. Bilingual (BM + Tamil)."""
+    item_labels = [it["label"] for it in items_for_outlet(outlet_code)]
+    if phase == PHASE_COOKED_NIGHT:
+        what = "tambahan masak malam"
+        zero_note = "Tulis yang tambah sahaja; skip jika tiada."
+        zero_ta = "இரவு கூடுதல் மட்டும் எழுதுங்க."
+    elif phase == PHASE_LEFT:
+        what = "baki"
+        zero_note = "Yang tak tulis = 0."
+        zero_ta = "எழுதாதது = 0."
+    else:
+        what = "dimasak"
+        zero_note = "Yang tak tulis = 0."
+        zero_ta = "எழுதாதது = 0."
     lines = [
         form_title(phase),
         f"{outlet_label} • {business_date}",
+        "",
+        f"Balas SATU mesej — satu item satu baris (atau pisah koma). Tulis {what}, cth:",
+        "ayam goreng 50",
+        "kambing 8",
+        zero_note,
+        f"தமிழ்: ஒரே மெசேஜ் — பெயர் + எண் (உ.ம். ayam goreng 50). {zero_ta}",
+        "",
+        "Item: " + ", ".join(item_labels),
     ]
-    if phase == PHASE_COOKED_NIGHT:
-        # Optional, additive: key only the items cooked MORE of at night.
-        lines.append(
-            f"Key TAMBAHAN masak malam sahaja ({done} item). "
-            "Tap item yang dimasak tambah; skip jika tiada."
-        )
-    elif phase == PHASE_LEFT:
-        lines.append(f"Isi yang ada baki sahaja ({done} item). Yang tak isi = 0.")
-    else:
-        lines.append(f"Isi yang dimasak sahaja ({done} item). Yang tak isi = 0.")
     return "\n".join(lines)
+
+
+def render_bulk_confirmation(outlet_code, phase, entries: dict, unmatched: list) -> str:
+    """Summary the bot replies with after parsing a bulk message — what it
+    captured (with a Sahkan button) plus any lines it couldn't match."""
+    lines = ["📝 Captured (belum simpan — tekan Sahkan):"]
+    captured = [
+        it for it in items_for_outlet(outlet_code) if entries.get(it["code"]) is not None
+    ]
+    if captured:
+        for it in captured:
+            lines.append(f"✓ {it['label']}: {format_value(entries[it['code']], it['unit'])}")
+    else:
+        lines.append("(tiada item dikenali lagi)")
+    if phase != PHASE_COOKED_NIGHT:
+        others = sum(1 for it in items_for_outlet(outlet_code) if entries.get(it["code"]) is None)
+        if others:
+            lines.append(f"lain-lain = 0 ({others} item)")
+    if unmatched:
+        lines.append("")
+        lines.append("⚠️ Tak faham: " + "; ".join(f"'{u}'" for u in unmatched))
+        lines.append("Hantar mesej betul untuk tambah/betulkan.")
+    return "\n".join(lines)
+
+
+def build_confirm_keyboard(session_id):
+    """A single Sahkan & Hantar button that finalizes the session (reuses the
+    existing ``kdu:{sid}:_form:send`` callback path)."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Sahkan & Hantar", callback_data=_cb(session_id, FORM_TOKEN, "send")),
+    ]])
 
 
 def numpad_text(phase: str, item_label: str, unit: str, buffer: str) -> str:
@@ -558,25 +706,6 @@ SALES_ITEMWISE_TABLE = "sales_daily_itemwise"
 RECEIPTS_TABLE = "receipts"
 
 _supabase = None
-
-# Fast typed-entry (ForceReply) state: (chat_id, prompt_message_id) ->
-# (session_id, item_code). When an item is tapped the bot sends a ForceReply
-# prompt; the staff's typed reply is matched back here. In-process (transient by
-# nature — a number typed within seconds); a restart just drops a half-entered
-# prompt and the staff re-taps the item.
-_pending_typed_inputs: dict = {}
-
-
-def _parse_typed_number(text, unit):
-    """Parse a typed reply ("50", "3.5", "3,5") into a stored value, or None when
-    it isn't a clean number. pcs -> int, kg -> 1 decimal (via commit_value)."""
-    if not isinstance(text, str):
-        return None
-    t = text.strip().replace(",", ".")
-    import re
-    if not re.fullmatch(r"\d+(?:\.\d+)?", t):
-        return None
-    return commit_value(t, unit)
 
 
 def init_kitchen_usage(supabase_client) -> None:
@@ -695,6 +824,30 @@ def get_or_create_session(client, chat_id, outlet_code, business_date, phase, me
 def get_session(client, session_id) -> dict | None:
     rows = _rows(client.table(SESSION_TABLE).select("*").eq("id", session_id).limit(1).execute())
     return rows[0] if rows else None
+
+
+def get_open_session_for_chat(client, chat_id, business_date, message_id=None) -> dict | None:
+    """The OPEN kitchen session a bulk text message in this chat should target.
+
+    Filters to status='open' for the chat+business_date. When the message is a
+    reply to a specific form, that session wins; otherwise the most recently
+    created open session (latest phase posted) is used. Returns None when there
+    is no open session — the caller then treats the text as non-kitchen."""
+    rows = _rows(
+        client.table(SESSION_TABLE)
+        .select("*")
+        .eq("chat_id", chat_id)
+        .eq("business_date", str(business_date))
+        .eq("status", "open")
+        .execute()
+    )
+    if not rows:
+        return None
+    if message_id is not None:
+        for r in rows:
+            if r.get("message_id") == message_id:
+                return r
+    return sorted(rows, key=lambda r: r.get("id") or 0, reverse=True)[0]
 
 
 def _save_session(client, session_id, **fields) -> None:
@@ -1063,34 +1216,18 @@ async def handle_kitchen_callback(update, context) -> None:
         return
     unit = meta["unit"]
 
-    # --- open an item: prompt for a TYPED number via ForceReply (fast native
-    #     keyboard). Falls back to the inline numpad if the prompt can't be sent.
+    # --- open an item's numpad (legacy fallback; primary entry is bulk text) ---
     if action == "open":
         existing = entries.get(item_code)
-        current = format_value(existing, unit) if existing is not None else "—"
+        buffer = "" if existing is None else format_value(existing, unit)
         await asyncio.to_thread(
-            _save_session, _supabase, session_id, editing_item=item_code, buffer=""
+            _save_session, _supabase, session_id, editing_item=item_code, buffer=buffer
         )
-        unit_hint = "kg, cth 3.5" if unit == "kg" else "pcs, cth 50"
-        prompt_text = f"{meta['label']} — taip jumlah ({unit_hint}). Sekarang: {current}"
-        sent = False
-        try:
-            from telegram import ForceReply
-            prompt = await query.message.reply_text(
-                prompt_text, reply_markup=ForceReply(selective=True)
+        with contextlib.suppress(Exception):
+            await query.edit_message_text(
+                numpad_text(phase, meta["label"], unit, buffer),
+                reply_markup=build_numpad_keyboard(session_id, item_code, unit),
             )
-            _pending_typed_inputs[(query.message.chat_id, prompt.message_id)] = (
-                str(session_id), item_code,
-            )
-            sent = True
-        except Exception:
-            logger.warning("kitchen: ForceReply prompt failed; falling back to numpad", exc_info=True)
-        if not sent:
-            with contextlib.suppress(Exception):
-                await query.edit_message_text(
-                    numpad_text(phase, meta["label"], unit, ""),
-                    reply_markup=build_numpad_keyboard(session_id, item_code, unit),
-                )
         return
 
     # --- numpad keypress ---
@@ -1144,10 +1281,11 @@ async def _post_one(application, chat_id, outlet_code, business_date, phase) -> 
         logger.info("kitchen: %s already submitted for %s %s", phase, outlet_code, business_date)
         return False
     entries = _load_entries(session)
+    # Primary entry is a free-text reply (no per-item buttons); the Sahkan button
+    # appears in the bot's confirmation after the staff message is parsed.
     msg = await application.bot.send_message(
         chat_id=chat_id,
         text=form_text(phase, business_date, outlet_label, entries, outlet_code),
-        reply_markup=build_item_keyboard(session["id"], outlet_code, entries, phase),
     )
     await asyncio.to_thread(_save_session, _supabase, session["id"], message_id=msg.message_id)
     return True
@@ -1225,79 +1363,87 @@ async def post_left_forms(application) -> None:
     await _post_forms(application, PHASE_LEFT)
 
 
-async def handle_kitchen_typed_reply(update, context) -> None:
-    """Catch a staff member typing a number in reply to a kitchen ForceReply
-    prompt, save it to the item, and refresh the form. Registered in an EARLIER
-    handler group than the receipt/audit text handlers; it only acts on replies
-    to one of OUR prompts (tracked in _pending_typed_inputs) and raises
-    ApplicationHandlerStop then, so non-kitchen replies fall through untouched."""
+def _kitchen_group_chat_ids() -> set:
+    """Chat IDs that can host a kitchen session (the configured kitchen groups),
+    so the bulk text handler can cheaply ignore every other chat without a DB
+    hit. Resolution is cached by config.kitchen_groups."""
+    if _supabase is None:
+        return set()
+    try:
+        from config.kitchen_groups import configured_groups
+        return {cid for cid, _ in configured_groups(_supabase)}
+    except Exception:
+        logger.warning("kitchen: could not resolve group chats for bulk gate", exc_info=True)
+        return set()
+
+
+async def handle_kitchen_bulk_text(update, context) -> None:
+    """Parse a free-text bulk message (one item per line / comma-separated) into
+    an open kitchen session, merge it, and reply with a Sahkan confirmation.
+
+    Registered in handler group -1 so it runs before the receipt/audit text
+    handlers. It only consumes a message (raising ApplicationHandlerStop) when
+    the chat is a kitchen group with an OPEN session AND the message either
+    matched at least one item or was a reply to the form — otherwise it returns
+    without stopping so receipts / OCR replies / chatter pass through untouched."""
     from telegram.ext import ApplicationHandlerStop
 
     msg = update.effective_message
-    if msg is None or msg.reply_to_message is None or _supabase is None:
+    if msg is None or _supabase is None:
         return
-    key = (msg.chat_id, msg.reply_to_message.message_id)
-    pending = _pending_typed_inputs.get(key)
-    if pending is None:
-        return  # not a kitchen prompt reply — let other handlers process it
+    text = (msg.text or "").strip()
+    if not text:
+        return
+    chat_id = msg.chat_id
+    # Cheap gate: only kitchen group chats can have sessions (no DB hit otherwise).
+    if chat_id not in _kitchen_group_chat_ids():
+        return
 
-    session_id, item_code = pending
-    meta = ITEM_BY_CODE.get(item_code)
-    session = await asyncio.to_thread(get_session, _supabase, session_id)
-    if session is None or session.get("status") == "submitted" or meta is None:
-        _pending_typed_inputs.pop(key, None)
-        raise ApplicationHandlerStop
+    business_date = str(business_date_for(datetime.now(MY_TZ)))
+    reply_mid = msg.reply_to_message.message_id if msg.reply_to_message else None
+    session = await asyncio.to_thread(
+        get_open_session_for_chat, _supabase, chat_id, business_date, reply_mid
+    )
+    if session is None:
+        return  # no open kitchen session -> not kitchen input
 
-    unit = meta["unit"]
-    value = _parse_typed_number(msg.text, unit)
-    if value is None:
-        hint = "cth 50" if unit == "pcs" else "cth 3.5"
-        with contextlib.suppress(Exception):
-            await msg.reply_text(f"❓ Taip nombor sahaja ({hint}). Cuba reply semula.")
-        raise ApplicationHandlerStop  # keep the prompt mapping so a retry works
+    outlet_code = session["outlet_code"]
+    phase = session["phase"]
+    parsed = parse_bulk_entry(text, outlet_code)
+    matched, unmatched = parsed["matched"], parsed["unmatched"]
+    is_reply_to_form = reply_mid is not None and reply_mid == session.get("message_id")
+    if not matched and not is_reply_to_form:
+        # Nothing recognised and not a reply to our form -> likely chatter; let
+        # other handlers process it.
+        return
 
     entries = _load_entries(session)
-    entries[item_code] = value
-    await asyncio.to_thread(
-        _save_session, _supabase, session_id, entries=entries, editing_item=None, buffer=""
-    )
-    _pending_typed_inputs.pop(key, None)
+    entries.update(matched)  # merge/correct (a later message updates the same session)
+    await asyncio.to_thread(_save_session, _supabase, session["id"], entries=entries)
 
-    phase = session["phase"]
-    outlet_code = session["outlet_code"]
-    business_date = session["business_date"]
     try:
         from outlet_mapping import outlet_display_name
         outlet_label = outlet_display_name(outlet_code)
     except Exception:
         outlet_label = outlet_code
-    form_msg_id = session.get("message_id")
-    if form_msg_id:
-        with contextlib.suppress(Exception):
-            await context.bot.edit_message_text(
-                chat_id=msg.chat_id,
-                message_id=form_msg_id,
-                text=form_text(phase, business_date, outlet_label, entries, outlet_code),
-                reply_markup=build_item_keyboard(session_id, outlet_code, entries, phase),
-            )
+    summary = render_bulk_confirmation(outlet_code, phase, entries, unmatched)
     with contextlib.suppress(Exception):
-        await msg.reply_text(f"✓ {meta['label']}: {format_value(value, unit)}")
+        await msg.reply_text(summary, reply_markup=build_confirm_keyboard(session["id"]))
     raise ApplicationHandlerStop
 
 
 def register_handlers(app) -> None:
-    """Register the kdu: callback handler and the typed-reply (ForceReply) text
-    handler. The typed-reply handler goes in group -1 so it runs BEFORE the
-    receipt/audit text handlers in the default group; it no-ops (and doesn't
-    stop) for replies that aren't kitchen prompts."""
+    """Register the kdu: callback handler (Sahkan/Hantar + numpad fallback) and
+    the bulk free-text handler. The bulk handler goes in group -1 so it runs
+    BEFORE the receipt/audit text handlers; it no-ops (and doesn't stop) unless
+    the chat is a kitchen group with an open session and the text is real kitchen
+    input, so receipts / OCR replies / commands pass through untouched."""
     from telegram.ext import CallbackQueryHandler, MessageHandler, filters
 
     app.add_handler(
         CallbackQueryHandler(handle_kitchen_callback, pattern=r"^kdu:")
     )
     app.add_handler(
-        MessageHandler(
-            filters.TEXT & filters.REPLY & ~filters.COMMAND, handle_kitchen_typed_reply
-        ),
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_kitchen_bulk_text),
         group=-1,
     )
