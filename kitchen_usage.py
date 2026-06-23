@@ -937,6 +937,42 @@ async def handle_kitchen_callback(update, context) -> None:
         )
 
 
+async def _post_one(application, chat_id, outlet_code, business_date, phase) -> bool:
+    """Post a single form to one group. Returns True if a form was sent, False if
+    it was skipped because the phase is already submitted. Raises on error (the
+    caller decides whether to swallow it)."""
+    try:
+        from outlet_mapping import outlet_display_name
+        outlet_label = outlet_display_name(outlet_code)
+    except Exception:
+        outlet_label = outlet_code
+    session = await asyncio.to_thread(
+        get_or_create_session, _supabase, chat_id, outlet_code, business_date, phase
+    )
+    if session.get("status") == "submitted":
+        logger.info("kitchen: %s already submitted for %s %s", phase, outlet_code, business_date)
+        return False
+    entries = _load_entries(session)
+    msg = await application.bot.send_message(
+        chat_id=chat_id,
+        text=form_text(phase, business_date, outlet_label, entries, outlet_code),
+        reply_markup=build_item_keyboard(session["id"], outlet_code, entries),
+    )
+    await asyncio.to_thread(_save_session, _supabase, session["id"], message_id=msg.message_id)
+    return True
+
+
+async def post_one_form(application, chat_id, outlet_code, phase=PHASE_COOKED) -> bool:
+    """Manually post one COOKED/LEFT form to a single group (used by the owner
+    /kitchen_post_now test command). Bypasses the KITCHEN_LOG_ENABLED gate — it
+    is an explicit, owner-triggered single post. Raises on DB/Telegram error so
+    the command can report it."""
+    if _supabase is None:
+        raise RuntimeError("supabase not initialised")
+    business_date = business_date_for(datetime.now(MY_TZ))
+    return await _post_one(application, chat_id, outlet_code, business_date, phase)
+
+
 async def _post_forms(application, phase: str) -> None:
     """Post the COOKED or LEFT form to every configured kitchen group. No-ops
     cleanly when KITCHEN_LOG_ENABLED is off or no groups resolve, and never lets
@@ -965,27 +1001,8 @@ async def _post_forms(application, phase: str) -> None:
     posted = 0
     for chat_id, outlet_code in groups:
         try:
-            try:
-                from outlet_mapping import outlet_display_name
-                outlet_label = outlet_display_name(outlet_code)
-            except Exception:
-                outlet_label = outlet_code
-            session = await asyncio.to_thread(
-                get_or_create_session, _supabase, chat_id, outlet_code, business_date, phase
-            )
-            if session.get("status") == "submitted":
-                logger.info("kitchen: %s already submitted for %s %s", phase, outlet_code, business_date)
-                continue
-            entries = _load_entries(session)
-            msg = await application.bot.send_message(
-                chat_id=chat_id,
-                text=form_text(phase, business_date, outlet_label, entries, outlet_code),
-                reply_markup=build_item_keyboard(session["id"], outlet_code, entries),
-            )
-            await asyncio.to_thread(
-                _save_session, _supabase, session["id"], message_id=msg.message_id
-            )
-            posted += 1
+            if await _post_one(application, chat_id, outlet_code, business_date, phase):
+                posted += 1
         except Exception as exc:
             if _is_missing_table_error(exc):
                 # kitchen_log_session / kitchen_daily_usage not in PostgREST's

@@ -2460,6 +2460,77 @@ async def kitchen_groups_debug_command(update: Update, context: ContextTypes.DEF
     await message.reply_text("\n".join(lines))
 
 
+async def kitchen_post_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only: post ONE kitchen form right now for testing. Bypasses the
+    KITCHEN_LOG_ENABLED safety gate (explicit single post).
+
+    Usage:
+      /kitchen_post_now              -> COOKED form to THIS group
+      /kitchen_post_now left         -> LEFT form to this group
+      /kitchen_post_now SEK20        -> COOKED form to SEK20's group
+      /kitchen_post_now SEK20 left   -> LEFT form to SEK20's group
+    """
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    from config.kitchen_groups import configured_groups
+
+    args = [a.strip() for a in (context.args or []) if a.strip()]
+    _LEFT_WORDS = {"left", "baki", "tutup"}
+    _COOKED_WORDS = {"cooked", "masak", "petang"}
+    phase = kitchen_usage.PHASE_LEFT if any(a.lower() in _LEFT_WORDS for a in args) else kitchen_usage.PHASE_COOKED
+    outlet_tokens = [a for a in args if a.lower() not in _LEFT_WORDS | _COOKED_WORDS]
+    target_outlet = outlet_tokens[0].upper() if outlet_tokens else None
+
+    try:
+        groups = await asyncio.to_thread(configured_groups, supabase)
+    except Exception:
+        logger.exception("kitchen_post_now: group resolution failed")
+        await message.reply_text("⚠️ Couldn't resolve kitchen groups — check the logs.")
+        return
+    code_to_chat = {code: cid for cid, code in groups}
+
+    if target_outlet:
+        chat_id = code_to_chat.get(target_outlet)
+        outlet_code = target_outlet
+        if chat_id is None:
+            known = ", ".join(sorted(code_to_chat)) or "(none resolved)"
+            await message.reply_text(
+                f"No kitchen group resolved for {target_outlet}. Known: {known}"
+            )
+            return
+    else:
+        chat_id = message.chat_id
+        outlet_code = next((c for cid, c in groups if cid == chat_id), None)
+        if outlet_code is None:
+            await message.reply_text(
+                "This chat isn't a known kitchen group. Run it inside the outlet's "
+                "group, or DM me /kitchen_post_now <OUTLET_CODE> [left]."
+            )
+            return
+
+    try:
+        posted = await kitchen_usage.post_one_form(context.application, chat_id, outlet_code, phase)
+    except Exception as exc:
+        if kitchen_usage._is_missing_table_error(exc):
+            await message.reply_text(
+                "⚠️ Kitchen tables aren't in the PostgREST schema cache yet — apply "
+                "migration 0032 and run: NOTIFY pgrst, 'reload schema';"
+            )
+        else:
+            logger.exception("kitchen_post_now failed")
+            await message.reply_text("⚠️ Failed to post the form — check the logs.")
+        return
+
+    label = phase.upper()
+    if posted:
+        await message.reply_text(f"✅ Posted {label} form for {outlet_code} → chat {chat_id}.")
+    else:
+        await message.reply_text(
+            f"ℹ️ {label} for {outlet_code} is already submitted today — nothing posted."
+        )
+
+
 def _parse_reparse_n(args, default: int, maximum: int) -> int:
     if not args:
         return default
@@ -4374,6 +4445,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("dashboard", dashboard))
     app.add_handler(CommandHandler("cloudinary_check", cloudinary_check_command))
     app.add_handler(CommandHandler("kitchen_groups_debug", kitchen_groups_debug_command))
+    app.add_handler(CommandHandler("kitchen_post_now", kitchen_post_now_command))
     app.add_handler(CommandHandler("reparse_status", reparse_status_command))
     app.add_handler(CommandHandler("reparse_preview", reparse_preview_command))
     app.add_handler(CommandHandler("reparse_apply", reparse_apply_command))

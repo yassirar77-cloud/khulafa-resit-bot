@@ -128,6 +128,43 @@ def test_poster_skips_gracefully_when_table_missing(monkeypatch, caplog):
     assert sent == []  # never reached send_message (session create failed first)
 
 
+def test_post_one_form_bypasses_gate_and_posts(monkeypatch):
+    import asyncio
+    import types
+
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    monkeypatch.setattr(ku, "_supabase", fake)
+    # Flag OFF — post_one_form is a manual trigger and must still post.
+    monkeypatch.delenv("KITCHEN_LOG_ENABLED", raising=False)
+
+    sent = []
+
+    class _Bot:
+        async def send_message(self, **kwargs):
+            sent.append(kwargs)
+            return types.SimpleNamespace(message_id=77)
+
+    app = types.SimpleNamespace(bot=_Bot())
+
+    posted = asyncio.run(ku.post_one_form(app, -1, "VISTA", ku.PHASE_COOKED))
+    assert posted is True
+    assert len(sent) == 1 and sent[0]["chat_id"] == -1
+    # A session row was created and stamped with the message_id.
+    sessions = fake.rows("kitchen_log_session")
+    assert len(sessions) == 1
+    assert sessions[0]["outlet_code"] == "VISTA"
+    assert sessions[0]["phase"] == "cooked"
+    assert sessions[0]["message_id"] == 77
+
+    # Re-posting after it's submitted should be a no-op (returns False).
+    fake._store["kitchen_log_session"][0]["status"] = "submitted"
+    again = asyncio.run(ku.post_one_form(app, -1, "VISTA", ku.PHASE_COOKED))
+    assert again is False
+    assert len(sent) == 1  # no second send
+
+
 # --- business_date span (18:00 -> 02:00 next day = same business day) --------
 
 def test_business_date_cooked_evening():
