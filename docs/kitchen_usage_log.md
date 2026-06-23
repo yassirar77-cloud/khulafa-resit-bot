@@ -38,24 +38,30 @@ local time before noon folds back to the previous calendar day
 `pcs` items are whole numbers; `kg` items allow one decimal. **Ayam Rempah only
 appears on the BISTRO7 form** (`items_for_outlet`).
 
-## Key-in UX (tap-only)
+## Key-in UX
 
 The bot posts **one** message with an inline keyboard — one button per item
 showing its value (`—` empty, the number when filled, a `✓` prefix when done).
-Tapping an item swaps the message into an inline **numpad**:
 
-- **pcs** (3×4): `1 2 3 / 4 5 6 / 7 8 9 / ⌫ 0 ✓`
-- **kg** (adds `.`): `1 2 3 / 4 5 6 / 7 8 9 / . 0 ⌫ / ✓ Simpan`
+**Tapping an item prompts for a typed number** via Telegram **ForceReply**
+("Ayam Goreng — taip jumlah (pcs, cth 50)"): staff type `50` on their normal
+phone keyboard and the bot saves it and updates the button to `✓ Ayam Goreng:
+50`. This is much faster than tapping a button grid. The inline **numpad**
+(`1 2 3 / 4 5 6 / 7 8 9 / ⌫ 0 ✓`, plus `.` for kg) remains as an automatic
+fallback if the ForceReply prompt can't be sent.
 
-Each keypress edits the message to show the running value. `✓` writes the value
-and returns to the item list. Tapping a filled item re-opens the numpad
-pre-filled so it can be corrected. The final **📤 Hantar** button is gated until
-every required item is filled.
+**Hantar needs only ONE item filled** (every phase). Outlets don't cook every
+item daily, so untouched items are **saved as 0** automatically on submit — no
+need to key zeros by hand. (The night form is additive, so it only writes the
+items actually keyed.) The form copy reads "Isi yang dimasak sahaja. Yang tak
+isi = 0."
 
 `callback_data` is namespaced `kdu:{session_id}:{item_code}:{action}` so it never
 collides with the existing `review:` / `reparse:` / `backfill:` handlers. The
-in-progress form (committed values **and** the half-typed numpad buffer) lives in
-`kitchen_log_session`, so a bot restart never loses a partially filled form.
+typed-reply handler runs in an earlier handler group and only consumes replies
+to a kitchen prompt (tracked by prompt message-id), so it never swallows receipt
+OCR / audit replies or commands. Committed values live in `kitchen_log_session`,
+so a bot restart never loses a partially filled form.
 
 ## Enabling the scheduled forms (`KITCHEN_LOG_ENABLED`)
 

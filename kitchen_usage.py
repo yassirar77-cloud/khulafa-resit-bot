@@ -212,15 +212,14 @@ def is_form_complete(entries: dict, outlet_code) -> bool:
 
 
 def can_submit(entries: dict, outlet_code, phase: str = PHASE_COOKED) -> bool:
-    """Whether Hantar is allowed for a phase.
+    """Hantar is allowed once AT LEAST ONE item is filled — for every phase.
 
-    The 6PM COOKED and 2AM LEFT forms require EVERY item filled. The optional
-    12AM night-cook form (PHASE_COOKED_NIGHT) only adds the extra amounts the
-    chef cooked at night, so it just needs AT LEAST ONE item filled (an outlet
-    that doesn't night-cook simply skips the form)."""
-    if phase == PHASE_COOKED_NIGHT:
-        return any(entries.get(c) is not None for c in required_codes(outlet_code))
-    return is_form_complete(entries, outlet_code)
+    Outlets don't cook every item every day, so forcing all 11 is too slow.
+    Untouched items are saved as 0 on submit (COOKED/LEFT) — see
+    ``finalize_submission`` — or simply skipped for the additive night form.
+    The day is only "incomplete" in the digest when a whole COOKED or LEFT
+    session was never submitted, never because some items were 0."""
+    return any(entries.get(c) is not None for c in required_codes(outlet_code))
 
 
 # --- POS matching + Used arithmetic (pure) ----------------------------------
@@ -455,7 +454,6 @@ def numpad_prompt(phase: str) -> str:
 def form_text(phase: str, business_date, outlet_label, entries: dict, outlet_code) -> str:
     """Header text shown above the item-list keyboard."""
     done = sum(1 for c in required_codes(outlet_code) if entries.get(c) is not None)
-    total = len(required_codes(outlet_code))
     lines = [
         form_title(phase),
         f"{outlet_label} • {business_date}",
@@ -466,8 +464,10 @@ def form_text(phase: str, business_date, outlet_label, entries: dict, outlet_cod
             f"Key TAMBAHAN masak malam sahaja ({done} item). "
             "Tap item yang dimasak tambah; skip jika tiada."
         )
+    elif phase == PHASE_LEFT:
+        lines.append(f"Isi yang ada baki sahaja ({done} item). Yang tak isi = 0.")
     else:
-        lines.append(f"Isi setiap item ({done}/{total} siap). Tap untuk key-in.")
+        lines.append(f"Isi yang dimasak sahaja ({done} item). Yang tak isi = 0.")
     return "\n".join(lines)
 
 
@@ -505,10 +505,8 @@ def build_item_keyboard(session_id, outlet_code, entries: dict, phase: str = PHA
 
     if can_submit(entries, outlet_code, phase):
         hantar_label = "📤 Hantar"
-    elif phase == PHASE_COOKED_NIGHT:
-        hantar_label = "📤 Hantar (key sekurang-kurangnya 1 item)"
     else:
-        hantar_label = "📤 Hantar (isi semua dulu)"
+        hantar_label = "📤 Hantar (key sekurang-kurangnya 1 item)"
     rows.append([InlineKeyboardButton(hantar_label, callback_data=_cb(session_id, FORM_TOKEN, "send"))])
     return InlineKeyboardMarkup(rows)
 
@@ -560,6 +558,25 @@ SALES_ITEMWISE_TABLE = "sales_daily_itemwise"
 RECEIPTS_TABLE = "receipts"
 
 _supabase = None
+
+# Fast typed-entry (ForceReply) state: (chat_id, prompt_message_id) ->
+# (session_id, item_code). When an item is tapped the bot sends a ForceReply
+# prompt; the staff's typed reply is matched back here. In-process (transient by
+# nature — a number typed within seconds); a restart just drops a half-entered
+# prompt and the staff re-taps the item.
+_pending_typed_inputs: dict = {}
+
+
+def _parse_typed_number(text, unit):
+    """Parse a typed reply ("50", "3.5", "3,5") into a stored value, or None when
+    it isn't a clean number. pcs -> int, kg -> 1 decimal (via commit_value)."""
+    if not isinstance(text, str):
+        return None
+    t = text.strip().replace(",", ".")
+    import re
+    if not re.fullmatch(r"\d+(?:\.\d+)?", t):
+        return None
+    return commit_value(t, unit)
 
 
 def init_kitchen_usage(supabase_client) -> None:
@@ -767,7 +784,13 @@ def finalize_submission(client, session: dict, submitter: str):
     entries = _load_entries(session)
     now_iso = datetime.now(MY_TZ).isoformat()
 
-    pending = [it for it in items_for_outlet(outlet_code) if entries.get(it["code"]) is not None]
+    # COOKED / LEFT write EVERY item (untouched -> 0) so a submitted form is a
+    # complete record for the day. The optional additive night form only writes
+    # the items the chef actually keyed (adding 0 would be a no-op anyway).
+    if phase == PHASE_COOKED_NIGHT:
+        pending = [it for it in items_for_outlet(outlet_code) if entries.get(it["code"]) is not None]
+    else:
+        pending = items_for_outlet(outlet_code)
     logger.info(
         "kitchen: promoting %d entries to kitchen_daily_usage for %s %s %s",
         len(pending), outlet_code, business_date, phase,
@@ -804,7 +827,8 @@ def finalize_submission(client, session: dict, submitter: str):
             "unit": unit,
         }
         if phase == PHASE_COOKED:
-            row["cooked_qty"] = value
+            # Untouched items default to 0 (staff key only what they cooked).
+            row["cooked_qty"] = value if value is not None else 0
             row["cooked_by"] = submitter
             row["cooked_at"] = now_iso
         elif phase == PHASE_COOKED_NIGHT:
@@ -814,7 +838,8 @@ def finalize_submission(client, session: dict, submitter: str):
             row["cooked_by"] = submitter
             row["cooked_at"] = now_iso
         else:
-            row["left_qty"] = value
+            # Untouched items default to 0 leftover.
+            row["left_qty"] = value if value is not None else 0
             row["left_by"] = submitter
             row["left_at"] = now_iso
         try:
@@ -1038,18 +1063,34 @@ async def handle_kitchen_callback(update, context) -> None:
         return
     unit = meta["unit"]
 
-    # --- open an item's numpad (pre-filled when editing) ---
+    # --- open an item: prompt for a TYPED number via ForceReply (fast native
+    #     keyboard). Falls back to the inline numpad if the prompt can't be sent.
     if action == "open":
         existing = entries.get(item_code)
-        buffer = "" if existing is None else format_value(existing, unit)
+        current = format_value(existing, unit) if existing is not None else "—"
         await asyncio.to_thread(
-            _save_session, _supabase, session_id, editing_item=item_code, buffer=buffer
+            _save_session, _supabase, session_id, editing_item=item_code, buffer=""
         )
-        with contextlib.suppress(Exception):
-            await query.edit_message_text(
-                numpad_text(phase, meta["label"], unit, buffer),
-                reply_markup=build_numpad_keyboard(session_id, item_code, unit),
+        unit_hint = "kg, cth 3.5" if unit == "kg" else "pcs, cth 50"
+        prompt_text = f"{meta['label']} — taip jumlah ({unit_hint}). Sekarang: {current}"
+        sent = False
+        try:
+            from telegram import ForceReply
+            prompt = await query.message.reply_text(
+                prompt_text, reply_markup=ForceReply(selective=True)
             )
+            _pending_typed_inputs[(query.message.chat_id, prompt.message_id)] = (
+                str(session_id), item_code,
+            )
+            sent = True
+        except Exception:
+            logger.warning("kitchen: ForceReply prompt failed; falling back to numpad", exc_info=True)
+        if not sent:
+            with contextlib.suppress(Exception):
+                await query.edit_message_text(
+                    numpad_text(phase, meta["label"], unit, ""),
+                    reply_markup=build_numpad_keyboard(session_id, item_code, unit),
+                )
         return
 
     # --- numpad keypress ---
@@ -1184,10 +1225,79 @@ async def post_left_forms(application) -> None:
     await _post_forms(application, PHASE_LEFT)
 
 
+async def handle_kitchen_typed_reply(update, context) -> None:
+    """Catch a staff member typing a number in reply to a kitchen ForceReply
+    prompt, save it to the item, and refresh the form. Registered in an EARLIER
+    handler group than the receipt/audit text handlers; it only acts on replies
+    to one of OUR prompts (tracked in _pending_typed_inputs) and raises
+    ApplicationHandlerStop then, so non-kitchen replies fall through untouched."""
+    from telegram.ext import ApplicationHandlerStop
+
+    msg = update.effective_message
+    if msg is None or msg.reply_to_message is None or _supabase is None:
+        return
+    key = (msg.chat_id, msg.reply_to_message.message_id)
+    pending = _pending_typed_inputs.get(key)
+    if pending is None:
+        return  # not a kitchen prompt reply — let other handlers process it
+
+    session_id, item_code = pending
+    meta = ITEM_BY_CODE.get(item_code)
+    session = await asyncio.to_thread(get_session, _supabase, session_id)
+    if session is None or session.get("status") == "submitted" or meta is None:
+        _pending_typed_inputs.pop(key, None)
+        raise ApplicationHandlerStop
+
+    unit = meta["unit"]
+    value = _parse_typed_number(msg.text, unit)
+    if value is None:
+        hint = "cth 50" if unit == "pcs" else "cth 3.5"
+        with contextlib.suppress(Exception):
+            await msg.reply_text(f"❓ Taip nombor sahaja ({hint}). Cuba reply semula.")
+        raise ApplicationHandlerStop  # keep the prompt mapping so a retry works
+
+    entries = _load_entries(session)
+    entries[item_code] = value
+    await asyncio.to_thread(
+        _save_session, _supabase, session_id, entries=entries, editing_item=None, buffer=""
+    )
+    _pending_typed_inputs.pop(key, None)
+
+    phase = session["phase"]
+    outlet_code = session["outlet_code"]
+    business_date = session["business_date"]
+    try:
+        from outlet_mapping import outlet_display_name
+        outlet_label = outlet_display_name(outlet_code)
+    except Exception:
+        outlet_label = outlet_code
+    form_msg_id = session.get("message_id")
+    if form_msg_id:
+        with contextlib.suppress(Exception):
+            await context.bot.edit_message_text(
+                chat_id=msg.chat_id,
+                message_id=form_msg_id,
+                text=form_text(phase, business_date, outlet_label, entries, outlet_code),
+                reply_markup=build_item_keyboard(session_id, outlet_code, entries, phase),
+            )
+    with contextlib.suppress(Exception):
+        await msg.reply_text(f"✓ {meta['label']}: {format_value(value, unit)}")
+    raise ApplicationHandlerStop
+
+
 def register_handlers(app) -> None:
-    """Register the single kdu: callback handler on the PTB application."""
-    from telegram.ext import CallbackQueryHandler
+    """Register the kdu: callback handler and the typed-reply (ForceReply) text
+    handler. The typed-reply handler goes in group -1 so it runs BEFORE the
+    receipt/audit text handlers in the default group; it no-ops (and doesn't
+    stop) for replies that aren't kitchen prompts."""
+    from telegram.ext import CallbackQueryHandler, MessageHandler, filters
 
     app.add_handler(
         CallbackQueryHandler(handle_kitchen_callback, pattern=r"^kdu:")
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & filters.REPLY & ~filters.COMMAND, handle_kitchen_typed_reply
+        ),
+        group=-1,
     )

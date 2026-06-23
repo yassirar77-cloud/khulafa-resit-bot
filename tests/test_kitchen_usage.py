@@ -355,15 +355,12 @@ def test_night_form_same_items_incl_rempah_for_bistro():
     assert "ayam_rempah" not in [it["code"] for it in ku.items_for_outlet("SEK20")]
 
 
-def test_can_submit_phase_rules():
-    full = {c: 1 for c in ku.required_codes("SEK20")}
+def test_can_submit_at_least_one_item_all_phases():
     partial = {"ayam_goreng": 20}
-    # 6PM/LEFT need all items; night needs only one.
-    assert ku.can_submit(full, "SEK20", ku.PHASE_COOKED) is True
-    assert ku.can_submit(partial, "SEK20", ku.PHASE_COOKED) is False
-    assert ku.can_submit(partial, "SEK20", ku.PHASE_LEFT) is False
-    assert ku.can_submit(partial, "SEK20", ku.PHASE_COOKED_NIGHT) is True
-    assert ku.can_submit({}, "SEK20", ku.PHASE_COOKED_NIGHT) is False
+    # FIX 1: every phase only needs >=1 item; untouched ones save as 0.
+    for phase in (ku.PHASE_COOKED, ku.PHASE_LEFT, ku.PHASE_COOKED_NIGHT):
+        assert ku.can_submit(partial, "SEK20", phase) is True
+        assert ku.can_submit({}, "SEK20", phase) is False
 
 
 def test_night_cook_is_additive(monkeypatch):
@@ -430,6 +427,161 @@ def test_used_reflects_summed_cooked_after_night():
                            itemwise_rows=[{"item_name": "Ayam Goreng", "qty": 62}])
     assert ev["used"] == 62
     assert ev["flag"] is None  # matches POS
+
+
+# --- FIX 1: untouched items save as 0; Hantar with >=1 -----------------------
+
+def test_finalize_cooked_partial_saves_zeros():
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    session = {
+        "id": "c1", "chat_id": -1, "outlet_code": "SEK20",
+        "business_date": "2026-06-24", "phase": "cooked", "status": "open",
+        "entries": {"ayam_goreng": 50, "kambing": 3.5},  # only 2 of 10 keyed
+    }
+    fake._store["kitchen_log_session"] = [dict(session)]
+
+    ku.finalize_submission(fake, dict(session), submitter="Chef")
+
+    rows = {r["item_code"]: r for r in fake.rows("kitchen_daily_usage")}
+    # All SEK20 items get a row (untouched -> 0); none left None.
+    assert set(rows) == set(ku.required_codes("SEK20"))
+    assert rows["ayam_goreng"]["cooked_qty"] == 50
+    assert rows["kambing"]["cooked_qty"] == 3.5
+    assert rows["ayam_bawang"]["cooked_qty"] == 0  # untouched
+    assert all(r.get("left_qty") is None for r in rows.values())  # LEFT not yet
+
+
+def test_finalize_left_partial_saves_zeros():
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    session = {
+        "id": "l1", "chat_id": -1, "outlet_code": "SEK20",
+        "business_date": "2026-06-24", "phase": "left", "status": "open",
+        "entries": {"ayam_goreng": 4},
+    }
+    fake._store["kitchen_log_session"] = [dict(session)]
+    ku.finalize_submission(fake, dict(session), submitter="Cashier")
+
+    rows = {r["item_code"]: r for r in fake.rows("kitchen_daily_usage")}
+    assert rows["ayam_goreng"]["left_qty"] == 4
+    assert rows["ayam_bawang"]["left_qty"] == 0  # untouched -> 0
+
+
+def test_digest_complete_when_zeros_but_both_submitted():
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    # Both COOKED and LEFT submitted; some items are 0 — still COMPLETE.
+    fake._store["kitchen_daily_usage"] = [
+        {"outlet_code": "SEK20", "business_date": "2026-06-24", "item_code": "ayam_goreng",
+         "item_label": "Ayam Goreng", "unit": "pcs", "cooked_qty": 50, "left_qty": 4},
+        {"outlet_code": "SEK20", "business_date": "2026-06-24", "item_code": "ayam_bawang",
+         "item_label": "Ayam Bawang", "unit": "pcs", "cooked_qty": 0, "left_qty": 0},
+    ]
+    out = ku.gather_digest_usage(fake, "2026-06-24")
+    assert len(out) == 1 and out[0]["complete"] is True
+
+
+def test_digest_incomplete_when_left_session_missing():
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    # COOKED submitted (0s included) but LEFT never submitted -> incomplete.
+    fake._store["kitchen_daily_usage"] = [
+        {"outlet_code": "SEK20", "business_date": "2026-06-24", "item_code": "ayam_goreng",
+         "item_label": "Ayam Goreng", "unit": "pcs", "cooked_qty": 50, "left_qty": None},
+        {"outlet_code": "SEK20", "business_date": "2026-06-24", "item_code": "ayam_bawang",
+         "item_label": "Ayam Bawang", "unit": "pcs", "cooked_qty": 0, "left_qty": None},
+    ]
+    out = ku.gather_digest_usage(fake, "2026-06-24")
+    assert len(out) == 1 and out[0]["complete"] is False
+
+
+# --- FIX 2: fast typed (ForceReply) entry ------------------------------------
+
+def test_parse_typed_number():
+    assert ku._parse_typed_number("50", "pcs") == 50
+    assert isinstance(ku._parse_typed_number("50", "pcs"), int)
+    assert ku._parse_typed_number("3.5", "kg") == 3.5
+    assert ku._parse_typed_number("3,5", "kg") == 3.5   # comma decimal tolerated
+    assert ku._parse_typed_number("12", "kg") == 12
+    assert ku._parse_typed_number("abc", "pcs") is None
+    assert ku._parse_typed_number("", "pcs") is None
+    assert ku._parse_typed_number("50pcs", "pcs") is None  # no stray text
+
+
+def _typed_reply_update(chat_id, reply_to_id, text):
+    import types
+    replies = []
+
+    async def _reply(t, **k):
+        replies.append(t)
+
+    msg = types.SimpleNamespace(
+        chat_id=chat_id,
+        text=text,
+        reply_to_message=types.SimpleNamespace(message_id=reply_to_id),
+        reply_text=_reply,
+    )
+    update = types.SimpleNamespace(effective_message=msg)
+    return update, replies
+
+
+def test_typed_reply_saves_value_and_updates_form(monkeypatch):
+    import asyncio
+    import types
+
+    from telegram.ext import ApplicationHandlerStop
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store["kitchen_log_session"] = [{
+        "id": "s9", "chat_id": -1, "outlet_code": "SEK20",
+        "business_date": "2026-06-24", "phase": "cooked", "status": "open",
+        "entries": {}, "message_id": 1000,
+    }]
+    monkeypatch.setattr(ku, "_supabase", fake)
+    ku._pending_typed_inputs[(-1, 2000)] = ("s9", "ayam_goreng")
+
+    edits = []
+
+    class _Bot:
+        async def edit_message_text(self, **k):
+            edits.append(k)
+
+    context = types.SimpleNamespace(bot=_Bot())
+    update, _ = _typed_reply_update(-1, 2000, "50")
+
+    try:
+        asyncio.run(ku.handle_kitchen_typed_reply(update, context))
+        stopped = False
+    except ApplicationHandlerStop:
+        stopped = True
+
+    assert stopped is True  # consumed the reply
+    sess = fake.rows("kitchen_log_session")[0]
+    assert sess["entries"]["ayam_goreng"] == 50
+    assert (-1, 2000) not in ku._pending_typed_inputs  # mapping cleared
+    assert edits and edits[0]["message_id"] == 1000  # form refreshed
+
+
+def test_typed_reply_ignores_non_kitchen_reply(monkeypatch):
+    import asyncio
+    import types
+
+    from tests.fake_supabase import FakeSupabase
+
+    monkeypatch.setattr(ku, "_supabase", FakeSupabase())
+    ku._pending_typed_inputs.clear()
+    context = types.SimpleNamespace(bot=types.SimpleNamespace())
+    update, _ = _typed_reply_update(-1, 9999, "hello")  # not one of our prompts
+
+    # Returns normally (no ApplicationHandlerStop) so other handlers can process.
+    result = asyncio.run(ku.handle_kitchen_typed_reply(update, context))
+    assert result is None
 
 
 # --- business_date span (18:00 -> 02:00 next day = same business day) --------
