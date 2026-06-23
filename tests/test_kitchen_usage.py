@@ -52,6 +52,82 @@ def test_kitchen_log_enabled_falsy_values(monkeypatch):
         assert ku.kitchen_log_enabled() is False, val
 
 
+# --- missing-table (PGRST205) detection + graceful poster --------------------
+
+class _PGRSTError(Exception):
+    """Mimics postgrest APIError: has .code and .message attributes."""
+    def __init__(self, code="PGRST205",
+                 message="Could not find the table 'public.kitchen_log_session' "
+                         "in the schema cache"):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def test_is_missing_table_error_detects_pgrst205():
+    assert ku._is_missing_table_error(_PGRSTError()) is True
+    # plain Exception carrying the message text (no .code attr)
+    assert ku._is_missing_table_error(
+        Exception("Could not find the table 'public.kitchen_log_session' "
+                  "in the schema cache")
+    ) is True
+    # unrelated errors are NOT swallowed as missing-table
+    assert ku._is_missing_table_error(ValueError("boom")) is False
+    assert ku._is_missing_table_error(Exception("network timeout")) is False
+
+
+def test_poster_skips_gracefully_when_table_missing(monkeypatch, caplog):
+    import asyncio
+    import logging
+    import types
+
+    import config.kitchen_groups as kg
+
+    # One group resolved, so the loop runs; bypass receipts resolution.
+    monkeypatch.setattr(kg, "configured_groups", lambda client=None: [(-1, "VISTA")])
+    monkeypatch.setenv("KITCHEN_LOG_ENABLED", "true")
+
+    class _RaisingQuery:
+        def __init__(self, name):
+            self.name = name
+        def select(self, *a, **k):
+            return self
+        def insert(self, *a, **k):
+            return self
+        def eq(self, *a, **k):
+            return self
+        def limit(self, *a, **k):
+            return self
+        def execute(self):
+            if self.name == "kitchen_log_session":
+                raise _PGRSTError()
+            return types.SimpleNamespace(data=[])
+
+    class _RaisingSupabase:
+        def table(self, name):
+            return _RaisingQuery(name)
+
+    monkeypatch.setattr(ku, "_supabase", _RaisingSupabase())
+
+    sent = []
+
+    class _Bot:
+        async def send_message(self, **kwargs):
+            sent.append(kwargs)
+            return types.SimpleNamespace(message_id=1)
+
+    app = types.SimpleNamespace(bot=_Bot())
+
+    with caplog.at_level(logging.INFO, logger="kitchen_usage"):
+        # Must NOT raise — a missing table is logged and skipped, scheduler lives.
+        asyncio.run(ku._post_forms(app, ku.PHASE_COOKED))
+
+    msgs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "kitchen COOKED poster fired, enabled=True" in msgs
+    assert "schema cache" in msgs  # the clear missing-table error
+    assert sent == []  # never reached send_message (session create failed first)
+
+
 # --- business_date span (18:00 -> 02:00 next day = same business day) --------
 
 def test_business_date_cooked_evening():

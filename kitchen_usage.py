@@ -537,6 +537,21 @@ def _rows(result):
     return getattr(result, "data", None) or []
 
 
+def _is_missing_table_error(exc: Exception) -> bool:
+    """True when an error is PostgREST's "table not in the schema cache"
+    (PGRST205) for a kitchen table — i.e. migration 0032 isn't applied or the
+    schema cache wasn't reloaded. Detected by code/message so it works whether
+    the client raises APIError or a plain Exception."""
+    code = getattr(exc, "code", None)
+    if code == "PGRST205":
+        return True
+    text = str(getattr(exc, "message", "") or exc).lower()
+    return "pgrst205" in text or (
+        "schema cache" in text
+        and ("kitchen_log_session" in text or "kitchen_daily_usage" in text)
+    )
+
+
 def _load_entries(row: dict) -> dict:
     raw = row.get("entries")
     if isinstance(raw, dict):
@@ -924,10 +939,15 @@ async def handle_kitchen_callback(update, context) -> None:
 
 async def _post_forms(application, phase: str) -> None:
     """Post the COOKED or LEFT form to every configured kitchen group. No-ops
-    cleanly when config/kitchen_groups.py has no IDs yet."""
+    cleanly when KITCHEN_LOG_ENABLED is off or no groups resolve, and never lets
+    one bad group/DB error abort the whole run (or the scheduler)."""
     from config.kitchen_groups import configured_groups
 
-    if not kitchen_log_enabled():
+    enabled = kitchen_log_enabled()
+    # Always log that the job fired, so the logs distinguish "flag off" from
+    # "table missing" from "nothing resolved".
+    logger.info("kitchen %s poster fired, enabled=%s", phase.upper(), enabled)
+    if not enabled:
         logger.info(
             "kitchen: KITCHEN_LOG_ENABLED not set — %s post skipped (safety gate)", phase
         )
@@ -942,20 +962,21 @@ async def _post_forms(application, phase: str) -> None:
 
     now_my = datetime.now(MY_TZ)
     business_date = business_date_for(now_my)
+    posted = 0
     for chat_id, outlet_code in groups:
         try:
-            from outlet_mapping import outlet_display_name
-            outlet_label = outlet_display_name(outlet_code)
-        except Exception:
-            outlet_label = outlet_code
-        session = await asyncio.to_thread(
-            get_or_create_session, _supabase, chat_id, outlet_code, business_date, phase
-        )
-        if session.get("status") == "submitted":
-            logger.info("kitchen: %s already submitted for %s %s", phase, outlet_code, business_date)
-            continue
-        entries = _load_entries(session)
-        try:
+            try:
+                from outlet_mapping import outlet_display_name
+                outlet_label = outlet_display_name(outlet_code)
+            except Exception:
+                outlet_label = outlet_code
+            session = await asyncio.to_thread(
+                get_or_create_session, _supabase, chat_id, outlet_code, business_date, phase
+            )
+            if session.get("status") == "submitted":
+                logger.info("kitchen: %s already submitted for %s %s", phase, outlet_code, business_date)
+                continue
+            entries = _load_entries(session)
             msg = await application.bot.send_message(
                 chat_id=chat_id,
                 text=form_text(phase, business_date, outlet_label, entries, outlet_code),
@@ -964,8 +985,21 @@ async def _post_forms(application, phase: str) -> None:
             await asyncio.to_thread(
                 _save_session, _supabase, session["id"], message_id=msg.message_id
             )
-        except Exception:
-            logger.exception("kitchen: failed to post %s form to chat %s", phase, chat_id)
+            posted += 1
+        except Exception as exc:
+            if _is_missing_table_error(exc):
+                # kitchen_log_session / kitchen_daily_usage not in PostgREST's
+                # schema cache (migration 0032 not applied, or schema not
+                # reloaded). Log loudly and skip — don't crash the scheduler.
+                logger.error(
+                    "kitchen: %s post skipped for chat %s (%s) — kitchen tables "
+                    "unavailable in PostgREST schema cache. Apply migration 0032 "
+                    "and run NOTIFY pgrst, 'reload schema'. (%s)",
+                    phase, chat_id, outlet_code, exc,
+                )
+            else:
+                logger.exception("kitchen: failed to post %s form to chat %s", phase, chat_id)
+    logger.info("kitchen %s poster done: posted %d/%d group(s)", phase.upper(), posted, len(groups))
 
 
 async def post_cooked_forms(application) -> None:
