@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -1141,6 +1142,77 @@ def _submitter_name(user) -> str:
     return name or str(getattr(user, "id", "?"))
 
 
+# In-memory numpad buffers so a digit tap never touches the DB. Keyed by
+# (chat_id, user_id, session_id, item_code) -> {"buffer": str, "phase": str}.
+# Set when an item's numpad is opened, mutated on each digit (memory only),
+# written to kitchen_log_session only on ✓ commit. A process restart loses an
+# uncommitted half-typed buffer (acceptable) — committed values are persisted.
+_numpad_state: dict = {}
+
+_DIGIT_ACTIONS = frozenset({"bs", "dot"})
+
+
+def _is_numpad_key(action: str) -> bool:
+    return (
+        action in _DIGIT_ACTIONS
+        or (len(action) == 2 and action[0] == "d" and action[1] in DIGITS)
+    )
+
+
+def _action_to_key(action: str) -> str:
+    if action == "bs":
+        return "bs"
+    if action == "dot":
+        return "."
+    return action[1]  # "d5" -> "5"
+
+
+def _numpad_key(chat_id, user_id, session_id, item_code):
+    return (chat_id, user_id, str(session_id), item_code)
+
+
+async def _handle_numpad_key(query, session_id, item_code, action) -> None:
+    """Fast path: apply one numpad key using the IN-MEMORY buffer — no DB read or
+    write. Only edits the message when the displayed value actually changes."""
+    started = time.monotonic()
+    meta = ITEM_BY_CODE.get(item_code)
+    if meta is None:
+        return
+    unit = meta["unit"]
+    chat_id = query.message.chat_id if query.message else None
+    user_id = query.from_user.id if query.from_user else None
+    key = _numpad_key(chat_id, user_id, session_id, item_code)
+
+    st = _numpad_state.get(key)
+    if st is None:
+        # Memory lost (e.g. restart) — recover the buffer from the DB once, then
+        # stay in memory for subsequent taps.
+        session = await asyncio.to_thread(get_session, _supabase, session_id)
+        if session is None or session.get("status") == "submitted":
+            return
+        st = {"buffer": session.get("buffer") or "", "phase": session.get("phase") or PHASE_COOKED}
+        _numpad_state[key] = st
+
+    old = st["buffer"]
+    new = apply_key(old, _action_to_key(action), unit)
+    if new == old:
+        return  # no visible change (e.g. "." on pcs, backspace on empty) — skip edit
+    st["buffer"] = new
+    with contextlib.suppress(Exception):
+        await query.edit_message_text(
+            numpad_text(st["phase"], meta["label"], unit, new),
+            reply_markup=build_numpad_keyboard(session_id, item_code, unit),
+        )
+    logger.debug("kitchen numpad tap %s -> %r in %.1fms", action, new, (time.monotonic() - started) * 1000)
+
+
+def _clear_numpad_state(session_id) -> None:
+    """Drop any in-memory numpad buffers for a session (on commit / submit)."""
+    sid = str(session_id)
+    for k in [k for k in _numpad_state if k[2] == sid]:
+        _numpad_state.pop(k, None)
+
+
 async def handle_kitchen_callback(update, context) -> None:
     """Single CallbackQueryHandler for everything under the ``kdu:`` namespace."""
     query = update.callback_query
@@ -1149,7 +1221,10 @@ async def handle_kitchen_callback(update, context) -> None:
     parsed = parse_callback(query.data or "")
     if parsed is None:
         return
-    await query.answer()
+    # Answer immediately (no text) so Telegram clears the loading spinner before
+    # any DB/network work — taps feel instant.
+    with contextlib.suppress(Exception):
+        await query.answer()
 
     if _supabase is None:
         logger.warning("kitchen callback received but module not initialised")
@@ -1158,6 +1233,12 @@ async def handle_kitchen_callback(update, context) -> None:
     session_id = parsed["session_id"]
     item_code = parsed["item_code"]
     action = parsed["action"]
+
+    # FAST PATH: numpad digit / backspace / dot — handled from the in-memory
+    # buffer with NO DB round-trip.
+    if _is_numpad_key(action):
+        await _handle_numpad_key(query, session_id, item_code, action)
+        return
 
     session = await asyncio.to_thread(get_session, _supabase, session_id)
     if session is None:
@@ -1203,6 +1284,7 @@ async def handle_kitchen_callback(update, context) -> None:
             with contextlib.suppress(Exception):
                 await query.message.reply_text(f"⚠️ {note}")
             return
+        _clear_numpad_state(session_id)
         with contextlib.suppress(Exception):
             await query.edit_message_text(f"✅ Tersimpan — {form_title(phase)}\n{outlet_label} • {business_date}")
         if phase == PHASE_LEFT and evaluations:
@@ -1217,12 +1299,15 @@ async def handle_kitchen_callback(update, context) -> None:
     unit = meta["unit"]
 
     # --- open an item's numpad (legacy fallback; primary entry is bulk text) ---
+    # Seed the in-memory buffer (no DB write — digits stay memory-only until ✓).
     if action == "open":
         existing = entries.get(item_code)
         buffer = "" if existing is None else format_value(existing, unit)
-        await asyncio.to_thread(
-            _save_session, _supabase, session_id, editing_item=item_code, buffer=buffer
-        )
+        chat_id = query.message.chat_id if query.message else None
+        user_id = query.from_user.id if query.from_user else None
+        _numpad_state[_numpad_key(chat_id, user_id, session_id, item_code)] = {
+            "buffer": buffer, "phase": phase,
+        }
         with contextlib.suppress(Exception):
             await query.edit_message_text(
                 numpad_text(phase, meta["label"], unit, buffer),
@@ -1230,12 +1315,16 @@ async def handle_kitchen_callback(update, context) -> None:
             )
         return
 
-    # --- numpad keypress ---
-    buffer = session.get("buffer") or ""
+    # --- ✓ commit: read the in-memory buffer, persist the value to the DB ---
     if action == "ok":
+        chat_id = query.message.chat_id if query.message else None
+        user_id = query.from_user.id if query.from_user else None
+        st = _numpad_state.get(_numpad_key(chat_id, user_id, session_id, item_code))
+        buffer = st["buffer"] if st else (session.get("buffer") or "")
         value = commit_value(buffer, unit)
         if value is not None:
             entries[item_code] = value
+        _clear_numpad_state(session_id)
         await asyncio.to_thread(
             _save_session, _supabase, session_id,
             entries=entries, editing_item=None, buffer="",
@@ -1246,23 +1335,6 @@ async def handle_kitchen_callback(update, context) -> None:
                 reply_markup=build_item_keyboard(session_id, outlet_code, entries, phase),
             )
         return
-
-    if action == "bs":
-        key = "bs"
-    elif action == "dot":
-        key = "."
-    elif action.startswith("d") and len(action) == 2 and action[1] in DIGITS:
-        key = action[1]
-    else:
-        return
-
-    new_buffer = apply_key(buffer, key, unit)
-    await asyncio.to_thread(_save_session, _supabase, session_id, buffer=new_buffer)
-    with contextlib.suppress(Exception):
-        await query.edit_message_text(
-            numpad_text(phase, meta["label"], unit, new_buffer),
-            reply_markup=build_numpad_keyboard(session_id, item_code, unit),
-        )
 
 
 async def _post_one(application, chat_id, outlet_code, business_date, phase) -> bool:

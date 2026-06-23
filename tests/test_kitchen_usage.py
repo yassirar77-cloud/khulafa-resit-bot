@@ -1195,3 +1195,151 @@ def test_diagnostic_dump_shape():
     assert by_id[-1001]["code"] == "BISTRO7"
     assert by_id[-1001]["count"] == 2
     assert by_id[-1009]["code"] is None  # seen but unresolved
+
+
+# --- numpad lag fix: in-memory buffer, DB only on commit ---------------------
+
+def _cb_update(data, chat_id=-77, user_id=7):
+    import types
+    edits, answers, replies = [], [], []
+
+    async def _edit(text, **k):
+        edits.append((text, k))
+
+    async def _reply(t, **k):
+        replies.append(t)
+
+    async def _answer(*a, **k):
+        answers.append((a, k))
+
+    message = types.SimpleNamespace(chat_id=chat_id, reply_text=_reply)
+    query = types.SimpleNamespace(
+        data=data,
+        from_user=types.SimpleNamespace(id=user_id, full_name="Chef", username=None),
+        message=message,
+        edit_message_text=_edit,
+        answer=_answer,
+    )
+    update = types.SimpleNamespace(callback_query=query)
+    return update, edits, answers
+
+
+def _ctx():
+    import types
+    return types.SimpleNamespace(bot=types.SimpleNamespace())
+
+
+def _spy(ku_mod, monkeypatch, name):
+    calls = {"n": 0}
+    orig = getattr(ku_mod, name)
+
+    def wrapper(*a, **k):
+        calls["n"] += 1
+        return orig(*a, **k)
+
+    monkeypatch.setattr(ku_mod, name, wrapper)
+    return calls
+
+
+def test_numpad_open_seeds_memory_without_db_write(monkeypatch):
+    import asyncio
+
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store["kitchen_log_session"] = [{
+        "id": "s1", "chat_id": -77, "outlet_code": "SEK20", "business_date": "2026-06-24",
+        "phase": "cooked", "status": "open", "entries": {},
+    }]
+    monkeypatch.setattr(ku, "_supabase", fake)
+    ku._numpad_state.clear()
+    saves = _spy(ku, monkeypatch, "_save_session")
+
+    update, edits, _ = _cb_update("kdu:s1:ayam_goreng:open")
+    asyncio.run(ku.handle_kitchen_callback(update, _ctx()))
+
+    key = ku._numpad_key(-77, 7, "s1", "ayam_goreng")
+    assert ku._numpad_state.get(key) == {"buffer": "", "phase": "cooked"}
+    assert saves["n"] == 0  # open no longer writes the DB
+    assert len(edits) == 1  # numpad shown
+
+
+def test_numpad_digits_do_not_touch_db(monkeypatch):
+    import asyncio
+
+    from tests.fake_supabase import FakeSupabase
+
+    monkeypatch.setattr(ku, "_supabase", FakeSupabase())
+    ku._numpad_state.clear()
+    ku._numpad_state[ku._numpad_key(-77, 7, "s1", "ayam_goreng")] = {"buffer": "", "phase": "cooked"}
+    gets = _spy(ku, monkeypatch, "get_session")
+    saves = _spy(ku, monkeypatch, "_save_session")
+
+    for data in ("kdu:s1:ayam_goreng:d5", "kdu:s1:ayam_goreng:d0"):
+        update, edits, answers = _cb_update(data)
+        asyncio.run(ku.handle_kitchen_callback(update, _ctx()))
+        assert answers, "callback answered immediately"
+
+    assert ku._numpad_state[ku._numpad_key(-77, 7, "s1", "ayam_goreng")]["buffer"] == "50"
+    assert gets["n"] == 0    # no DB read on digit taps
+    assert saves["n"] == 0   # no DB write on digit taps
+
+
+def test_numpad_noop_key_skips_edit(monkeypatch):
+    import asyncio
+
+    from tests.fake_supabase import FakeSupabase
+
+    monkeypatch.setattr(ku, "_supabase", FakeSupabase())
+    ku._numpad_state.clear()
+    ku._numpad_state[ku._numpad_key(-77, 7, "s1", "ayam_goreng")] = {"buffer": "", "phase": "cooked"}
+
+    update, edits, _ = _cb_update("kdu:s1:ayam_goreng:bs")  # backspace on empty
+    asyncio.run(ku.handle_kitchen_callback(update, _ctx()))
+    assert edits == []  # no visible change -> no message edit
+
+
+def test_numpad_ok_commits_to_db_and_clears_memory(monkeypatch):
+    import asyncio
+
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store["kitchen_log_session"] = [{
+        "id": "s1", "chat_id": -77, "outlet_code": "SEK20", "business_date": "2026-06-24",
+        "phase": "cooked", "status": "open", "entries": {},
+    }]
+    monkeypatch.setattr(ku, "_supabase", fake)
+    ku._numpad_state.clear()
+    ku._numpad_state[ku._numpad_key(-77, 7, "s1", "ayam_goreng")] = {"buffer": "50", "phase": "cooked"}
+    saves = _spy(ku, monkeypatch, "_save_session")
+
+    update, edits, _ = _cb_update("kdu:s1:ayam_goreng:ok")
+    asyncio.run(ku.handle_kitchen_callback(update, _ctx()))
+
+    assert saves["n"] == 1  # commit writes once
+    assert fake.rows("kitchen_log_session")[0]["entries"]["ayam_goreng"] == 50
+    assert ku._numpad_state == {}  # memory cleared on commit
+
+
+def test_numpad_memory_miss_recovers_from_db_once(monkeypatch):
+    import asyncio
+
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store["kitchen_log_session"] = [{
+        "id": "s1", "chat_id": -77, "outlet_code": "SEK20", "business_date": "2026-06-24",
+        "phase": "cooked", "status": "open", "entries": {}, "buffer": "1",
+    }]
+    monkeypatch.setattr(ku, "_supabase", fake)
+    ku._numpad_state.clear()  # memory lost (e.g. restart)
+    saves = _spy(ku, monkeypatch, "_save_session")
+
+    update, edits, _ = _cb_update("kdu:s1:ayam_goreng:d2")
+    asyncio.run(ku.handle_kitchen_callback(update, _ctx()))
+
+    # Recovered buffer "1" + "2" -> "12", in memory, still no DB write.
+    assert ku._numpad_state[ku._numpad_key(-77, 7, "s1", "ayam_goreng")]["buffer"] == "12"
+    assert saves["n"] == 0
+    assert len(edits) == 1

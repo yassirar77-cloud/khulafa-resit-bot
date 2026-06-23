@@ -79,6 +79,15 @@ open session** for the current business day AND the text actually matched an ite
 commands — passes through untouched. The legacy inline numpad
 (`kdu:…:open`/digit callbacks) remains as a dormant fallback.
 
+**Numpad responsiveness:** when the numpad fallback is used, digit/backspace/dot
+taps are handled from an **in-memory buffer** (`_numpad_state`, keyed by
+chat+user+session+item) — no DB read or write per keystroke. The callback is
+answered immediately (spinner clears), the message is edited only when the
+displayed value actually changes, and the value is written to
+`kitchen_log_session` only on **✓ commit** (and entries persist on Hantar). An
+uncommitted half-typed buffer is lost on a restart (acceptable); committed
+values are not.
+
 ## Enabling the scheduled forms (`KITCHEN_LOG_ENABLED`)
 
 The 18:00 COOKED / 02:00 LEFT posters are **OFF by default** and only run when
