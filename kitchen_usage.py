@@ -542,6 +542,46 @@ def _rows(result):
     return getattr(result, "data", None) or []
 
 
+def _upsert_usage_row(client, row: dict) -> None:
+    """Write one kitchen_daily_usage row, keyed on
+    (outlet_code, business_date, item_code).
+
+    Prefers a native ON CONFLICT upsert (atomic). If that fails — most commonly
+    because a hand-created table lacks the UNIQUE(outlet_code, business_date,
+    item_code) constraint that ON CONFLICT requires (Postgres 42P10) — it falls
+    back to a manual select-then-update/insert so promotion still works. Only a
+    genuinely missing table (PGRST205) makes both paths fail, which propagates so
+    the caller can surface it."""
+    try:
+        client.table(USAGE_TABLE).upsert(
+            row, on_conflict="outlet_code,business_date,item_code"
+        ).execute()
+        return
+    except Exception as exc:
+        if _is_missing_table_error(exc):
+            raise
+        logger.warning(
+            "kitchen: native upsert failed for %s/%s/%s (%s) — falling back to "
+            "manual select+update/insert (check the UNIQUE constraint on "
+            "kitchen_daily_usage)",
+            row.get("outlet_code"), row.get("business_date"), row.get("item_code"), exc,
+        )
+
+    existing = _rows(
+        client.table(USAGE_TABLE)
+        .select("id")
+        .eq("outlet_code", row["outlet_code"])
+        .eq("business_date", row["business_date"])
+        .eq("item_code", row["item_code"])
+        .limit(1)
+        .execute()
+    )
+    if existing:
+        client.table(USAGE_TABLE).update(row).eq("id", existing[0]["id"]).execute()
+    else:
+        client.table(USAGE_TABLE).insert(row).execute()
+
+
 def _is_missing_table_error(exc: Exception) -> bool:
     """True when an error is PostgREST's "table not in the schema cache"
     (PGRST205) for a kitchen table — i.e. migration 0032 isn't applied or the
@@ -719,14 +759,12 @@ def finalize_submission(client, session: dict, submitter: str):
             row["left_by"] = submitter
             row["left_at"] = now_iso
         try:
-            client.table(USAGE_TABLE).upsert(
-                row, on_conflict="outlet_code,business_date,item_code"
-            ).execute()
+            _upsert_usage_row(client, row)
             written += 1
         except Exception as exc:
             last_error = exc
             logger.exception(
-                "kitchen: usage upsert FAILED for %s/%s/%s (%s): %s",
+                "kitchen: usage write FAILED for %s/%s/%s (%s): %s",
                 outlet_code, business_date, code, phase, exc,
             )
 

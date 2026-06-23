@@ -209,13 +209,15 @@ def test_finalize_cooked_promotes_rows(monkeypatch, caplog):
     assert "promotion done — 11/11 rows written" in msgs
 
 
-def test_finalize_raises_and_leaves_session_open_when_all_writes_fail(caplog):
+def test_finalize_falls_back_to_manual_upsert_when_on_conflict_unsupported(caplog):
+    """The production bug: a hand-built table missing the UNIQUE constraint makes
+    the native ON CONFLICT upsert fail. finalize must fall back to manual
+    insert/update so rows still land."""
     import logging
-    import types
 
     from tests.fake_supabase import FakeSupabase
 
-    class _UpsertFails(FakeSupabase):
+    class _NoConstraint(FakeSupabase):
         def table(self, name):
             q = super().table(name)
             if name == "kitchen_daily_usage":
@@ -225,7 +227,39 @@ def test_finalize_raises_and_leaves_session_open_when_all_writes_fail(caplog):
                 q.upsert = _boom  # type: ignore[assignment]
             return q
 
-    fake = _UpsertFails()
+    fake = _NoConstraint()
+    fake._store["kitchen_log_session"] = [_bistro_cooked_session()]
+    session = dict(fake._store["kitchen_log_session"][0])
+
+    with caplog.at_level(logging.WARNING, logger="kitchen_usage"):
+        ku.finalize_submission(fake, session, submitter="Chef")
+
+    usage = fake.rows("kitchen_daily_usage")
+    assert len(usage) == 11  # written via the manual fallback
+    assert all(r.get("cooked_qty") is not None and r.get("left_qty") is None for r in usage)
+    assert fake.rows("kitchen_log_session")[0]["status"] == "submitted"
+    msgs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "falling back to manual" in msgs
+
+
+def test_finalize_raises_and_leaves_session_open_when_all_writes_fail(caplog):
+    import logging
+
+    from tests.fake_supabase import FakeSupabase
+
+    class _AllWritesFail(FakeSupabase):
+        def table(self, name):
+            q = super().table(name)
+            if name == "kitchen_daily_usage":
+                def _boom(*a, **k):
+                    raise Exception("could not find the table "
+                                    "'public.kitchen_daily_usage' in the schema cache")
+                q.upsert = _boom      # type: ignore[assignment]
+                q.insert = _boom      # type: ignore[assignment]
+                q.select = _boom      # type: ignore[assignment]
+            return q
+
+    fake = _AllWritesFail()
     fake._store["kitchen_log_session"] = [_bistro_cooked_session()]
     session = dict(fake._store["kitchen_log_session"][0])
 
