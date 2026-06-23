@@ -278,6 +278,67 @@ def test_finalize_raises_and_leaves_session_open_when_all_writes_fail(caplog):
     assert "0/11 rows written" in msgs
 
 
+def test_hantar_callback_end_to_end_promotes_rows(monkeypatch):
+    """End-to-end through the REAL handler: a Hantar tap on a complete BISTRO7
+    COOKED form must write 11 kitchen_daily_usage rows even when the table lacks
+    the ON CONFLICT unique constraint (the production scenario)."""
+    import asyncio
+    import types
+
+    from tests.fake_supabase import FakeSupabase
+
+    class _NoConstraint(FakeSupabase):
+        def table(self, name):
+            q = super().table(name)
+            if name == "kitchen_daily_usage":
+                def _boom(*a, **k):
+                    raise Exception("no unique or exclusion constraint matching "
+                                    "the ON CONFLICT specification")
+                q.upsert = _boom  # type: ignore[assignment]
+            return q
+
+    fake = _NoConstraint()
+    sess = _bistro_cooked_session()
+    sess["id"] = "s1"  # string id so the fake's .eq('id', '<str>') matches
+    fake._store["kitchen_log_session"] = [sess]
+    monkeypatch.setattr(ku, "_supabase", fake)
+
+    edits, replies = [], []
+
+    class _Query:
+        data = "kdu:s1:_form:send"
+        from_user = types.SimpleNamespace(full_name="Chef", username=None, id=999)
+        message = types.SimpleNamespace(
+            reply_text=lambda *a, **k: _async_append(replies, a[0] if a else k.get("text"))
+        )
+        async def answer(self, *a, **k):
+            return None
+        async def edit_message_text(self, text, **k):
+            edits.append(text)
+
+    class _Bot:
+        async def send_message(self, **k):
+            return types.SimpleNamespace(message_id=1)
+
+    update = types.SimpleNamespace(callback_query=_Query())
+    context = types.SimpleNamespace(bot=_Bot())
+
+    asyncio.run(ku.handle_kitchen_callback(update, context))
+
+    usage = fake.rows("kitchen_daily_usage")
+    assert len(usage) == 11
+    assert all(r.get("cooked_qty") is not None and r.get("left_qty") is None for r in usage)
+    assert {r["item_code"] for r in usage} == set(ku.required_codes("BISTRO7"))
+    assert fake.rows("kitchen_log_session")[0]["status"] == "submitted"
+    assert any("Tersimpan" in e for e in edits)  # success shown, not an error reply
+
+
+def _async_append(store, value):
+    async def _coro():
+        store.append(value)
+    return _coro()
+
+
 # --- business_date span (18:00 -> 02:00 next day = same business day) --------
 
 def test_business_date_cooked_evening():
