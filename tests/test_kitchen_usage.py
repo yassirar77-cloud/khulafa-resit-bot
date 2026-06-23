@@ -165,6 +165,85 @@ def test_post_one_form_bypasses_gate_and_posts(monkeypatch):
     assert len(sent) == 1  # no second send
 
 
+# --- finalize_submission: promote entries to kitchen_daily_usage -------------
+
+def _bistro_cooked_session():
+    return {
+        "id": 1, "chat_id": -1, "outlet_code": "BISTRO7",
+        "business_date": "2026-06-22", "phase": "cooked", "status": "open",
+        "entries": {
+            "ayam_goreng": 50, "ayam_bawang": 40, "ayam_rempah": 50,
+            "ayam_kicap": 5, "ayam_madu": 18, "ayam_tandoori": 20,
+            "ikan_goreng": 6, "ikan_kari": 5, "telur_ikan": 4,
+            "kambing": 5, "daging": 5,
+        },
+    }
+
+
+def test_finalize_cooked_promotes_rows(monkeypatch, caplog):
+    import logging
+
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store["kitchen_log_session"] = [_bistro_cooked_session()]
+    session = dict(fake._store["kitchen_log_session"][0])
+
+    with caplog.at_level(logging.INFO, logger="kitchen_usage"):
+        ku.finalize_submission(fake, session, submitter="Chef")
+
+    usage = fake.rows("kitchen_daily_usage")
+    # BISTRO7 has all 11 items (incl. ayam_rempah).
+    assert len(usage) == 11
+    rempah = next(r for r in usage if r["item_code"] == "ayam_rempah")
+    assert rempah["cooked_qty"] == 50
+    assert rempah["cooked_by"] == "Chef"
+    assert rempah["cooked_at"] is not None
+    assert rempah.get("left_qty") is None       # COOKED leaves left_qty NULL
+    assert rempah["business_date"] == "2026-06-22"
+    # session marked submitted
+    assert fake.rows("kitchen_log_session")[0]["status"] == "submitted"
+    # promotion logging present
+    msgs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "promoting 11 entries to kitchen_daily_usage for BISTRO7" in msgs
+    assert "promotion done — 11/11 rows written" in msgs
+
+
+def test_finalize_raises_and_leaves_session_open_when_all_writes_fail(caplog):
+    import logging
+    import types
+
+    from tests.fake_supabase import FakeSupabase
+
+    class _UpsertFails(FakeSupabase):
+        def table(self, name):
+            q = super().table(name)
+            if name == "kitchen_daily_usage":
+                def _boom(*a, **k):
+                    raise Exception("no unique or exclusion constraint matching "
+                                    "the ON CONFLICT specification")
+                q.upsert = _boom  # type: ignore[assignment]
+            return q
+
+    fake = _UpsertFails()
+    fake._store["kitchen_log_session"] = [_bistro_cooked_session()]
+    session = dict(fake._store["kitchen_log_session"][0])
+
+    with caplog.at_level(logging.INFO, logger="kitchen_usage"):
+        try:
+            ku.finalize_submission(fake, session, submitter="Chef")
+            raised = False
+        except ku.KitchenPromotionError:
+            raised = True
+
+    assert raised is True
+    # No usage rows, and the session stays OPEN (not submitted) for retry.
+    assert fake.rows("kitchen_daily_usage") == []
+    assert fake.rows("kitchen_log_session")[0]["status"] == "open"
+    msgs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "0/11 rows written" in msgs
+
+
 # --- business_date span (18:00 -> 02:00 next day = same business day) --------
 
 def test_business_date_cooked_evening():

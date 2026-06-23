@@ -40,6 +40,12 @@ class _Query:
         self._payload = payload
         return self
 
+    def upsert(self, payload, on_conflict=None, **_kw):
+        self._op = "upsert"
+        self._payload = payload
+        self._on_conflict = [c.strip() for c in on_conflict.split(",")] if on_conflict else []
+        return self
+
     def update(self, payload):
         self._op = "update"
         self._payload = payload
@@ -136,6 +142,26 @@ class _Query:
                 rows.append(row)
                 inserted.append(dict(row))
             return _Result(inserted)
+        if self._op == "upsert":
+            payloads = self._payload if isinstance(self._payload, list) else [self._payload]
+            keys = getattr(self, "_on_conflict", []) or []
+            result = []
+            for p in payloads:
+                existing = None
+                if keys:
+                    for r in rows:
+                        if all(r.get(k) == p.get(k) for k in keys):
+                            existing = r
+                            break
+                if existing is not None:
+                    existing.update(p)
+                    result.append(dict(existing))
+                else:
+                    row = dict(p)
+                    row.setdefault("id", next(self._store["_ids"]))
+                    rows.append(row)
+                    result.append(dict(row))
+            return _Result(result)
         if self._op == "update":
             changed = []
             for r in rows:

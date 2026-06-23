@@ -533,6 +533,11 @@ def init_kitchen_usage(supabase_client) -> None:
     _supabase = supabase_client
 
 
+class KitchenPromotionError(Exception):
+    """Raised when a submitted form's entries could not be written to
+    kitchen_daily_usage at all (so the session is left OPEN for retry)."""
+
+
 def _rows(result):
     return getattr(result, "data", None) or []
 
@@ -671,20 +676,33 @@ def _fetch_purchased_kg(client, outlet_code, business_date, item_code="telur_ika
 
 
 def finalize_submission(client, session: dict, submitter: str):
-    """Upsert a completed phase into kitchen_daily_usage. On the LEFT phase also
-    compute POS qty + the mismatch flag. Returns the list of per-item evaluation
-    dicts (only meaningful for the LEFT phase, else [])."""
+    """Promote a completed phase's entries into kitchen_daily_usage (one row per
+    item, upserted on (outlet_code, business_date, item_code)). COOKED writes
+    cooked_qty/cooked_by/cooked_at and leaves left_qty NULL; LEFT writes
+    left_qty/left_by/left_at and then computes pos_qty + the mismatch flag.
+
+    Raises KitchenPromotionError when NOT A SINGLE row could be written (e.g. the
+    table is missing its unique constraint, a schema mismatch, or PGRST205) so
+    the caller can tell the user and the session is left OPEN for retry instead
+    of being marked submitted with no usage rows. Returns the per-item
+    evaluation dicts (LEFT phase only, else [])."""
     outlet_code = session["outlet_code"]
     business_date = str(session["business_date"])
     phase = session["phase"]
     entries = _load_entries(session)
     now_iso = datetime.now(MY_TZ).isoformat()
 
-    for it in items_for_outlet(outlet_code):
+    pending = [it for it in items_for_outlet(outlet_code) if entries.get(it["code"]) is not None]
+    logger.info(
+        "kitchen: promoting %d entries to kitchen_daily_usage for %s %s %s",
+        len(pending), outlet_code, business_date, phase,
+    )
+
+    written = 0
+    last_error = None
+    for it in pending:
         code, label, unit = it["code"], it["label"], it["unit"]
         value = entries.get(code)
-        if value is None:
-            continue
         row = {
             "outlet_code": outlet_code,
             "business_date": business_date,
@@ -704,8 +722,27 @@ def finalize_submission(client, session: dict, submitter: str):
             client.table(USAGE_TABLE).upsert(
                 row, on_conflict="outlet_code,business_date,item_code"
             ).execute()
-        except Exception:
-            logger.exception("kitchen: upsert failed for %s/%s/%s", outlet_code, business_date, code)
+            written += 1
+        except Exception as exc:
+            last_error = exc
+            logger.exception(
+                "kitchen: usage upsert FAILED for %s/%s/%s (%s): %s",
+                outlet_code, business_date, code, phase, exc,
+            )
+
+    logger.info(
+        "kitchen: promotion done — %d/%d rows written to kitchen_daily_usage for %s %s %s",
+        written, len(pending), outlet_code, business_date, phase,
+    )
+
+    if pending and written == 0:
+        # Nothing landed — leave the session OPEN so the data isn't lost behind a
+        # "submitted" no-op and the user can simply tap Hantar again after the
+        # table is fixed.
+        raise KitchenPromotionError(
+            "0/%d kitchen_daily_usage rows written for %s %s %s: %s"
+            % (len(pending), outlet_code, business_date, phase, last_error)
+        )
 
     _save_session(client, session["id"], status="submitted", entries=entries)
 
@@ -872,9 +909,22 @@ async def handle_kitchen_callback(update, context) -> None:
             await query.answer("Isi semua item dulu sebelum Hantar.", show_alert=True)
             return
         submitter = _submitter_name(query.from_user)
-        evaluations = await asyncio.to_thread(
-            finalize_submission, _supabase, session, submitter
-        )
+        try:
+            evaluations = await asyncio.to_thread(
+                finalize_submission, _supabase, session, submitter
+            )
+        except Exception as exc:
+            # Promotion to kitchen_daily_usage failed (table/constraint/schema
+            # issue). Leave the form OPEN so they can retry once it's fixed.
+            logger.exception("kitchen: finalize_submission failed for session %s", session_id)
+            if _is_missing_table_error(exc):
+                note = ("Jadual kitchen belum siap dalam DB (PGRST205). "
+                        "Cuba tekan Hantar sekali lagi nanti.")
+            else:
+                note = "Gagal simpan ke pangkalan data. Cuba tekan Hantar sekali lagi."
+            with contextlib.suppress(Exception):
+                await query.message.reply_text(f"⚠️ {note}")
+            return
         with contextlib.suppress(Exception):
             await query.edit_message_text(f"✅ Tersimpan — {form_title(phase)}\n{outlet_label} • {business_date}")
         if phase == PHASE_LEFT and evaluations:
