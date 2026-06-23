@@ -1,9 +1,16 @@
 # Daily Kitchen Usage Log
 
 Track daily protein usage per outlet and reconcile it against POS sales, all by
-tapping (no word-typing). The assistant chef logs what was **cooked** at 18:00;
-the cashier logs what is **left** at 02:00 the next morning. The bot computes
-`Used = Cooked − Left`, compares it with POS dishes sold, and flags mismatches.
+tapping (no word-typing). Three entries per business day:
+
+- **18:00** — COOKED (evening batch).
+- **00:00** — COOKED night-cook (**optional, additive**): the chef keys only the
+  EXTRA amount cooked at night, which is ADDED to the 18:00 cooked_qty (50 then
+  +20 → 70). Skip the form entirely if there's no night cook.
+- **02:00** — LEFT (balance).
+
+`Total Cooked = evening + night`, and `Used = (evening + night) − Left`. The bot
+compares Used with POS dishes sold and flags mismatches.
 
 ## Business day
 
@@ -65,7 +72,12 @@ Both jobs run on the same in-process APScheduler as the 23:00 digest
 (Asia/Kuala_Lumpur):
 
 - **18:00** — post the COOKED form (`post_cooked_forms`).
+- **00:00** — post the optional night-cook (additive) form (`post_night_forms`).
 - **02:00** — post the LEFT form (`post_left_forms`).
+
+00:00 and 02:00 are both before the noon cutoff, so they fold back onto the
+prior 18:00 business day. The night form (`phase='cooked_night'`) needs only one
+item filled (it's additive and optional); 18:00/02:00 still require all items.
 
 They iterate the kitchen groups from `config/kitchen_groups.py`, which
 **auto-resolves the chat IDs from the `receipts` table** — the same chats the

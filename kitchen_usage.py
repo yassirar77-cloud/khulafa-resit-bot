@@ -49,6 +49,14 @@ CALLBACK_PREFIX = "kdu"
 # Pseudo item_code used by the final "Hantar" (submit) button.
 FORM_TOKEN = "_form"
 
+# Form phases. Three entries per business day, all keyed to the 18:00 date:
+#   18:00 COOKED (evening), 00:00 COOKED_NIGHT (optional, additive), 02:00 LEFT.
+PHASE_COOKED = "cooked"
+PHASE_COOKED_NIGHT = "cooked_night"
+PHASE_LEFT = "left"
+# Phases that write/extend cooked_qty (vs LEFT which writes left_qty).
+COOKED_PHASES = (PHASE_COOKED, PHASE_COOKED_NIGHT)
+
 # Master kill-switch for the scheduled forms. The 18:00 COOKED / 02:00 LEFT
 # posters NO-OP unless KITCHEN_LOG_ENABLED is truthy. Default OFF so the bot can
 # ship (and /kitchen_groups_debug can verify the chat->outlet mapping) WITHOUT
@@ -201,6 +209,18 @@ def is_form_complete(entries: dict, outlet_code) -> bool:
         if entries.get(code) is None:
             return False
     return True
+
+
+def can_submit(entries: dict, outlet_code, phase: str = PHASE_COOKED) -> bool:
+    """Whether Hantar is allowed for a phase.
+
+    The 6PM COOKED and 2AM LEFT forms require EVERY item filled. The optional
+    12AM night-cook form (PHASE_COOKED_NIGHT) only adds the extra amounts the
+    chef cooked at night, so it just needs AT LEAST ONE item filled (an outlet
+    that doesn't night-cook simply skips the form)."""
+    if phase == PHASE_COOKED_NIGHT:
+        return any(entries.get(c) is not None for c in required_codes(outlet_code))
+    return is_form_complete(entries, outlet_code)
 
 
 # --- POS matching + Used arithmetic (pure) ----------------------------------
@@ -406,13 +426,16 @@ def evaluate_usage(item_code: str, cooked, left, itemwise_rows: list,
 
 # --- form / numpad copy ------------------------------------------------------
 
-PHASE_COOKED = "cooked"
-PHASE_LEFT = "left"
-
 _PHASE_COPY = {
     PHASE_COOKED: {
         "title": "🍳 Rekod Masak — Petang",
         "prompt": "berapa dimasak",
+    },
+    PHASE_COOKED_NIGHT: {
+        "title": "🌙 Rekod Masak Malam — Tambahan",
+        # The night form captures only the EXTRA cooked at night, added on top of
+        # the 6PM amount.
+        "prompt": "berapa tambah masak malam",
     },
     PHASE_LEFT: {
         "title": "🌙 Rekod Baki — Tutup Kedai",
@@ -436,8 +459,15 @@ def form_text(phase: str, business_date, outlet_label, entries: dict, outlet_cod
     lines = [
         form_title(phase),
         f"{outlet_label} • {business_date}",
-        f"Isi setiap item ({done}/{total} siap). Tap untuk key-in.",
     ]
+    if phase == PHASE_COOKED_NIGHT:
+        # Optional, additive: key only the items cooked MORE of at night.
+        lines.append(
+            f"Key TAMBAHAN masak malam sahaja ({done} item). "
+            "Tap item yang dimasak tambah; skip jika tiada."
+        )
+    else:
+        lines.append(f"Isi setiap item ({done}/{total} siap). Tap untuk key-in.")
     return "\n".join(lines)
 
 
@@ -457,9 +487,10 @@ def _cb(session_id, item_code, action) -> str:
     return f"{CALLBACK_PREFIX}:{session_id}:{item_code}:{action}"
 
 
-def build_item_keyboard(session_id, outlet_code, entries: dict):
+def build_item_keyboard(session_id, outlet_code, entries: dict, phase: str = PHASE_COOKED):
     """One button per item (✓ prefix + value when filled, "—" when empty) plus
-    a final Hantar button. Returns an InlineKeyboardMarkup."""
+    a final Hantar button. Returns an InlineKeyboardMarkup. ``phase`` controls
+    the Hantar gating label (the night form only needs one item)."""
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
     rows = []
@@ -472,8 +503,12 @@ def build_item_keyboard(session_id, outlet_code, entries: dict):
             text = f"{label}: —"
         rows.append([InlineKeyboardButton(text, callback_data=_cb(session_id, code, "open"))])
 
-    complete = is_form_complete(entries, outlet_code)
-    hantar_label = "📤 Hantar" if complete else "📤 Hantar (isi semua dulu)"
+    if can_submit(entries, outlet_code, phase):
+        hantar_label = "📤 Hantar"
+    elif phase == PHASE_COOKED_NIGHT:
+        hantar_label = "📤 Hantar (key sekurang-kurangnya 1 item)"
+    else:
+        hantar_label = "📤 Hantar (isi semua dulu)"
     rows.append([InlineKeyboardButton(hantar_label, callback_data=_cb(session_id, FORM_TOKEN, "send"))])
     return InlineKeyboardMarkup(rows)
 
@@ -738,6 +773,24 @@ def finalize_submission(client, session: dict, submitter: str):
         len(pending), outlet_code, business_date, phase,
     )
 
+    # The night phase ADDS to the existing cooked_qty, so pre-load the current
+    # cooked_qty per item (base 0 when no 6PM row exists yet). The double-add
+    # guard is the session itself: a cooked_night session is marked submitted at
+    # the end, and the handler/scheduler never re-run a submitted session.
+    existing_cooked = {}
+    if phase == PHASE_COOKED_NIGHT:
+        try:
+            for r in _rows(
+                client.table(USAGE_TABLE)
+                .select("item_code, cooked_qty")
+                .eq("outlet_code", outlet_code)
+                .eq("business_date", business_date)
+                .execute()
+            ):
+                existing_cooked[r.get("item_code")] = r.get("cooked_qty")
+        except Exception:
+            logger.warning("kitchen: could not read existing cooked_qty for night add", exc_info=True)
+
     written = 0
     last_error = None
     for it in pending:
@@ -752,6 +805,12 @@ def finalize_submission(client, session: dict, submitter: str):
         }
         if phase == PHASE_COOKED:
             row["cooked_qty"] = value
+            row["cooked_by"] = submitter
+            row["cooked_at"] = now_iso
+        elif phase == PHASE_COOKED_NIGHT:
+            # Additive: cooked_qty = (existing 6PM cooked, or 0) + night value.
+            base = existing_cooked.get(code) or 0
+            row["cooked_qty"] = base + value
             row["cooked_by"] = submitter
             row["cooked_at"] = now_iso
         else:
@@ -943,8 +1002,11 @@ async def handle_kitchen_callback(update, context) -> None:
 
     # --- Hantar (submit) ---
     if item_code == FORM_TOKEN and action == "send":
-        if not is_form_complete(entries, outlet_code):
-            await query.answer("Isi semua item dulu sebelum Hantar.", show_alert=True)
+        if not can_submit(entries, outlet_code, phase):
+            if phase == PHASE_COOKED_NIGHT:
+                await query.answer("Key sekurang-kurangnya 1 item tambahan dulu.", show_alert=True)
+            else:
+                await query.answer("Isi semua item dulu sebelum Hantar.", show_alert=True)
             return
         submitter = _submitter_name(query.from_user)
         try:
@@ -1003,7 +1065,7 @@ async def handle_kitchen_callback(update, context) -> None:
         with contextlib.suppress(Exception):
             await query.edit_message_text(
                 form_text(phase, business_date, outlet_label, entries, outlet_code),
-                reply_markup=build_item_keyboard(session_id, outlet_code, entries),
+                reply_markup=build_item_keyboard(session_id, outlet_code, entries, phase),
             )
         return
 
@@ -1044,7 +1106,7 @@ async def _post_one(application, chat_id, outlet_code, business_date, phase) -> 
     msg = await application.bot.send_message(
         chat_id=chat_id,
         text=form_text(phase, business_date, outlet_label, entries, outlet_code),
-        reply_markup=build_item_keyboard(session["id"], outlet_code, entries),
+        reply_markup=build_item_keyboard(session["id"], outlet_code, entries, phase),
     )
     await asyncio.to_thread(_save_session, _supabase, session["id"], message_id=msg.message_id)
     return True
@@ -1110,6 +1172,11 @@ async def _post_forms(application, phase: str) -> None:
 async def post_cooked_forms(application) -> None:
     """APScheduler job: 18:00 COOKED form to every kitchen group."""
     await _post_forms(application, PHASE_COOKED)
+
+
+async def post_night_forms(application) -> None:
+    """APScheduler job: 00:00 optional night-cook (additive) form to every group."""
+    await _post_forms(application, PHASE_COOKED_NIGHT)
 
 
 async def post_left_forms(application) -> None:

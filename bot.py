@@ -2465,9 +2465,11 @@ async def kitchen_post_now_command(update: Update, context: ContextTypes.DEFAULT
     KITCHEN_LOG_ENABLED safety gate (explicit single post).
 
     Usage:
-      /kitchen_post_now              -> COOKED form to THIS group
+      /kitchen_post_now              -> COOKED (6PM) form to THIS group
+      /kitchen_post_now night        -> night-cook (12AM, additive) form here
       /kitchen_post_now left         -> LEFT form to this group
       /kitchen_post_now SEK20        -> COOKED form to SEK20's group
+      /kitchen_post_now SEK20 night  -> night-cook form to SEK20's group
       /kitchen_post_now SEK20 left   -> LEFT form to SEK20's group
     """
     message = update.effective_message
@@ -2477,9 +2479,15 @@ async def kitchen_post_now_command(update: Update, context: ContextTypes.DEFAULT
 
     args = [a.strip() for a in (context.args or []) if a.strip()]
     _LEFT_WORDS = {"left", "baki", "tutup"}
+    _NIGHT_WORDS = {"night", "malam", "tambahan"}
     _COOKED_WORDS = {"cooked", "masak", "petang"}
-    phase = kitchen_usage.PHASE_LEFT if any(a.lower() in _LEFT_WORDS for a in args) else kitchen_usage.PHASE_COOKED
-    outlet_tokens = [a for a in args if a.lower() not in _LEFT_WORDS | _COOKED_WORDS]
+    if any(a.lower() in _LEFT_WORDS for a in args):
+        phase = kitchen_usage.PHASE_LEFT
+    elif any(a.lower() in _NIGHT_WORDS for a in args):
+        phase = kitchen_usage.PHASE_COOKED_NIGHT
+    else:
+        phase = kitchen_usage.PHASE_COOKED
+    outlet_tokens = [a for a in args if a.lower() not in _LEFT_WORDS | _NIGHT_WORDS | _COOKED_WORDS]
     target_outlet = outlet_tokens[0].upper() if outlet_tokens else None
 
     try:
@@ -4588,8 +4596,10 @@ async def run_bot() -> None:
         replace_existing=True,
     )
     # Daily Kitchen Usage Log — same in-process scheduler as the 23:00 digest.
-    # 18:00 COOKED form, 02:00 (next day) LEFT form, to each configured kitchen
-    # group. Both no-op cleanly until config/kitchen_groups.py has the chat IDs.
+    # 18:00 COOKED form, 00:00 optional night-cook (additive) form, 02:00 LEFT
+    # form, to each configured kitchen group. All three belong to the same
+    # business_date (the 18:00 date — 00:00 and 02:00 fold back). They no-op
+    # cleanly unless KITCHEN_LOG_ENABLED is set and groups resolve.
     scheduler.add_job(
         kitchen_usage.post_cooked_forms,
         trigger="cron",
@@ -4597,6 +4607,15 @@ async def run_bot() -> None:
         minute=0,
         args=[app],
         id="kitchen_cooked_form",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        kitchen_usage.post_night_forms,
+        trigger="cron",
+        hour=0,
+        minute=0,
+        args=[app],
+        id="kitchen_night_form",
         replace_existing=True,
     )
     scheduler.add_job(
