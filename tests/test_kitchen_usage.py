@@ -151,6 +151,8 @@ def test_post_one_form_bypasses_gate_and_posts(monkeypatch):
     posted = asyncio.run(ku.post_one_form(app, -1, "VISTA", ku.PHASE_COOKED))
     assert posted is True
     assert len(sent) == 1 and sent[0]["chat_id"] == -1
+    # Original tap-button layout: the form is posted WITH the item keyboard.
+    assert sent[0].get("reply_markup") is not None
     # A session row was created and stamped with the message_id.
     sessions = fake.rows("kitchen_log_session")
     assert len(sessions) == 1
@@ -548,123 +550,33 @@ def test_bulk_parse_rempah_bistro_only():
     assert "ayam rempah 50" in out["unmatched"]
 
 
-def _bulk_update(chat_id, text, reply_to_id=None):
-    import types
-    replies = []
+# --- tap-button form (restored original) ------------------------------------
 
-    async def _reply(t, **k):
-        replies.append((t, k))
-
-    reply_to = types.SimpleNamespace(message_id=reply_to_id) if reply_to_id else None
-    msg = types.SimpleNamespace(
-        chat_id=chat_id, text=text, reply_to_message=reply_to, reply_text=_reply,
-    )
-    return types.SimpleNamespace(effective_message=msg), replies
+def test_form_text_says_tap_to_keyin_not_typing():
+    t = ku.form_text("cooked", "2026-06-24", "SEK-20", {}, "SEK20")
+    assert "Tap untuk key-in" in t
+    assert "Balas SATU mesej" not in t   # bulk-typing instruction removed
+    assert "தமிழ்" in t                   # Tamil line present
 
 
-def _bulk_ctx():
-    import types
-    return types.SimpleNamespace(bot=types.SimpleNamespace())
+def test_build_item_keyboard_has_one_button_per_item_plus_hantar():
+    kb = ku.build_item_keyboard("s1", "SEK20", {"ayam_goreng": 50}, "cooked")
+    rows = kb.inline_keyboard
+    # 10 SEK20 items + 1 Hantar row
+    assert len(rows) == len(ku.required_codes("SEK20")) + 1
+    texts = [r[0].text for r in rows]
+    assert "✓ Ayam Goreng: 50" in texts        # filled shows ✓ + value
+    assert "Ayam Bawang: —" in texts            # empty shows —
+    assert any("Hantar" in t for t in texts)    # Hantar button present
+    # item buttons open the numpad
+    assert rows[0][0].callback_data.endswith(":open")
 
 
-def _run_bulk(ku_mod, update, ctx):
-    import asyncio
-    from telegram.ext import ApplicationHandlerStop
-    try:
-        asyncio.run(ku_mod.handle_kitchen_bulk_text(update, ctx))
-        return False  # passed through (no stop)
-    except ApplicationHandlerStop:
-        return True   # consumed
-
-
-def _freeze_cooked_window(monkeypatch):
-    import kitchen_usage
-    real_dt = kitchen_usage.datetime
-
-    class _DT(real_dt):
-        @classmethod
-        def now(cls, tz=None):
-            return real_dt(2026, 6, 24, 18, 30, tzinfo=tz)
-    monkeypatch.setattr(kitchen_usage, "datetime", _DT)
-
-
-def test_bulk_handler_merges_and_confirms(monkeypatch):
-    from tests.fake_supabase import FakeSupabase
-
-    fake = FakeSupabase()
-    fake._store["kitchen_log_session"] = [{
-        "id": "b1", "chat_id": -50, "outlet_code": "SEK20",
-        "business_date": "2026-06-24",
-        "phase": "cooked", "status": "open", "entries": {}, "message_id": 1,
-    }]
-    monkeypatch.setattr(ku, "_supabase", fake)
-    monkeypatch.setattr(ku, "_kitchen_group_chat_ids", lambda: {-50})
-    _freeze_cooked_window(monkeypatch)
-
-    update, replies = _bulk_update(-50, "ayam goreng 50\nkambing 8")
-    consumed = _run_bulk(ku, update, _bulk_ctx())
-
-    assert consumed is True
-    sess = fake.rows("kitchen_log_session")[0]
-    assert sess["entries"] == {"ayam_goreng": 50, "kambing": 8.0}
-    assert replies and "Captured" in replies[0][0]
-    assert replies[0][1].get("reply_markup") is not None  # Sahkan button
-
-    # Correction message MERGES (updates) the same session.
-    update2, _ = _bulk_update(-50, "kambing 9\nayam bawang 12")
-    _run_bulk(ku, update2, _bulk_ctx())
-    sess = fake.rows("kitchen_log_session")[0]
-    assert sess["entries"] == {"ayam_goreng": 50, "kambing": 9.0, "ayam_bawang": 12}
-
-
-def test_bulk_handler_night_additive_via_message(monkeypatch):
-    from tests.fake_supabase import FakeSupabase
-
-    fake = FakeSupabase()
-    # 6PM already recorded ayam_goreng=50.
-    fake._store["kitchen_daily_usage"] = [{
-        "id": 1, "outlet_code": "SEK20", "business_date": "2026-06-24",
-        "item_code": "ayam_goreng", "item_label": "Ayam Goreng", "unit": "pcs",
-        "cooked_qty": 50, "left_qty": None,
-    }]
-    fake._store["kitchen_log_session"] = [{
-        "id": "n1", "chat_id": -50, "outlet_code": "SEK20",
-        "business_date": "2026-06-24", "phase": "cooked_night", "status": "open",
-        "entries": {}, "message_id": 5,
-    }]
-    monkeypatch.setattr(ku, "_supabase", fake)
-    monkeypatch.setattr(ku, "_kitchen_group_chat_ids", lambda: {-50})
-    _freeze_cooked_window(monkeypatch)
-
-    # Staff types night addition, then confirms (finalize).
-    update, _ = _bulk_update(-50, "ayam goreng 20")
-    _run_bulk(ku, update, _bulk_ctx())
-    sess = fake.rows("kitchen_log_session")[0]
-    ku.finalize_submission(fake, dict(sess), submitter="NightChef")
-    row = [r for r in fake.rows("kitchen_daily_usage") if r["item_code"] == "ayam_goreng"][0]
-    assert row["cooked_qty"] == 70  # 50 + 20 additive
-
-
-def test_bulk_handler_ignores_non_kitchen_chat(monkeypatch):
-    from tests.fake_supabase import FakeSupabase
-
-    fake = FakeSupabase()
-    monkeypatch.setattr(ku, "_supabase", fake)
-    monkeypatch.setattr(ku, "_kitchen_group_chat_ids", lambda: {-50})
-    update, replies = _bulk_update(-999, "ayam goreng 50")  # not a kitchen group
-    assert _run_bulk(ku, update, _bulk_ctx()) is False  # passes through to OCR etc.
-    assert replies == []
-
-
-def test_bulk_handler_ignores_chatter_with_no_open_session(monkeypatch):
-    from tests.fake_supabase import FakeSupabase
-
-    fake = FakeSupabase()  # kitchen group but NO open session
-    monkeypatch.setattr(ku, "_supabase", fake)
-    monkeypatch.setattr(ku, "_kitchen_group_chat_ids", lambda: {-50})
-    _freeze_cooked_window(monkeypatch)
-    update, _ = _bulk_update(-50, "hello boss")
-    assert _run_bulk(ku, update, _bulk_ctx()) is False  # passes through
+def test_bulk_handler_removed():
+    # The bulk free-text / ForceReply experiments are gone (tap-only entry).
+    assert not hasattr(ku, "handle_kitchen_bulk_text")
+    assert not hasattr(ku, "build_confirm_keyboard")
+    assert not hasattr(ku, "get_open_session_for_chat")
 
 
 # --- business_date span (18:00 -> 02:00 next day = same business day) --------

@@ -557,67 +557,21 @@ def numpad_prompt(phase: str) -> str:
 
 
 def form_text(phase: str, business_date, outlet_label, entries: dict, outlet_code) -> str:
-    """The posted form: title, the item list (so staff know the names), and
-    instructions to reply with ONE free-text message. Bilingual (BM + Tamil)."""
-    item_labels = [it["label"] for it in items_for_outlet(outlet_code)]
-    if phase == PHASE_COOKED_NIGHT:
-        what = "tambahan masak malam"
-        zero_note = "Tulis yang tambah sahaja; skip jika tiada."
-        zero_ta = "இரவு கூடுதல் மட்டும் எழுதுங்க."
-    elif phase == PHASE_LEFT:
-        what = "baki"
-        zero_note = "Yang tak tulis = 0."
-        zero_ta = "எழுதாதது = 0."
-    else:
-        what = "dimasak"
-        zero_note = "Yang tak tulis = 0."
-        zero_ta = "எழுதாதது = 0."
+    """Header text above the per-item tap buttons. Items are entered by tapping
+    a button (then the numpad), not by typing. Bilingual (BM + Tamil)."""
+    done = sum(1 for c in required_codes(outlet_code) if entries.get(c) is not None)
+    total = len(required_codes(outlet_code))
     lines = [
         form_title(phase),
         f"{outlet_label} • {business_date}",
-        "",
-        f"Balas SATU mesej — satu item satu baris (atau pisah koma). Tulis {what}, cth:",
-        "ayam goreng 50",
-        "kambing 8",
-        zero_note,
-        f"தமிழ்: ஒரே மெசேஜ் — பெயர் + எண் (உ.ம். ayam goreng 50). {zero_ta}",
-        "",
-        "Item: " + ", ".join(item_labels),
     ]
-    return "\n".join(lines)
-
-
-def render_bulk_confirmation(outlet_code, phase, entries: dict, unmatched: list) -> str:
-    """Summary the bot replies with after parsing a bulk message — what it
-    captured (with a Sahkan button) plus any lines it couldn't match."""
-    lines = ["📝 Captured (belum simpan — tekan Sahkan):"]
-    captured = [
-        it for it in items_for_outlet(outlet_code) if entries.get(it["code"]) is not None
-    ]
-    if captured:
-        for it in captured:
-            lines.append(f"✓ {it['label']}: {format_value(entries[it['code']], it['unit'])}")
+    if phase == PHASE_COOKED_NIGHT:
+        lines.append(f"Tap item untuk key-in tambahan masak malam ({done} item). Skip jika tiada.")
+        lines.append("தமிழ்: item-ஐ தட்டி இரவு கூடுதலை மட்டும் போடுங்க.")
     else:
-        lines.append("(tiada item dikenali lagi)")
-    if phase != PHASE_COOKED_NIGHT:
-        others = sum(1 for it in items_for_outlet(outlet_code) if entries.get(it["code"]) is None)
-        if others:
-            lines.append(f"lain-lain = 0 ({others} item)")
-    if unmatched:
-        lines.append("")
-        lines.append("⚠️ Tak faham: " + "; ".join(f"'{u}'" for u in unmatched))
-        lines.append("Hantar mesej betul untuk tambah/betulkan.")
+        lines.append(f"Tap untuk key-in ({done}/{total}). Yang tak isi = 0.")
+        lines.append("தமிழ்: item-ஐ தட்டி எண் போடுங்க. போடாதது = 0.")
     return "\n".join(lines)
-
-
-def build_confirm_keyboard(session_id):
-    """A single Sahkan & Hantar button that finalizes the session (reuses the
-    existing ``kdu:{sid}:_form:send`` callback path)."""
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Sahkan & Hantar", callback_data=_cb(session_id, FORM_TOKEN, "send")),
-    ]])
 
 
 def numpad_text(phase: str, item_label: str, unit: str, buffer: str) -> str:
@@ -825,30 +779,6 @@ def get_or_create_session(client, chat_id, outlet_code, business_date, phase, me
 def get_session(client, session_id) -> dict | None:
     rows = _rows(client.table(SESSION_TABLE).select("*").eq("id", session_id).limit(1).execute())
     return rows[0] if rows else None
-
-
-def get_open_session_for_chat(client, chat_id, business_date, message_id=None) -> dict | None:
-    """The OPEN kitchen session a bulk text message in this chat should target.
-
-    Filters to status='open' for the chat+business_date. When the message is a
-    reply to a specific form, that session wins; otherwise the most recently
-    created open session (latest phase posted) is used. Returns None when there
-    is no open session — the caller then treats the text as non-kitchen."""
-    rows = _rows(
-        client.table(SESSION_TABLE)
-        .select("*")
-        .eq("chat_id", chat_id)
-        .eq("business_date", str(business_date))
-        .eq("status", "open")
-        .execute()
-    )
-    if not rows:
-        return None
-    if message_id is not None:
-        for r in rows:
-            if r.get("message_id") == message_id:
-                return r
-    return sorted(rows, key=lambda r: r.get("id") or 0, reverse=True)[0]
 
 
 def _save_session(client, session_id, **fields) -> None:
@@ -1353,11 +1283,12 @@ async def _post_one(application, chat_id, outlet_code, business_date, phase) -> 
         logger.info("kitchen: %s already submitted for %s %s", phase, outlet_code, business_date)
         return False
     entries = _load_entries(session)
-    # Primary entry is a free-text reply (no per-item buttons); the Sahkan button
-    # appears in the bot's confirmation after the staff message is parsed.
+    # Original tap-button layout: one button per item + Hantar. Entry is via the
+    # (fast, in-memory) numpad when an item is tapped.
     msg = await application.bot.send_message(
         chat_id=chat_id,
         text=form_text(phase, business_date, outlet_label, entries, outlet_code),
+        reply_markup=build_item_keyboard(session["id"], outlet_code, entries, phase),
     )
     await asyncio.to_thread(_save_session, _supabase, session["id"], message_id=msg.message_id)
     return True
@@ -1435,87 +1366,12 @@ async def post_left_forms(application) -> None:
     await _post_forms(application, PHASE_LEFT)
 
 
-def _kitchen_group_chat_ids() -> set:
-    """Chat IDs that can host a kitchen session (the configured kitchen groups),
-    so the bulk text handler can cheaply ignore every other chat without a DB
-    hit. Resolution is cached by config.kitchen_groups."""
-    if _supabase is None:
-        return set()
-    try:
-        from config.kitchen_groups import configured_groups
-        return {cid for cid, _ in configured_groups(_supabase)}
-    except Exception:
-        logger.warning("kitchen: could not resolve group chats for bulk gate", exc_info=True)
-        return set()
-
-
-async def handle_kitchen_bulk_text(update, context) -> None:
-    """Parse a free-text bulk message (one item per line / comma-separated) into
-    an open kitchen session, merge it, and reply with a Sahkan confirmation.
-
-    Registered in handler group -1 so it runs before the receipt/audit text
-    handlers. It only consumes a message (raising ApplicationHandlerStop) when
-    the chat is a kitchen group with an OPEN session AND the message either
-    matched at least one item or was a reply to the form — otherwise it returns
-    without stopping so receipts / OCR replies / chatter pass through untouched."""
-    from telegram.ext import ApplicationHandlerStop
-
-    msg = update.effective_message
-    if msg is None or _supabase is None:
-        return
-    text = (msg.text or "").strip()
-    if not text:
-        return
-    chat_id = msg.chat_id
-    # Cheap gate: only kitchen group chats can have sessions (no DB hit otherwise).
-    if chat_id not in _kitchen_group_chat_ids():
-        return
-
-    business_date = str(business_date_for(datetime.now(MY_TZ)))
-    reply_mid = msg.reply_to_message.message_id if msg.reply_to_message else None
-    session = await asyncio.to_thread(
-        get_open_session_for_chat, _supabase, chat_id, business_date, reply_mid
-    )
-    if session is None:
-        return  # no open kitchen session -> not kitchen input
-
-    outlet_code = session["outlet_code"]
-    phase = session["phase"]
-    parsed = parse_bulk_entry(text, outlet_code)
-    matched, unmatched = parsed["matched"], parsed["unmatched"]
-    is_reply_to_form = reply_mid is not None and reply_mid == session.get("message_id")
-    if not matched and not is_reply_to_form:
-        # Nothing recognised and not a reply to our form -> likely chatter; let
-        # other handlers process it.
-        return
-
-    entries = _load_entries(session)
-    entries.update(matched)  # merge/correct (a later message updates the same session)
-    await asyncio.to_thread(_save_session, _supabase, session["id"], entries=entries)
-
-    try:
-        from outlet_mapping import outlet_display_name
-        outlet_label = outlet_display_name(outlet_code)
-    except Exception:
-        outlet_label = outlet_code
-    summary = render_bulk_confirmation(outlet_code, phase, entries, unmatched)
-    with contextlib.suppress(Exception):
-        await msg.reply_text(summary, reply_markup=build_confirm_keyboard(session["id"]))
-    raise ApplicationHandlerStop
-
-
 def register_handlers(app) -> None:
-    """Register the kdu: callback handler (Sahkan/Hantar + numpad fallback) and
-    the bulk free-text handler. The bulk handler goes in group -1 so it runs
-    BEFORE the receipt/audit text handlers; it no-ops (and doesn't stop) unless
-    the chat is a kitchen group with an open session and the text is real kitchen
-    input, so receipts / OCR replies / commands pass through untouched."""
-    from telegram.ext import CallbackQueryHandler, MessageHandler, filters
+    """Register the kdu: callback handler — the per-item tap buttons, the numpad,
+    and Hantar all route through it. (The bulk free-text and ForceReply input
+    experiments were removed; entry is tap-only.)"""
+    from telegram.ext import CallbackQueryHandler
 
     app.add_handler(
         CallbackQueryHandler(handle_kitchen_callback, pattern=r"^kdu:")
-    )
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_kitchen_bulk_text),
-        group=-1,
     )

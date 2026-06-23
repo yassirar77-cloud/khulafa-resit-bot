@@ -38,55 +38,33 @@ local time before noon folds back to the previous calendar day
 `pcs` items are whole numbers; `kg` items allow one decimal. **Ayam Rempah only
 appears on the BISTRO7 form** (`items_for_outlet`).
 
-## Key-in UX (single-message bulk entry)
+## Key-in UX (tap buttons + numpad)
 
-The bot posts **one** message: the title, the **item list** (so staff know the
-names), and instructions to **reply with ONE free-text message** — one item per
-line, or comma-separated:
+The bot posts **one** message with **one inline button per item**, each showing
+its value — `✓ Ayam Goreng: 50` when filled, `Ayam Goreng: —` when empty — plus
+a **📤 Hantar** button at the bottom. The header reads "Tap untuk key-in" (+ a
+Tamil line). Staff:
 
-```
-ayam goreng 50
-ayam bawang 40
-kambing 8
-daging 5
-```
+1. **Tap an item button** → an inline **numpad** appears (`1 2 3 / 4 5 6 /
+   7 8 9 / ⌫ 0 ✓`, plus `.` for kg items).
+2. Tap digits, then **✓** → the value is saved and the button updates to
+   `✓ [item]: [value]`.
+3. **📤 Hantar** when done. **Untouched items save as 0** (COOKED/LEFT); ≥1 item
+   is required to submit. The night form is additive and only writes keyed items.
 
-The bot parses the whole message at once (`parse_bulk_entry`):
+**Numpad is instant** (the lag fix): digit/backspace/dot taps are handled from an
+**in-memory buffer** (`_numpad_state`, keyed by chat+user+session+item) — no DB
+read or write per keystroke. The callback is answered immediately so Telegram
+clears the spinner, the message is edited only when the displayed value actually
+changes, and the value is written to `kitchen_log_session` only on **✓ commit**
+(entries also persist on Hantar). An uncommitted half-typed buffer is lost on a
+restart (acceptable); committed values are not. On a memory miss (restart
+mid-entry) the buffer is recovered from the DB once, then stays in memory.
 
-- **Name matching** is normalized + variant-based (`match_item_name`):
-  `ayam goreng` / `ayamgoreng` / `a goreng` → `ayam_goreng`, `telur ikan` /
-  `telurikan` → `telur_ikan`, single-style words (`bawang`, `madu`, `kari`, …)
-  resolve to their item. Bare `goreng` is ambiguous (ayam vs ikan) → unmatched.
-- **Value** is the trailing number; kg items accept a decimal incl. comma-decimal
-  (`3,5` → 3.5), pcs are whole numbers.
-- **Separators:** newline and comma both split items; a `digit,digit` comma is
-  treated as a decimal, not a separator.
-- **Unmatched lines aren't dropped** — the bot lists them ("⚠️ Tak faham: 'xyz
-  5'") and saves the matched ones, so staff send a correction message that
-  **merges/updates the same session** (doesn't reset).
-- **Ayam Rempah** is only accepted for BISTRO7; for other outlets the line is
-  reported unmatched.
-
-The bot replies with a **captured summary + a "✅ Sahkan & Hantar" button**, so a
-typo isn't auto-committed — finalize happens on confirm (the existing
-`kdu:{session}:_form:send` path). **Untouched items save as 0** on a COOKED/LEFT
-submit (the night form is additive and only writes the items keyed).
-
-The bulk handler runs in handler **group -1** (before the receipt/audit text
-handlers) and only consumes a message when the chat is a **kitchen group with an
-open session** for the current business day AND the text actually matched an item
-(or was a reply to the form). Everything else — receipts, OCR replies, chatter,
-commands — passes through untouched. The legacy inline numpad
-(`kdu:…:open`/digit callbacks) remains as a dormant fallback.
-
-**Numpad responsiveness:** when the numpad fallback is used, digit/backspace/dot
-taps are handled from an **in-memory buffer** (`_numpad_state`, keyed by
-chat+user+session+item) — no DB read or write per keystroke. The callback is
-answered immediately (spinner clears), the message is edited only when the
-displayed value actually changes, and the value is written to
-`kitchen_log_session` only on **✓ commit** (and entries persist on Hantar). An
-uncommitted half-typed buffer is lost on a restart (acceptable); committed
-values are not.
+`callback_data` is namespaced `kdu:{session_id}:{item_code}:{action}` so it never
+collides with the existing `review:` / `reparse:` / `backfill:` handlers. Entry
+is **tap-only** — the earlier bulk-message and ForceReply typing experiments were
+removed (the pure `parse_bulk_entry` helper is retained but unused).
 
 ## Enabling the scheduled forms (`KITCHEN_LOG_ENABLED`)
 
