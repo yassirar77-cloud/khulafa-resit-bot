@@ -52,14 +52,28 @@ Tamil line). Staff:
 3. **📤 Hantar** when done. **Untouched items save as 0** (COOKED/LEFT); ≥1 item
    is required to submit. The night form is additive and only writes keyed items.
 
-**Numpad is instant** (the lag fix): digit/backspace/dot taps are handled from an
-**in-memory buffer** (`_numpad_state`, keyed by chat+user+session+item) — no DB
-read or write per keystroke. The callback is answered immediately so Telegram
-clears the spinner, the message is edited only when the displayed value actually
-changes, and the value is written to `kitchen_log_session` only on **✓ commit**
-(entries also persist on Hantar). An uncommitted half-typed buffer is lost on a
-restart (acceptable); committed values are not. On a memory miss (restart
-mid-entry) the buffer is recovered from the DB once, then stays in memory.
+**Numpad is instant** (the lag fix). Two things made per-digit taps feel slow and
+both are addressed:
+
+- **No message edit per digit.** A `editMessageText` is a 300-800ms Telegram
+  round-trip; doing it on every digit was the visible lag. Instead the running
+  value is shown in the **callback answer toast** (`query.answer(text="Ayam
+  Goreng: 20")`) — one lightweight `answerCallbackQuery` that both displays the
+  value AND clears the spinner. The message (and keyboard) are edited **only on
+  ✓ commit** (back to the item list). The buffer lives in an **in-memory**
+  `_numpad_state` (keyed chat+user+session+item) — no DB per keystroke; the value
+  is written to `kitchen_log_session` only on ✓ (entries also persist on Hantar).
+  On the common path `answer()` is the first await, so the spinner clears
+  instantly. A memory miss (restart mid-entry) recovers the buffer from the DB
+  once.
+- **Concurrent update processing.** The bot runs with
+  `Application.concurrent_updates(True)`, so a slow handler (a multi-second OCR
+  on an uploaded receipt) no longer blocks the event loop's update queue — numpad
+  taps are processed immediately instead of waiting behind an in-flight OCR.
+
+Per-tap timing is logged (`kitchen numpad d5 -> '50': recv->answer_start Xms,
+answer Yms (toast, no edit)` and `... ✓ commit ...: edit Zms`) so the latency
+source is visible in the logs.
 
 `callback_data` is namespaced `kdu:{session_id}:{item_code}:{action}` so it never
 collides with the existing `review:` / `reparse:` / `backfill:` handlers. Entry

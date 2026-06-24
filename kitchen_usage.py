@@ -575,11 +575,13 @@ def form_text(phase: str, business_date, outlet_label, entries: dict, outlet_cod
 
 
 def numpad_text(phase: str, item_label: str, unit: str, buffer: str) -> str:
-    """Header text shown above the numpad."""
+    """Header above the numpad. The running value shows in a pop-up toast as you
+    tap (the message isn't re-edited per digit — that round-trip was the lag), so
+    this only states the starting value and how to finish."""
     unit_hint = "(kg, boleh 1 titik perpuluhan)" if unit == "kg" else "(pcs, nombor bulat)"
     return "\n".join([
         f"{item_label} — {numpad_prompt(phase)} {unit_hint}",
-        f"Nilai: {buffer_display(buffer)}",
+        f"Sekarang: {buffer_display(buffer)}. Tekan nombor → ✓ (nilai papar di pop-up atas).",
     ])
 
 
@@ -1102,11 +1104,19 @@ def _numpad_key(chat_id, user_id, session_id, item_code):
 
 
 async def _handle_numpad_key(query, session_id, item_code, action) -> None:
-    """Fast path: apply one numpad key using the IN-MEMORY buffer — no DB read or
-    write. Only edits the message when the displayed value actually changes."""
-    started = time.monotonic()
+    """Fast path for a numpad digit/backspace/dot.
+
+    The running value is shown via the callback ANSWER TOAST (one lightweight
+    answerCallbackQuery), NOT by editing the message — a per-digit
+    editMessageText is a 300-800ms Telegram round-trip and was the visible lag.
+    The message (and its keyboard) are edited only on ✓ commit. The buffer lives
+    in memory (no DB per digit). On the common path answer() is the FIRST await,
+    so Telegram's spinner clears instantly."""
+    t0 = time.monotonic()
     meta = ITEM_BY_CODE.get(item_code)
     if meta is None:
+        with contextlib.suppress(Exception):
+            await query.answer()
         return
     unit = meta["unit"]
     chat_id = query.message.chat_id if query.message else None
@@ -1115,25 +1125,29 @@ async def _handle_numpad_key(query, session_id, item_code, action) -> None:
 
     st = _numpad_state.get(key)
     if st is None:
-        # Memory lost (e.g. restart) — recover the buffer from the DB once, then
-        # stay in memory for subsequent taps.
+        # Memory lost (e.g. restart) — recover the buffer from the DB once (rare),
+        # then stay in memory for subsequent taps.
         session = await asyncio.to_thread(get_session, _supabase, session_id)
         if session is None or session.get("status") == "submitted":
+            with contextlib.suppress(Exception):
+                await query.answer("Sesi dah tamat — tunggu borang baru.")
             return
         st = {"buffer": session.get("buffer") or "", "phase": session.get("phase") or PHASE_COOKED}
         _numpad_state[key] = st
 
-    old = st["buffer"]
-    new = apply_key(old, _action_to_key(action), unit)
-    if new == old:
-        return  # no visible change (e.g. "." on pcs, backspace on empty) — skip edit
-    st["buffer"] = new
+    # In-memory mutation (synchronous, no await) — atomic within this task.
+    st["buffer"] = apply_key(st["buffer"], _action_to_key(action), unit)
+    display = buffer_display(st["buffer"])
+
+    t_ans = time.monotonic()
     with contextlib.suppress(Exception):
-        await query.edit_message_text(
-            numpad_text(st["phase"], meta["label"], unit, new),
-            reply_markup=build_numpad_keyboard(session_id, item_code, unit),
-        )
-    logger.debug("kitchen numpad tap %s -> %r in %.1fms", action, new, (time.monotonic() - started) * 1000)
+        # Toast shows the running value AND clears the spinner in one call.
+        await query.answer(text=f"{meta['label']}: {display}", cache_time=0)
+    t_done = time.monotonic()
+    logger.info(
+        "kitchen numpad %s -> %r: recv->answer_start %.0fms, answer %.0fms (toast, no edit)",
+        action, st["buffer"], (t_ans - t0) * 1000, (t_done - t_ans) * 1000,
+    )
 
 
 def _clear_numpad_state(session_id) -> None:
@@ -1151,24 +1165,26 @@ async def handle_kitchen_callback(update, context) -> None:
     parsed = parse_callback(query.data or "")
     if parsed is None:
         return
-    # Answer immediately (no text) so Telegram clears the loading spinner before
-    # any DB/network work — taps feel instant.
-    with contextlib.suppress(Exception):
-        await query.answer()
-
-    if _supabase is None:
-        logger.warning("kitchen callback received but module not initialised")
-        return
 
     session_id = parsed["session_id"]
     item_code = parsed["item_code"]
     action = parsed["action"]
 
-    # FAST PATH: numpad digit / backspace / dot — handled from the in-memory
-    # buffer with NO DB round-trip.
+    if _supabase is None:
+        with contextlib.suppress(Exception):
+            await query.answer()
+        logger.warning("kitchen callback received but module not initialised")
+        return
+
+    # FAST PATH: numpad digit / backspace / dot — answer-toast shows the running
+    # value (no message edit, no DB). answer() is the first await here.
     if _is_numpad_key(action):
         await _handle_numpad_key(query, session_id, item_code, action)
         return
+
+    # Non-numpad (open / ✓ commit / Hantar): clear the spinner, then do the work.
+    with contextlib.suppress(Exception):
+        await query.answer()
 
     session = await asyncio.to_thread(get_session, _supabase, session_id)
     if session is None:
@@ -1259,11 +1275,15 @@ async def handle_kitchen_callback(update, context) -> None:
             _save_session, _supabase, session_id,
             entries=entries, editing_item=None, buffer="",
         )
+        # The ONLY message edit in the numpad flow — back to the item list.
+        t_edit = time.monotonic()
         with contextlib.suppress(Exception):
             await query.edit_message_text(
                 form_text(phase, business_date, outlet_label, entries, outlet_code),
                 reply_markup=build_item_keyboard(session_id, outlet_code, entries, phase),
             )
+        logger.info("kitchen numpad ✓ commit %s=%r: edit %.0fms",
+                    item_code, value, (time.monotonic() - t_edit) * 1000)
         return
 
 

@@ -1187,17 +1187,22 @@ def test_numpad_digits_do_not_touch_db(monkeypatch):
     gets = _spy(ku, monkeypatch, "get_session")
     saves = _spy(ku, monkeypatch, "_save_session")
 
+    last_answers = last_edits = None
     for data in ("kdu:s1:ayam_goreng:d5", "kdu:s1:ayam_goreng:d0"):
         update, edits, answers = _cb_update(data)
         asyncio.run(ku.handle_kitchen_callback(update, _ctx()))
-        assert answers, "callback answered immediately"
+        assert answers, "callback answered immediately (toast)"
+        last_answers, last_edits = answers, edits
 
     assert ku._numpad_state[ku._numpad_key(-77, 7, "s1", "ayam_goreng")]["buffer"] == "50"
     assert gets["n"] == 0    # no DB read on digit taps
     assert saves["n"] == 0   # no DB write on digit taps
+    # Running value comes from the answer-toast, not a message edit.
+    assert last_edits == []
+    assert "50" in last_answers[-1][1].get("text", "")
 
 
-def test_numpad_noop_key_skips_edit(monkeypatch):
+def test_numpad_digit_never_edits_message(monkeypatch):
     import asyncio
 
     from tests.fake_supabase import FakeSupabase
@@ -1206,9 +1211,10 @@ def test_numpad_noop_key_skips_edit(monkeypatch):
     ku._numpad_state.clear()
     ku._numpad_state[ku._numpad_key(-77, 7, "s1", "ayam_goreng")] = {"buffer": "", "phase": "cooked"}
 
-    update, edits, _ = _cb_update("kdu:s1:ayam_goreng:bs")  # backspace on empty
+    update, edits, answers = _cb_update("kdu:s1:ayam_goreng:bs")  # backspace on empty
     asyncio.run(ku.handle_kitchen_callback(update, _ctx()))
-    assert edits == []  # no visible change -> no message edit
+    assert edits == []       # digit/backspace never edits the message (toast only)
+    assert answers           # spinner cleared via the toast answer
 
 
 def test_numpad_ok_commits_to_db_and_clears_memory(monkeypatch):
@@ -1248,10 +1254,12 @@ def test_numpad_memory_miss_recovers_from_db_once(monkeypatch):
     ku._numpad_state.clear()  # memory lost (e.g. restart)
     saves = _spy(ku, monkeypatch, "_save_session")
 
-    update, edits, _ = _cb_update("kdu:s1:ayam_goreng:d2")
+    update, edits, answers = _cb_update("kdu:s1:ayam_goreng:d2")
     asyncio.run(ku.handle_kitchen_callback(update, _ctx()))
 
     # Recovered buffer "1" + "2" -> "12", in memory, still no DB write.
     assert ku._numpad_state[ku._numpad_key(-77, 7, "s1", "ayam_goreng")]["buffer"] == "12"
     assert saves["n"] == 0
-    assert len(edits) == 1
+    # Running value is shown via the answer-toast, NOT a message edit.
+    assert edits == []
+    assert answers and "12" in answers[-1][1].get("text", "")

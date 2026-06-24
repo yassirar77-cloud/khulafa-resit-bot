@@ -4444,7 +4444,16 @@ async def poll_sales_emails() -> None:
 
 
 async def run_bot() -> None:
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    # concurrent_updates(True): process updates as independent tasks so a slow
+    # handler (a multi-second OCR on an uploaded receipt) doesn't block other
+    # updates. Without it PTB handles updates sequentially, so kitchen numpad
+    # taps would queue behind an in-flight OCR and feel laggy.
+    app = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .concurrent_updates(True)
+        .build()
+    )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("summary", summary_command))
