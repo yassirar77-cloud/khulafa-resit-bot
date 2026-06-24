@@ -52,6 +52,14 @@ Tamil line). Staff:
 3. **📤 Hantar** when done. **Untouched items save as 0** (COOKED/LEFT); ≥1 item
    is required to submit. The night form is additive and only writes keyed items.
 
+**Fixing mistakes before Hantar** (no post-submit editing): re-tap any item to
+change it — the numpad opens with an **empty buffer** and shows the saved value as
+a reference (`Sekarang: 50`), so typing a new number **replaces** it. ⌫ edits
+digits (safe on an empty buffer), and **🗑 Kosongkan** resets that item back to
+`—` if the wrong item was tapped. Pressing ✓ with nothing typed keeps the existing
+value (no accidental clear). Anyone in the group can make these edits. The form
+header notes "Tekan balik barang untuk betulkan sebelum Hantar."
+
 **Numpad is instant** (the lag fix). Two things made per-digit taps feel slow and
 both are addressed:
 

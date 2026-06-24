@@ -571,17 +571,20 @@ def form_text(phase: str, business_date, outlet_label, entries: dict, outlet_cod
     else:
         lines.append(f"Tap untuk key-in ({done}/{total}). Yang tak isi = 0.")
         lines.append("தமிழ்: item-ஐ தட்டி எண் போடுங்க. போடாதது = 0.")
+    # Mistake-fixing before Hantar: re-tap an item to change it, 🗑 to clear.
+    lines.append("Tekan balik barang untuk betulkan sebelum Hantar.")
     return "\n".join(lines)
 
 
-def numpad_text(phase: str, item_label: str, unit: str, buffer: str) -> str:
+def numpad_text(phase: str, item_label: str, unit: str, current: str = "—") -> str:
     """Header above the numpad. The running value shows in a pop-up toast as you
-    tap (the message isn't re-edited per digit — that round-trip was the lag), so
-    this only states the starting value and how to finish."""
+    tap (the message isn't re-edited per digit). ``current`` is the value already
+    saved for this item (shown as a reference) — typing a new number REPLACES it,
+    or tap 🗑 Kosongkan to unset it."""
     unit_hint = "(kg, boleh 1 titik perpuluhan)" if unit == "kg" else "(pcs, nombor bulat)"
     return "\n".join([
         f"{item_label} — {numpad_prompt(phase)} {unit_hint}",
-        f"Sekarang: {buffer_display(buffer)}. Tekan nombor → ✓ (nilai papar di pop-up atas).",
+        f"Sekarang: {current}. Taip nilai baru → ✓ (papar di pop-up atas). 🗑 Kosongkan untuk buang.",
     ])
 
 
@@ -637,6 +640,8 @@ def build_numpad_keyboard(session_id, item_code, unit: str):
         rows.append([b("✓ Simpan", "ok")])
     else:
         rows.append([b("⌫", "bs"), b("0", "d0"), b("✓", "ok")])
+    # Per-item clear — reset this item back to "—" if the wrong item was tapped.
+    rows.append([b("🗑 Kosongkan", "clr")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1244,20 +1249,36 @@ async def handle_kitchen_callback(update, context) -> None:
         return
     unit = meta["unit"]
 
-    # --- open an item's numpad (legacy fallback; primary entry is bulk text) ---
-    # Seed the in-memory buffer (no DB write — digits stay memory-only until ✓).
+    # --- open an item's numpad ---
+    # Start with an EMPTY buffer (no DB write) and show the already-saved value as
+    # a reference; typing a new number REPLACES it, ⌫ edits, 🗑 Kosongkan unsets.
     if action == "open":
         existing = entries.get(item_code)
-        buffer = "" if existing is None else format_value(existing, unit)
+        current = format_value(existing, unit) if existing is not None else "—"
         chat_id = query.message.chat_id if query.message else None
         user_id = query.from_user.id if query.from_user else None
         _numpad_state[_numpad_key(chat_id, user_id, session_id, item_code)] = {
-            "buffer": buffer, "phase": phase,
+            "buffer": "", "phase": phase,
         }
         with contextlib.suppress(Exception):
             await query.edit_message_text(
-                numpad_text(phase, meta["label"], unit, buffer),
+                numpad_text(phase, meta["label"], unit, current),
                 reply_markup=build_numpad_keyboard(session_id, item_code, unit),
+            )
+        return
+
+    # --- 🗑 Kosongkan: unset this item (wrong item tapped) and return to list ---
+    if action == "clr":
+        entries.pop(item_code, None)
+        _clear_numpad_state(session_id)
+        await asyncio.to_thread(
+            _save_session, _supabase, session_id,
+            entries=entries, editing_item=None, buffer="",
+        )
+        with contextlib.suppress(Exception):
+            await query.edit_message_text(
+                form_text(phase, business_date, outlet_label, entries, outlet_code),
+                reply_markup=build_item_keyboard(session_id, outlet_code, entries, phase),
             )
         return
 

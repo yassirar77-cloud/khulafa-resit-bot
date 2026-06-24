@@ -1263,3 +1263,97 @@ def test_numpad_memory_miss_recovers_from_db_once(monkeypatch):
     # Running value is shown via the answer-toast, NOT a message edit.
     assert edits == []
     assert answers and "12" in answers[-1][1].get("text", "")
+
+
+# --- mistake-fixing before Hantar: overwrite + Kosongkan ---------------------
+
+def test_numpad_keyboard_has_kosongkan_clear():
+    kb = ku.build_numpad_keyboard("s1", "ayam_goreng", "pcs")
+    btns = [b for row in kb.inline_keyboard for b in row]
+    assert any("Kosongkan" in b.text for b in btns)
+    assert any(b.callback_data.endswith(":clr") for b in btns)
+
+
+def test_open_filled_item_starts_empty_buffer_and_shows_current(monkeypatch):
+    import asyncio
+
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store["kitchen_log_session"] = [{
+        "id": "s1", "chat_id": -77, "outlet_code": "SEK20", "business_date": "2026-06-24",
+        "phase": "cooked", "status": "open", "entries": {"ayam_goreng": 50},
+    }]
+    monkeypatch.setattr(ku, "_supabase", fake)
+    ku._numpad_state.clear()
+
+    update, edits, _ = _cb_update("kdu:s1:ayam_goreng:open")
+    asyncio.run(ku.handle_kitchen_callback(update, _ctx()))
+
+    # Re-tapping a filled item opens with an EMPTY buffer (typing replaces)...
+    assert ku._numpad_state[ku._numpad_key(-77, 7, "s1", "ayam_goreng")]["buffer"] == ""
+    # ...and the message shows the current value as a reference.
+    assert edits and "Sekarang: 50" in edits[0][0]
+
+
+def test_retap_filled_item_overwrites_on_commit(monkeypatch):
+    import asyncio
+
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store["kitchen_log_session"] = [{
+        "id": "s1", "chat_id": -77, "outlet_code": "SEK20", "business_date": "2026-06-24",
+        "phase": "cooked", "status": "open", "entries": {"ayam_goreng": 50},
+    }]
+    monkeypatch.setattr(ku, "_supabase", fake)
+    ku._numpad_state.clear()
+
+    # open -> type 6,0 -> ✓  (replaces 50 with 60)
+    for data in ("kdu:s1:ayam_goreng:open", "kdu:s1:ayam_goreng:d6",
+                 "kdu:s1:ayam_goreng:d0", "kdu:s1:ayam_goreng:ok"):
+        asyncio.run(ku.handle_kitchen_callback(_cb_update(data)[0], _ctx()))
+
+    assert fake.rows("kitchen_log_session")[0]["entries"]["ayam_goreng"] == 60
+    assert ku._numpad_state == {}  # cleared after commit
+
+
+def test_commit_empty_buffer_keeps_existing_value(monkeypatch):
+    import asyncio
+
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store["kitchen_log_session"] = [{
+        "id": "s1", "chat_id": -77, "outlet_code": "SEK20", "business_date": "2026-06-24",
+        "phase": "cooked", "status": "open", "entries": {"ayam_goreng": 50},
+    }]
+    monkeypatch.setattr(ku, "_supabase", fake)
+    ku._numpad_state.clear()
+    # open then ✓ without typing -> old value kept (no accidental clear)
+    for data in ("kdu:s1:ayam_goreng:open", "kdu:s1:ayam_goreng:ok"):
+        asyncio.run(ku.handle_kitchen_callback(_cb_update(data)[0], _ctx()))
+    assert fake.rows("kitchen_log_session")[0]["entries"]["ayam_goreng"] == 50
+
+
+def test_kosongkan_unsets_item(monkeypatch):
+    import asyncio
+
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store["kitchen_log_session"] = [{
+        "id": "s1", "chat_id": -77, "outlet_code": "SEK20", "business_date": "2026-06-24",
+        "phase": "cooked", "status": "open", "entries": {"ayam_goreng": 50, "kambing": 3},
+    }]
+    monkeypatch.setattr(ku, "_supabase", fake)
+    ku._numpad_state.clear()
+
+    update, edits, _ = _cb_update("kdu:s1:ayam_goreng:clr")
+    asyncio.run(ku.handle_kitchen_callback(update, _ctx()))
+
+    entries = fake.rows("kitchen_log_session")[0]["entries"]
+    assert "ayam_goreng" not in entries   # cleared back to unset
+    assert entries.get("kambing") == 3    # other items untouched
+    # returned to the item list (form text + item keyboard)
+    assert edits and "Ayam Goreng: —" in str(edits[0])
