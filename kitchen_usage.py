@@ -362,6 +362,43 @@ def normalize_outlet_code(code):
     return resolved or stripped.upper()
 
 
+def outlet_join_keys(code) -> set:
+    """All representations an outlet code can be matched by, so a kitchen code
+    and a POS S-/D- code that refer to the same outlet share at least one key.
+
+    Two bridges are included, so the join survives even if one side fails:
+      * the **bare prefix-stripped UPPER code** — kitchen ``KLANG`` and POS
+        ``D-KLANG`` / ``S-KLANG`` all yield ``"KLANG"``;
+      * the **canonical outlet name** — needed for the two outlets whose
+        kitchen/POS codes differ (kitchen ``D`` ↔ POS ``D-DAMANSARA`` → ``D.U``;
+        kitchen ``KLRAZAK`` ↔ POS ``D-RAZAK`` → ``K.L Razak``).
+    Two outlets match iff their key sets intersect. Returns an empty set for
+    empty / non-string input."""
+    if not isinstance(code, str):
+        return set()
+    raw = code.strip()
+    if not raw:
+        return set()
+    stripped = _OUTLET_CODE_PREFIX_RE.sub("", raw).strip()
+    if not stripped:
+        return set()
+    keys = {stripped.upper()}
+    try:
+        from outlet_resolver import canonical_outlet
+        canonical = canonical_outlet(stripped)
+    except Exception:
+        canonical = None
+    if canonical:
+        keys.add(canonical)
+    return keys
+
+
+def outlets_match(code_a, code_b) -> bool:
+    """True when two outlet codes (kitchen and/or POS form) refer to the same
+    outlet — i.e. their ``outlet_join_keys`` intersect."""
+    return bool(outlet_join_keys(code_a) & outlet_join_keys(code_b))
+
+
 # --- POS matching + Used arithmetic (pure) ----------------------------------
 
 # Each tracked item maps to POS dishes by keyword, kept on its OWN comparison
@@ -897,12 +934,13 @@ def _fetch_itemwise(client, outlet_code, business_date) -> list:
     """POS itemwise rows for an outlet's business_date (used to compute pos_qty).
 
     sales_daily_summary keys outlets with a POS S-/D- prefix (e.g. "D-KLANG")
-    while the kitchen keys them bare ("KLANG"). Both sides are reduced to one
-    join key via ``normalize_outlet_code`` so the join lands for all 10 outlets
-    (this is why POS previously read 0). Matches a summary when EITHER its
-    outlet_code or its outlet_canonical normalises to the same key."""
-    target = normalize_outlet_code(outlet_code)
-    if target is None:
+    while the kitchen keys them bare ("KLANG"). A summary matches when its
+    outlet_code OR its outlet_canonical shares an ``outlet_join_keys`` value with
+    the kitchen code — the bare stripped code (KLANG) and the canonical name
+    (Klang B.Emas) both bridge, so the join lands for all 10 outlets (this is why
+    POS previously read 0)."""
+    target_keys = outlet_join_keys(outlet_code)
+    if not target_keys:
         return []
     summaries = _rows(
         client.table(SALES_SUMMARY_TABLE)
@@ -912,8 +950,8 @@ def _fetch_itemwise(client, outlet_code, business_date) -> list:
     )
     ids = [
         s["id"] for s in summaries
-        if normalize_outlet_code(s.get("outlet_code")) == target
-        or normalize_outlet_code(s.get("outlet_canonical")) == target
+        if (outlet_join_keys(s.get("outlet_code")) & target_keys)
+        or (outlet_join_keys(s.get("outlet_canonical")) & target_keys)
     ]
     if not ids:
         return []

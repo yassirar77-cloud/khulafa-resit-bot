@@ -878,6 +878,34 @@ def test_normalize_outlet_handles_blank_and_canonical():
     assert ku.normalize_outlet_code("Klang B.Emas") == "Klang B.Emas"
 
 
+def test_outlet_join_keys_bridge_bare_code_and_canonical():
+    # Bare stripped code bridges KLANG <-> D-KLANG <-> S-KLANG ...
+    assert "KLANG" in ku.outlet_join_keys("KLANG")
+    assert "KLANG" in ku.outlet_join_keys("D-KLANG")
+    assert "KLANG" in ku.outlet_join_keys("S-KLANG")
+    # ... and the canonical name is also present for the rename cases.
+    assert "Klang B.Emas" in ku.outlet_join_keys("D-KLANG")
+    assert ku.outlets_match("KLANG", "D-KLANG")
+    assert ku.outlets_match("KLANG", "S-KLANG")
+    assert ku.outlets_match("KLANG", "Klang B.Emas")
+    # renamed outlets bridge via the canonical name
+    assert ku.outlets_match("D", "D-DAMANSARA")
+    assert ku.outlets_match("KLRAZAK", "D-RAZAK")
+    # different outlets never match
+    assert not ku.outlets_match("KLANG", "D-SEK20")
+    assert ku.outlet_join_keys("") == set()
+    assert ku.outlet_join_keys(None) == set()
+
+
+def test_outlet_join_keys_all_ten_distinct_no_cross_match():
+    outs = ["BISTRO7", "SEK20", "SEK14", "SEK15", "SEK6",
+            "VISTA", "JAKEL", "D", "KLANG", "KLRAZAK"]
+    for i, a in enumerate(outs):
+        for j, b in enumerate(outs):
+            if i != j:
+                assert not ku.outlets_match(a, b), (a, b)
+
+
 def test_fetch_itemwise_joins_kitchen_klang_to_pos_d_klang():
     """The POS=0 regression: kitchen 'KLANG' must join POS 'D-KLANG' summaries."""
     from tests.fake_supabase import FakeSupabase
