@@ -167,8 +167,11 @@ def _exclusion_reason(name_l, category, base):
 
 
 def _print_classification_notes(items):
-    """Flag dishes whose treatment is an OWNER decision (not guessed)."""
-    print("\n--- CLASSIFICATION NOTES — needs your decision (not guessed) ---")
+    """Confirm the two owner-decided exclusions are holding (deferred to monthly
+    v12). Both are EXCLUDED from the daily comparison by owner decision:
+      * Ayam Rendang (low volume; the 3:1 conversion isn't worth daily complexity)
+      * plain Briyani Ayam with no style word (shredded/isi type, Thai chef)."""
+    print("\n--- CONFIRMED EXCLUSIONS (owner decision; reconcile in monthly v12) ---")
     flagged = False
 
     rendang = [r for r in items
@@ -177,12 +180,9 @@ def _print_classification_notes(items):
     if rendang:
         flagged = True
         tot = sum(_qty(r) for r in rendang)
-        print("  * Ayam Rendang — CURRENTLY EXCLUDED (in AYAM_EXCLUDE_SUBSTRINGS):")
+        print(f"  * Ayam Rendang — EXCLUDED (decided): {_fmt(tot)} dish(es), deferred to v12:")
         for r in rendang:
             print(f"      {r.get('item_name')!r} qty {_fmt(_qty(r))}")
-        print(f"    You noted: 3 rendang = 1 whole pc. So {_fmt(tot)} rendang ~= "
-              f"{_fmt(tot / 3.0)} pc if counted as its own item at a 3:1 ratio.")
-        print("    DECISION: keep excluded, or add an ayam_rendang line (3 dishes = 1 pc)?")
 
     plain_briyani = []
     for r in items:
@@ -192,19 +192,16 @@ def _print_classification_notes(items):
         if "briyani" not in n and "biriyani" not in n and "briani" not in n:
             continue
         if any(m in n for m in _AYAM_STYLE_MARKERS):
-            continue  # has a tracked style (e.g. Briyani Ayam Bawang) -> already counted
+            continue  # has a tracked style (e.g. Briyani Ayam Bawang) -> counted
         plain_briyani.append(r)
     if plain_briyani:
         flagged = True
-        print("  * Plain Briyani Ayam (no bawang/goreng/kicap/etc) — CURRENTLY EXCLUDED")
-        print("    as isi ayam (no tracked style keyword):")
+        print("  * Plain Briyani Ayam (no style word) — EXCLUDED (decided): isi-ayam type:")
         for r in plain_briyani:
             print(f"      {r.get('item_name')!r} qty {_fmt(_qty(r))}")
-        print("    DECISION: confirm these are isi ayam (exclude), or whole-cut "
-              "that should count toward an item?")
 
     if not flagged:
-        print("  (none of the decision-flagged patterns present)")
+        print("  (neither decided-exclusion pattern present today)")
 
 
 # --- report ------------------------------------------------------------------
