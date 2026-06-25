@@ -149,11 +149,46 @@ resolved `outlet_code`, plus which expected outlets are still missing.
 ## Calculation & mismatch flag
 
 `Used = Cooked − Left` per item. Most items are compared against **POS sold**
-(`sales_daily_itemwise` for the same `business_date`, matched by base + style
-keyword in `ITEM_POS_KEYWORDS`; the bot only canonicalizes to the bare "ayam",
-so per-style splitting happens here). **Kambing / Daging** convert POS portions
-to kg using locked portion sizes (`KG_PORTION_GRAMS`): **Kambing 180 g, Daging
-60 g**.
+(`sales_daily_itemwise` for the same `business_date`, matched in
+`ITEM_POS_KEYWORDS`). **Each whole-leg item stays on its OWN comparison line**
+(ayam_bawang / ayam_kicap / ayam_rempah / ayam_madu are *not* combined) so a
+mismatch is visible by name. **Kambing / Daging** convert POS portions to kg
+using locked portion sizes (`KG_PORTION_GRAMS`): **Kambing 180 g, Daging 60 g**.
+
+### Outlet-code join (why POS used to read 0)
+
+The POS daily-summary keys every outlet with a one-letter shift/day prefix
+(`S-KLANG` per shift, `D-KLANG` per day) while the kitchen keys the same outlet
+bare (`KLANG`). A raw compare never matched, so POS came out 0.
+`normalize_outlet_code` strips the `S-`/`D-` prefix and resolves the remainder
+to its canonical outlet name, landing both sides on one key — for all 10
+outlets, including the two whose names differ (kitchen `D` ↔ POS `D-DAMANSARA`
+both → `D.U`; kitchen `KLRAZAK` ↔ POS `D-RAZAK` both → `K.L Razak`).
+
+### Per-item POS matching
+
+Each tracked item matches POS dishes by a precise rule, and **excludes**
+Thai-chef *isi ayam* and staff meals so their sales never manufacture a false
+mismatch (those proteins aren't in the kitchen log):
+
+| item | counts | notes |
+|------|--------|-------|
+| `ayam_goreng` | `Ayam Goreng`, `Ayam Goreng Besar`, `Nasi Ayam Goreng Besar (Sayur)` | whole-cut only — the words *ayam goreng* must be **adjacent**, so `Nasi Goreng Ayam` / `Maggi Goreng Ayam` / `Mee Goreng Ayam` do NOT count |
+| `ayam_bawang` | `Ayam Bawang`, `Nasi Ayam Bawang (Sayur)`, `Nasi Separuh Ayam Bawang`, `Briyani Ayam Bawang Set/Telur/Sayur` | any *bawang* dish |
+| `ayam_kicap` | `Ayam Masak Kicap` (any `…kicap`) | |
+| `ayam_rempah` | *rempah* dishes | **BISTRO7 only**; a fried `…berempah` dish is a goreng dish, not rempah |
+| `ayam_madu` | `Ayam Madu` dishes | |
+| `ayam_tandoori` | `Ayam Tandoori` / `Ayam Tandori` | excludes `…Staff` |
+| `ikan_goreng` | `Ikan Goreng` dishes | |
+| `ikan_kari` | ikan *kari* / *curry* dishes | |
+| `kambing` | **all** kambing dishes × 180 g ÷ 1000 → kg | |
+| `daging` | **all** daging dishes × 60 g ÷ 1000 → kg | |
+
+**Excluded entirely** (no count, no flag): plain `Nasi Ayam` / `Nasi Separuh
+Ayam` / `Isi Ayam` (no style → match nothing), any **THAI FOOD** category, staff
+meals, and `Paprik / Tomyam / Maggi / Indomee / Kuey Teow / Mee Goreng` ayam +
+`Ayam Rendang / Kurma / Kari`. Items with no kitchen entry and no POS match show
+0 quietly.
 
 **Telur Ikan is the exception** — it is not a POS dish, it is bought by weight.
 So it is compared against **kg PURCHASED** (pulled from `receipts`, matching the
