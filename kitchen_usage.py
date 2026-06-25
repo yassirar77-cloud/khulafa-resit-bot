@@ -447,6 +447,14 @@ ITEM_POS_KEYWORDS: dict[str, dict] = {
 # their sales would manufacture false mismatches.
 _POS_STAFF_SUBSTR = "staff"
 
+# Daily rule (owner-decided): only dishes that map cleanly to a whole-cut item
+# the chef logs count toward the daily comparison. Anything isi-ayam-type or
+# ambiguous is EXCLUDED from daily and reconciled in the monthly v12 report —
+# notably Ayam Rendang (low volume; the 3:1 "3 rendang = 1 pc" conversion isn't
+# worth daily complexity) and plain Briyani/Nasi Ayam with no style word
+# (shredded/isi type handled by the Thai chef). Plain isi ayam is dropped simply
+# by carrying no style keyword; rendang/kurma are listed here explicitly.
+#
 # Ayam-only exclusions: Thai-chef isi-ayam noodle/rice dishes and the
 # rendang/kurma styles that are not tracked in the kitchen log. NOT applied to
 # kambing/daging — those count ALL dishes (minus staff / Thai category).
