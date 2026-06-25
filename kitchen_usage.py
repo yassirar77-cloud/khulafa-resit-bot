@@ -327,30 +327,127 @@ def parse_bulk_entry(text, outlet_code) -> dict:
     return {"matched": matched, "unmatched": unmatched}
 
 
+# --- outlet-code normalisation ----------------------------------------------
+# The POS daily-summary keys every outlet with a one-letter shift/day prefix
+# ("S-KLANG" per shift, "D-KLANG" per day) while the kitchen keys the SAME
+# outlet bare ("KLANG"). A raw string compare therefore never matches and POS
+# read 0 for every outlet. Stripping the S-/D- prefix and resolving the rest to
+# its canonical outlet name lands both sides on one join key (all 10 outlets,
+# including the two whose names differ: kitchen "D" <-> POS "D-DAMANSARA" both
+# -> "D.U", kitchen "KLRAZAK" <-> POS "D-RAZAK" both -> "K.L Razak").
+_OUTLET_CODE_PREFIX_RE = re.compile(r"^[sd]-", re.IGNORECASE)
+
+
+def normalize_outlet_code(code):
+    """Common join key shared by a kitchen outlet_code and a POS outlet_code.
+
+    Strips the POS S-/D- prefix, then resolves the remainder to its canonical
+    outlet name (via ``outlet_resolver.canonical_outlet``) so kitchen ``KLANG``
+    and POS ``S-KLANG`` / ``D-KLANG`` all collapse to ``"Klang B.Emas"``.
+    Falls back to the upper-cased prefix-stripped code when the outlet is not in
+    the canonical registry; returns ``None`` for empty / non-string input."""
+    if not isinstance(code, str):
+        return None
+    raw = code.strip()
+    if not raw:
+        return None
+    stripped = _OUTLET_CODE_PREFIX_RE.sub("", raw).strip()
+    if not stripped:
+        return None
+    try:
+        from outlet_resolver import canonical_outlet
+        resolved = canonical_outlet(stripped)
+    except Exception:
+        resolved = None
+    return resolved or stripped.upper()
+
+
 # --- POS matching + Used arithmetic (pure) ----------------------------------
 
-# Each tracked item maps to POS dishes by keyword. POS item names from
-# sales_daily_itemwise look like "Ayam Goreng", "Ikan Kari Kepala", "Kambing
-# Masak Merah". A dish counts toward an item when its name contains the item's
-# base keyword AND the style keyword. This reuses the same "ayam/ikan" base that
-# item_canonicalization_v2 keys on, refined by style — the bot already only
-# canonicalizes to the bare "ayam", so per-style splitting is done here.
+# Each tracked item maps to POS dishes by keyword, kept on its OWN comparison
+# line (whole-leg items are NOT combined — each item's mismatch stays visible by
+# name). POS item names from sales_daily_itemwise look like "Ayam Goreng",
+# "Nasi Ayam Bawang", "Kambing Masak Merah". A dish counts toward an item when
+# its name contains the item's base keyword AND matches the item's rule, and is
+# NOT on the exclusion list (Thai-chef isi-ayam, staff meals — see
+# ``_pos_dish_excluded``).
+#
+# A rule is one of:
+#   * "phrases" — the listed words must appear ADJACENT (whole-cut only). Used
+#     for the *goreng* items so "Ayam Goreng" / "Nasi Ayam Goreng Besar" count
+#     but carb-fried "Nasi Goreng Ayam" / "Maggi Goreng Ayam" / "Mee Goreng
+#     Ayam" (ayam trailing) do NOT.
+#   * "styles" — any listed style keyword anywhere in the name. So "Ayam
+#     Bawang", "Nasi Ayam Bawang", "Nasi Separuh Ayam Bawang" and "Briyani Ayam
+#     Bawang Set" all count for ayam_bawang. Plain "Nasi Ayam" / "Nasi Separuh
+#     Ayam" carry no style, so they match nothing (correctly excluded).
+#   * neither (kambing/daging) — base match alone: ALL kambing / daging dishes.
+# "not" lists words that disqualify a dish even when the rule otherwise matches
+# (a fried "...berempah" dish is a goreng dish, not a rempah dish).
 #
 # NOTE: Telur Ikan is NOT here — it is not sold as a POS dish, it is BOUGHT by
 # weight. It is compared against kg purchased (from receipts), not POS. See
 # PURCHASE_COMPARE_CODES / purchased_kg_from_receipts below.
 ITEM_POS_KEYWORDS: dict[str, dict] = {
-    "ayam_goreng": {"base": "ayam", "style": ["goreng"]},
-    "ayam_bawang": {"base": "ayam", "style": ["bawang"]},
-    "ayam_rempah": {"base": "ayam", "style": ["rempah"]},
-    "ayam_kicap": {"base": "ayam", "style": ["kicap"]},
-    "ayam_madu": {"base": "ayam", "style": ["madu"]},
-    "ayam_tandoori": {"base": "ayam", "style": ["tandoori"]},
-    "ikan_goreng": {"base": "ikan", "style": ["goreng"]},
-    "ikan_kari": {"base": "ikan", "style": ["kari", "curry"]},
-    "kambing": {"base": "kambing", "style": []},
-    "daging": {"base": "daging", "style": []},
+    # Whole-cut fried only — "ayam goreng" must be adjacent.
+    "ayam_goreng": {"base": "ayam", "phrases": ["ayam goreng"]},
+    "ayam_bawang": {"base": "ayam", "styles": ["bawang"]},
+    # BISTRO7 only; other outlets have no kitchen line so POS shows 0 quietly.
+    "ayam_rempah": {"base": "ayam", "styles": ["rempah"], "not": ["goreng"]},
+    "ayam_kicap": {"base": "ayam", "styles": ["kicap"]},
+    "ayam_madu": {"base": "ayam", "styles": ["madu"]},
+    # "tandori" is the common POS misspelling; "...Staff" handled by exclusion.
+    "ayam_tandoori": {"base": "ayam", "styles": ["tandoori", "tandori"]},
+    "ikan_goreng": {"base": "ikan", "phrases": ["ikan goreng"]},
+    "ikan_kari": {"base": "ikan", "styles": ["kari", "curry"]},
+    "kambing": {"base": "kambing", "styles": []},
+    "daging": {"base": "daging", "styles": []},
 }
+
+# Dishes excluded from EVERY item: staff meals and anything in the POS "THAI
+# FOOD" category (matched on the itemwise row's category field). These are the
+# Thai-chef / staff meals that never appear in the kitchen log, so counting
+# their sales would manufacture false mismatches.
+_POS_STAFF_SUBSTR = "staff"
+
+# Ayam-only exclusions: Thai-chef isi-ayam noodle/rice dishes and the
+# rendang/kurma styles that are not tracked in the kitchen log. NOT applied to
+# kambing/daging — those count ALL dishes (minus staff / Thai category).
+AYAM_EXCLUDE_SUBSTRINGS = (
+    "paprik", "tomyam", "tom yam", "maggi",
+    "indomee", "indo mee",
+    "kuey teow", "kuey tiaw", "koay teow", "kuetiau", "kuey tiau",
+    "mee ", "rendang", "kurma",
+)
+
+
+def _pos_dish_excluded(name: str, category, base: str) -> bool:
+    """True when a POS dish must not count toward ANY kitchen item.
+
+    Staff meals and the THAI FOOD category are excluded for every item; the
+    isi-ayam noodle/rice + rendang/kurma exclusions apply only to ayam items."""
+    if "thai" in str(category or "").lower():
+        return True
+    if _POS_STAFF_SUBSTR in name:
+        return True
+    if base == "ayam" and any(s in name for s in AYAM_EXCLUDE_SUBSTRINGS):
+        return True
+    return False
+
+
+def _pos_dish_matches(spec: dict, name: str) -> bool:
+    """True when a dish name satisfies an item's match rule (phrases / styles /
+    base-only), and is not disqualified by the rule's ``not`` list."""
+    if any(n in name for n in spec.get("not", ())):
+        return False
+    phrases = spec.get("phrases")
+    if phrases is not None:
+        return any(p in name for p in phrases)
+    styles = spec.get("styles")
+    if styles:
+        return any(s in name for s in styles)
+    return True  # base-only (kambing / daging): all dishes
+
 
 # Locked portion sizes for the POS-compared kg items: POS sells these by the
 # portion, so the POS piece-count is converted to kg before comparing with the
@@ -394,20 +491,23 @@ def used_qty(cooked, left):
 def pos_qty_for_item(item_code: str, itemwise_rows: list) -> float:
     """Sum POS quantity sold for a tracked item from sales_daily_itemwise rows.
 
-    Each row is {item_name, qty, ...}. A row counts when its name contains the
-    item's base keyword and (if any) one of its style keywords. For kg items the
-    summed POS piece-count is converted to kg via ``KG_PORTION_GRAMS``."""
+    Each row is {item_name, qty, category, ...}. A row counts when its name
+    contains the item's base keyword, satisfies the item's match rule (phrases /
+    styles / base-only), and is not excluded (Thai-chef isi-ayam, staff meals;
+    see ``_pos_dish_excluded``). For kg items the summed POS piece-count is
+    converted to kg via ``KG_PORTION_GRAMS``."""
     spec = ITEM_POS_KEYWORDS.get(item_code)
     if not spec:
         return 0.0
     base = spec["base"]
-    styles = spec["style"]
     total = 0.0
     for row in itemwise_rows or []:
         name = str(row.get("item_name") or "").lower()
         if base not in name:
             continue
-        if styles and not any(s in name for s in styles):
+        if _pos_dish_excluded(name, row.get("category"), base):
+            continue
+        if not _pos_dish_matches(spec, name):
             continue
         try:
             total += float(row.get("qty") or 0)
@@ -796,14 +896,14 @@ def _save_session(client, session_id, **fields) -> None:
 def _fetch_itemwise(client, outlet_code, business_date) -> list:
     """POS itemwise rows for an outlet's business_date (used to compute pos_qty).
 
-    sales_daily_summary keys on outlet_canonical; kitchen keys on outlet_code.
-    We resolve the code to its canonical name and match summaries on either."""
-    try:
-        from outlet_resolver import canonical_outlet
-        canonical = canonical_outlet(outlet_code)
-    except Exception:
-        canonical = None
-    candidates = {c for c in (canonical, outlet_code) if c}
+    sales_daily_summary keys outlets with a POS S-/D- prefix (e.g. "D-KLANG")
+    while the kitchen keys them bare ("KLANG"). Both sides are reduced to one
+    join key via ``normalize_outlet_code`` so the join lands for all 10 outlets
+    (this is why POS previously read 0). Matches a summary when EITHER its
+    outlet_code or its outlet_canonical normalises to the same key."""
+    target = normalize_outlet_code(outlet_code)
+    if target is None:
+        return []
     summaries = _rows(
         client.table(SALES_SUMMARY_TABLE)
         .select("id, outlet_canonical, outlet_code")
@@ -812,13 +912,14 @@ def _fetch_itemwise(client, outlet_code, business_date) -> list:
     )
     ids = [
         s["id"] for s in summaries
-        if s.get("outlet_canonical") in candidates or s.get("outlet_code") in candidates
+        if normalize_outlet_code(s.get("outlet_code")) == target
+        or normalize_outlet_code(s.get("outlet_canonical")) == target
     ]
     if not ids:
         return []
     rows = _rows(
         client.table(SALES_ITEMWISE_TABLE)
-        .select("item_name, qty, summary_id")
+        .select("item_name, qty, category, summary_id")
         .in_("summary_id", ids)
         .execute()
     )

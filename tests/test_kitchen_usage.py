@@ -702,6 +702,230 @@ def test_pos_qty_no_match_is_zero():
     assert ku.pos_qty_for_item("ayam_tandoori", [{"item_name": "Roti Canai", "qty": 5}]) == 0.0
 
 
+# --- per-item POS mapping: each whole-leg item on its OWN line ----------------
+
+def test_ayam_goreng_whole_cut_only_excludes_carb_fried():
+    rows = [
+        {"item_name": "Ayam Goreng", "qty": 10},
+        {"item_name": "Ayam Goreng Besar", "qty": 4},
+        {"item_name": "Nasi Ayam GORENG Besar", "qty": 3},
+        {"item_name": "Nasi Ayam GORENG Besar Sayur", "qty": 2},
+        # carb-fried with ayam trailing -> NOT whole-cut, must be ignored
+        {"item_name": "Nasi Goreng Ayam", "qty": 50},
+        {"item_name": "Maggi Goreng Ayam", "qty": 20},
+        {"item_name": "Mee Goreng Ayam", "qty": 15},
+        {"item_name": "Kuey Teow Goreng Ayam", "qty": 8},
+    ]
+    assert ku.pos_qty_for_item("ayam_goreng", rows) == 19  # 10+4+3+2
+
+
+def test_ayam_bawang_counts_nasi_separuh_and_briyani():
+    rows = [
+        {"item_name": "Ayam Bawang", "qty": 5},
+        {"item_name": "Nasi Ayam Bawang", "qty": 4},
+        {"item_name": "Nasi Ayam Bawang Sayur", "qty": 3},
+        {"item_name": "Nasi Separuh Ayam Bawang", "qty": 2},
+        {"item_name": "Briyani Ayam Bawang Set", "qty": 6},
+        {"item_name": "Briyani Ayam Bawang Telur", "qty": 1},
+        # plain isi-ayam (no style) must NOT count for any item
+        {"item_name": "Nasi Ayam", "qty": 99},
+        {"item_name": "Nasi Separuh Ayam", "qty": 88},
+    ]
+    assert ku.pos_qty_for_item("ayam_bawang", rows) == 21  # 5+4+3+2+6+1
+
+
+def test_plain_isi_ayam_matches_nothing():
+    rows = [
+        {"item_name": "Nasi Ayam", "qty": 30},
+        {"item_name": "Nasi Separuh Ayam", "qty": 20},
+        {"item_name": "Isi Ayam", "qty": 10},
+    ]
+    for code in ("ayam_goreng", "ayam_bawang", "ayam_kicap",
+                 "ayam_madu", "ayam_tandoori", "ayam_rempah"):
+        assert ku.pos_qty_for_item(code, rows) == 0.0, code
+
+
+def test_ayam_kicap_matches_masak_kicap():
+    rows = [
+        {"item_name": "Ayam Masak Kicap", "qty": 7},
+        {"item_name": "Nasi Ayam Kicap", "qty": 3},
+        {"item_name": "Ayam Bawang", "qty": 99},
+    ]
+    assert ku.pos_qty_for_item("ayam_kicap", rows) == 10
+
+
+def test_ayam_madu_line():
+    rows = [
+        {"item_name": "Ayam Madu", "qty": 6},
+        {"item_name": "Nasi Ayam Madu Sayur", "qty": 2},
+    ]
+    assert ku.pos_qty_for_item("ayam_madu", rows) == 8
+
+
+def test_ayam_tandoori_excludes_staff_and_accepts_misspelling():
+    rows = [
+        {"item_name": "Ayam Tandoori", "qty": 9},
+        {"item_name": "Ayam Tandori", "qty": 4},          # common POS misspelling
+        {"item_name": "Ayam Tandori Staff", "qty": 100},  # staff meal -> excluded
+        {"item_name": "Ayam Tandoori Staff", "qty": 50},  # staff meal -> excluded
+    ]
+    assert ku.pos_qty_for_item("ayam_tandoori", rows) == 13  # 9+4
+
+
+def test_ayam_rempah_bistro_only_and_not_fried_berempah():
+    rows = [
+        {"item_name": "Ayam Rempah", "qty": 5},
+        {"item_name": "Ayam Masak Rempah", "qty": 3},
+        # a fried "...berempah" dish is a goreng dish, not rempah
+        {"item_name": "Ayam Goreng Berempah", "qty": 40},
+    ]
+    assert ku.pos_qty_for_item("ayam_rempah", rows) == 8        # 5+3, not the fried one
+    assert ku.pos_qty_for_item("ayam_goreng", rows) == 40       # fried one goes here
+
+
+def test_thai_food_category_and_thai_dishes_excluded():
+    rows = [
+        {"item_name": "Paprik Ayam", "qty": 30},
+        {"item_name": "Tomyam Ayam", "qty": 20},
+        {"item_name": "Indomee Ayam", "qty": 10},
+        # a bawang dish but flagged THAI FOOD by category -> excluded
+        {"item_name": "Ayam Bawang Thai", "qty": 12, "category": "THAI FOOD"},
+    ]
+    for code in ("ayam_goreng", "ayam_bawang", "ayam_kicap", "ayam_madu"):
+        assert ku.pos_qty_for_item(code, rows) == 0.0, code
+
+
+def test_ayam_rendang_kurma_kari_excluded():
+    rows = [
+        {"item_name": "Ayam Rendang", "qty": 10},
+        {"item_name": "Ayam Kurma", "qty": 8},
+        {"item_name": "Ayam Kari", "qty": 6},
+    ]
+    for code in ku.ITEM_POS_KEYWORDS:
+        if ku.ITEM_POS_KEYWORDS[code]["base"] == "ayam":
+            assert ku.pos_qty_for_item(code, rows) == 0.0, code
+
+
+def test_kambing_all_dishes_x180g():
+    # S-KLANG 24 Jun cross-check: ~8 kambing portions in the header.
+    rows = [
+        {"item_name": "Kambing Masak Merah", "qty": 5},
+        {"item_name": "Nasi Kambing", "qty": 2},
+        {"item_name": "Briyani Kambing Set", "qty": 1},
+    ]
+    # 8 portions * 180 g = 1.44 kg
+    assert ku.pos_qty_for_item("kambing", rows) == 1.44
+
+
+def test_daging_all_dishes_x60g():
+    # S-KLANG 24 Jun cross-check: ~4 daging portions.
+    rows = [
+        {"item_name": "Daging Masak Merah", "qty": 3},
+        {"item_name": "Nasi Daging", "qty": 1},
+    ]
+    # 4 portions * 60 g = 0.24 kg
+    assert ku.pos_qty_for_item("daging", rows) == 0.24
+
+
+def test_kambing_daging_drop_staff_but_keep_all_others():
+    rows = [
+        {"item_name": "Kambing Masak Merah", "qty": 8},
+        {"item_name": "Kambing Staff", "qty": 100},  # staff meal -> excluded
+    ]
+    assert ku.pos_qty_for_item("kambing", rows) == 1.44  # 8 * 180 / 1000
+
+
+def test_ikan_goreng_and_kari_separate_lines():
+    rows = [
+        {"item_name": "Ikan Goreng", "qty": 12},
+        {"item_name": "Ikan Kari Kepala", "qty": 7},
+        {"item_name": "Ikan Curry", "qty": 3},
+    ]
+    assert ku.pos_qty_for_item("ikan_goreng", rows) == 12
+    assert ku.pos_qty_for_item("ikan_kari", rows) == 10  # 7 + 3
+
+
+# --- outlet-code normalisation (kitchen <-> POS join) ------------------------
+
+def test_normalize_outlet_strips_pos_prefix_all_ten_outlets():
+    # (kitchen_code, pos_code) pairs must collapse to the SAME join key.
+    pairs = [
+        ("BISTRO7", "S-BISTRO7"),
+        ("SEK20", "D-SEK20"),
+        ("SEK14", "S-SEK14"),
+        ("SEK15", "D-SEK15"),
+        ("SEK6", "S-SEK6"),
+        ("VISTA", "D-VISTA"),
+        ("JAKEL", "S-JAKEL"),
+        ("D", "D-DAMANSARA"),     # names differ but resolve to D.U
+        ("KLANG", "S-KLANG"),
+        ("KLRAZAK", "D-RAZAK"),   # names differ but resolve to K.L Razak
+    ]
+    keys = set()
+    for kitchen, pos in pairs:
+        k = ku.normalize_outlet_code(kitchen)
+        assert k is not None, kitchen
+        assert k == ku.normalize_outlet_code(pos), (kitchen, pos)
+        keys.add(k)
+    # all 10 outlets resolve to 10 DISTINCT keys (no accidental collisions)
+    assert len(keys) == 10
+
+
+def test_normalize_outlet_handles_blank_and_canonical():
+    assert ku.normalize_outlet_code("") is None
+    assert ku.normalize_outlet_code(None) is None
+    # an already-canonical name is stable
+    assert ku.normalize_outlet_code("Klang B.Emas") == "Klang B.Emas"
+
+
+def test_fetch_itemwise_joins_kitchen_klang_to_pos_d_klang():
+    """The POS=0 regression: kitchen 'KLANG' must join POS 'D-KLANG' summaries."""
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    # POS daily summary stored with the D- prefix (and its canonical name).
+    fake._store[ku.SALES_SUMMARY_TABLE] = [
+        {"id": 1, "outlet_code": "D-KLANG", "outlet_canonical": "Klang B.Emas",
+         "business_date": "2026-06-24"},
+        {"id": 2, "outlet_code": "D-SEK20", "outlet_canonical": "SEK-20",
+         "business_date": "2026-06-24"},  # different outlet, must be ignored
+    ]
+    fake._store[ku.SALES_ITEMWISE_TABLE] = [
+        {"id": 10, "summary_id": 1, "item_name": "Ayam Bawang", "qty": 5,
+         "category": "AYAM"},
+        {"id": 11, "summary_id": 1, "item_name": "Kambing Masak Merah", "qty": 8,
+         "category": "KAMBING"},
+        {"id": 12, "summary_id": 2, "item_name": "Ayam Bawang", "qty": 99,
+         "category": "AYAM"},  # belongs to SEK20, must not leak in
+    ]
+    rows = ku._fetch_itemwise(fake, "KLANG", "2026-06-24")
+    names = sorted(r["item_name"] for r in rows)
+    assert names == ["Ayam Bawang", "Kambing Masak Merah"]
+    assert ku.pos_qty_for_item("ayam_bawang", rows) == 5
+    assert ku.pos_qty_for_item("kambing", rows) == 1.44  # 8 * 180 / 1000
+
+
+def test_fetch_itemwise_joins_renamed_outlets():
+    """Kitchen 'D'/'KLRAZAK' join POS 'D-DAMANSARA'/'D-RAZAK' despite name diffs."""
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store[ku.SALES_SUMMARY_TABLE] = [
+        {"id": 1, "outlet_code": "D-DAMANSARA", "outlet_canonical": "D.U",
+         "business_date": "2026-06-24"},
+        {"id": 2, "outlet_code": "D-RAZAK", "outlet_canonical": "K.L Razak",
+         "business_date": "2026-06-24"},
+    ]
+    fake._store[ku.SALES_ITEMWISE_TABLE] = [
+        {"id": 10, "summary_id": 1, "item_name": "Ayam Madu", "qty": 3},
+        {"id": 11, "summary_id": 2, "item_name": "Ayam Madu", "qty": 7},
+    ]
+    du = ku._fetch_itemwise(fake, "D", "2026-06-24")
+    assert ku.pos_qty_for_item("ayam_madu", du) == 3
+    razak = ku._fetch_itemwise(fake, "KLRAZAK", "2026-06-24")
+    assert ku.pos_qty_for_item("ayam_madu", razak) == 7
+
+
 # --- dual-gate mismatch flag -------------------------------------------------
 
 def test_flag_pcs_leak_passes_both_gates():

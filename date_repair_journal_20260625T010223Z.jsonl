@@ -1,0 +1,3 @@
+{"table": "receipts", "id": 1, "old": "2026-08-22", "new": "2026-05-22", "kind": "INGEST_FALLBACK", "applied_at": "2026-06-25T01:02:23.971887+00:00"}
+{"table": "receipts", "id": 2, "old": "2024-05-08", "new": "2026-05-08", "kind": "YEAR_FIX", "applied_at": "2026-06-25T01:02:23.971951+00:00"}
+{"table": "item_prices", "id": 4, "old": "2026-12-16", "new": "2026-06-10", "kind": "INGEST_FALLBACK", "applied_at": "2026-06-25T01:02:23.972017+00:00"}
