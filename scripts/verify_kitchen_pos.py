@@ -53,23 +53,28 @@ def _rows(resp):
     return getattr(resp, "data", None) or []
 
 
-def _fetch_matched(client, outlet_code, business_date):
-    """READ-ONLY: matched summaries + all their itemwise rows for one date.
-
-    Mirrors ``kitchen_usage._fetch_itemwise`` join (normalize both sides) but
-    also returns the matched summary metadata so the report can show exactly
-    which POS rows (and which outlet_code/canonical) were joined."""
-    target = ku.normalize_outlet_code(outlet_code)
-    summaries = _rows(
+def _summaries_for_date(client, business_date):
+    """READ-ONLY: every sales_daily_summary row for one business_date."""
+    return _rows(
         client.table(ku.SALES_SUMMARY_TABLE)
         .select("id, outlet_canonical, outlet_code, business_date")
         .eq("business_date", str(business_date))
         .execute()
     )
+
+
+def _fetch_matched(client, outlet_code, business_date):
+    """READ-ONLY: matched summaries + all their itemwise rows for one date.
+
+    Mirrors ``kitchen_usage._fetch_itemwise`` join (outlet_join_keys intersect on
+    both sides) and also returns ALL summaries for the date so the report can
+    show exactly which POS rows were (or were not) joined."""
+    target_keys = ku.outlet_join_keys(outlet_code)
+    summaries = _summaries_for_date(client, business_date)
     matched = [
         s for s in summaries
-        if ku.normalize_outlet_code(s.get("outlet_code")) == target
-        or ku.normalize_outlet_code(s.get("outlet_canonical")) == target
+        if (ku.outlet_join_keys(s.get("outlet_code")) & target_keys)
+        or (ku.outlet_join_keys(s.get("outlet_canonical")) & target_keys)
     ]
     ids = [s["id"] for s in matched]
     items = []
@@ -80,7 +85,26 @@ def _fetch_matched(client, outlet_code, business_date):
             .in_("summary_id", ids)
             .execute()
         )
-    return target, matched, items
+    return target_keys, summaries, matched, items
+
+
+def _scan_outlet_across_dates(client, outlet_code, limit=400):
+    """READ-ONLY diagnostic: which business_dates DO have a summary for this
+    outlet, so a 'no match' is shown to be a missing-date vs a join bug."""
+    target_keys = ku.outlet_join_keys(outlet_code)
+    rows = _rows(
+        client.table(ku.SALES_SUMMARY_TABLE)
+        .select("outlet_code, outlet_canonical, business_date")
+        .order("business_date", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    hits = [
+        r for r in rows
+        if (ku.outlet_join_keys(r.get("outlet_code")) & target_keys)
+        or (ku.outlet_join_keys(r.get("outlet_canonical")) & target_keys)
+    ]
+    return hits
 
 
 def _qty(row):
@@ -141,12 +165,33 @@ def _fmt(n):
 def report(client, outlet_code, business_date):
     print("=" * 70)
     print(f"OUTLET {outlet_code!r}   business_date {business_date}")
-    target, summaries, items = _fetch_matched(client, outlet_code, business_date)
-    print(f"normalize_outlet_code({outlet_code!r}) -> {target!r}")
-    if not summaries:
-        print("  NO matching sales_daily_summary row for this outlet/date.")
+    target_keys, all_summaries, matched, items = _fetch_matched(
+        client, outlet_code, business_date
+    )
+    print(f"outlet_join_keys({outlet_code!r}) -> {sorted(target_keys)}")
+    print(f"  {len(all_summaries)} total summary row(s) exist for {business_date}.")
+    if not matched:
+        print("  NO matching sales_daily_summary row for this outlet/date.\n")
+        print("  --- DIAGNOSTIC: all summary rows present for this date ---")
+        if not all_summaries:
+            print("    (zero summary rows for this date — not ingested yet?)")
+        for s in all_summaries:
+            print(
+                f"    outlet_code={s.get('outlet_code')!r:14} "
+                f"outlet_canonical={s.get('outlet_canonical')!r:18} "
+                f"-> keys {sorted(ku.outlet_join_keys(s.get('outlet_code')) | ku.outlet_join_keys(s.get('outlet_canonical')))}"
+            )
+        print(f"\n  --- DIAGNOSTIC: dates this outlet ({outlet_code!r}) DOES have summaries ---")
+        hits = _scan_outlet_across_dates(client, outlet_code)
+        if not hits:
+            print("    (none found in the recent scan — outlet may use a different code)")
+        for h in hits[:25]:
+            print(
+                f"    {h.get('business_date')}  outlet_code={h.get('outlet_code')!r} "
+                f"outlet_canonical={h.get('outlet_canonical')!r}"
+            )
         return
-    for s in summaries:
+    for s in matched:
         print(
             f"  matched summary id={s['id']} "
             f"outlet_code={s.get('outlet_code')!r} "
@@ -240,6 +285,35 @@ def report(client, outlet_code, business_date):
     print()
 
 
+ALL_KITCHEN_OUTLETS = ("BISTRO7", "SEK20", "SEK14", "SEK15", "SEK6",
+                       "VISTA", "JAKEL", "D", "KLANG", "KLRAZAK")
+
+
+def print_outlet_resolution(client=None):
+    """Print, for all 10 kitchen outlets, the join keys they resolve to and the
+    POS outlet_codes actually present in sales_daily_summary that join to them."""
+    print("=" * 70)
+    print("ALL 10 OUTLETS — kitchen code -> join keys (and live POS codes)")
+    live = []
+    if client is not None:
+        live = _rows(
+            client.table(ku.SALES_SUMMARY_TABLE)
+            .select("outlet_code, outlet_canonical")
+            .limit(2000)
+            .execute()
+        )
+    for code in ALL_KITCHEN_OUTLETS:
+        keys = ku.outlet_join_keys(code)
+        pos_codes = sorted({
+            r.get("outlet_code") for r in live
+            if (ku.outlet_join_keys(r.get("outlet_code")) & keys)
+            or (ku.outlet_join_keys(r.get("outlet_canonical")) & keys)
+        }) if live else []
+        suffix = f"   live POS outlet_code(s): {pos_codes}" if client is not None else ""
+        print(f"  {code:9} -> keys {sorted(keys)}{suffix}")
+    print()
+
+
 def main():
     ap = argparse.ArgumentParser(description="READ-ONLY kitchen Used-vs-POS mapping check.")
     ap.add_argument("--outlet", default=DEFAULT_OUTLET,
@@ -250,6 +324,7 @@ def main():
     dates = [d.strip() for d in args.dates.split(",") if d.strip()]
 
     client = _build_client()
+    print_outlet_resolution(client)
     for d in dates:
         report(client, args.outlet, d)
     print("READ-ONLY: no rows were written.")
