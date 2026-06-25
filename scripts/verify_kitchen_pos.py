@@ -3,26 +3,28 @@
 
 Pulls the real ``sales_daily_summary`` + ``sales_daily_itemwise`` rows for an
 outlet/date, runs the EXACT shipped mapping (``kitchen_usage`` —
-``normalize_outlet_code``, ``ITEM_POS_KEYWORDS``, ``_pos_dish_matches``,
+``outlet_join_keys``, ``ITEM_POS_KEYWORDS``, ``_pos_dish_matches``,
 ``_pos_dish_excluded``, ``pos_qty_for_item``) and prints, per kitchen item:
   * every matched POS dish name + its qty, and the rolled-up total
   * the kg-equivalent for Kambing/Daging (portions x locked grams)
-then prints:
-  * a category cross-check — computed protein count vs the POS category header
-    total (AYAM / KAMBING / DAGING), with matched + excluded = header so nothing
-    is silently lost
-  * the explicit EXCLUDED list (isi ayam / Thai / staff / no-style) with the
-    reason each dish was dropped
+then prints the EXCLUDED dishes (isi ayam / Thai / staff / no-style) with the
+reason each was dropped, and CLASSIFICATION NOTES for dishes whose treatment is
+an owner decision (Ayam Rendang, plain Briyani Ayam).
 
-NOTHING is written. Only ``.select()`` queries are issued — safe to run on the
-live database. The mapping logic is imported, never re-implemented, so what this
-prints is what the bot computes.
+It is heavily INSTRUMENTED: each retrieval stage prints its raw counts (summary
+rows for the date, resolved summary_id(s), itemwise rows pulled, categories
+present) so a "0" is traceable to the exact failing stage. Retrieval is robust:
+the server-side date filter is tried first, then a client-side date filter
+fallback; the itemwise fetch is paginated past the PostgREST 1000-row cap.
+
+NOTHING is written — only ``.select()`` queries are issued. The mapping logic is
+imported from kitchen_usage (never re-implemented), so its output is exactly what
+the bot computes.
 
 Run on the Render shell (or locally with the prod env vars)::
 
     SUPABASE_URL=... SUPABASE_KEY=... python scripts/verify_kitchen_pos.py
-    # custom outlet / dates:
-    python scripts/verify_kitchen_pos.py --outlet KLANG --dates 2026-06-23,2026-06-24
+    python scripts/verify_kitchen_pos.py --outlet KLANG --dates 2026-06-23
 """
 from __future__ import annotations
 
@@ -34,10 +36,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import kitchen_usage as ku  # noqa: E402
 
-# Default to the outlet the owner cross-checks (kitchen "KLANG" joins POS
-# S-KLANG / D-KLANG) over the two business days from the brief.
 DEFAULT_OUTLET = "KLANG"
 DEFAULT_DATES = ["2026-06-23", "2026-06-24"]
+
+ALL_KITCHEN_OUTLETS = ("BISTRO7", "SEK20", "SEK14", "SEK15", "SEK6",
+                       "VISTA", "JAKEL", "D", "KLANG", "KLRAZAK")
+
+# Style/phrase markers that make an ayam dish a TRACKED item (used only to flag
+# "plain" briyani/nasi ayam that carry none of them — an owner decision).
+_AYAM_STYLE_MARKERS = ("bawang", "kicap", "madu", "tandoori", "tandori",
+                       "rempah", "ayam goreng")
 
 
 def _build_client():
@@ -49,62 +57,27 @@ def _build_client():
     return create_client(url, key)
 
 
-def _rows(resp):
-    return getattr(resp, "data", None) or []
+def _safe(label, thunk):
+    """Run a query thunk; print and swallow any error, returning ``.data`` or []."""
+    try:
+        resp = thunk()
+        return getattr(resp, "data", None) or []
+    except Exception as exc:  # pragma: no cover - live-DB diagnostics
+        print(f"  !! query FAILED [{label}]: {type(exc).__name__}: {exc}")
+        return []
 
 
-def _summaries_for_date(client, business_date):
-    """READ-ONLY: every sales_daily_summary row for one business_date."""
-    return _rows(
-        client.table(ku.SALES_SUMMARY_TABLE)
-        .select("id, outlet_canonical, outlet_code, business_date")
-        .eq("business_date", str(business_date))
-        .execute()
-    )
-
-
-def _fetch_matched(client, outlet_code, business_date):
-    """READ-ONLY: matched summaries + all their itemwise rows for one date.
-
-    Mirrors ``kitchen_usage._fetch_itemwise`` join (outlet_join_keys intersect on
-    both sides) and also returns ALL summaries for the date so the report can
-    show exactly which POS rows were (or were not) joined."""
-    target_keys = ku.outlet_join_keys(outlet_code)
-    summaries = _summaries_for_date(client, business_date)
-    matched = [
-        s for s in summaries
-        if (ku.outlet_join_keys(s.get("outlet_code")) & target_keys)
-        or (ku.outlet_join_keys(s.get("outlet_canonical")) & target_keys)
-    ]
-    ids = [s["id"] for s in matched]
-    items = []
-    if ids:
-        items = _rows(
-            client.table(ku.SALES_ITEMWISE_TABLE)
-            .select("item_name, qty, category, summary_id")
-            .in_("summary_id", ids)
-            .execute()
-        )
-    return target_keys, summaries, matched, items
-
-
-def _scan_outlet_across_dates(client, outlet_code, limit=400):
-    """READ-ONLY diagnostic: which business_dates DO have a summary for this
-    outlet, so a 'no match' is shown to be a missing-date vs a join bug."""
-    target_keys = ku.outlet_join_keys(outlet_code)
-    rows = _rows(
-        client.table(ku.SALES_SUMMARY_TABLE)
-        .select("outlet_code, outlet_canonical, business_date")
-        .order("business_date", desc=True)
-        .limit(limit)
-        .execute()
-    )
-    hits = [
-        r for r in rows
-        if (ku.outlet_join_keys(r.get("outlet_code")) & target_keys)
-        or (ku.outlet_join_keys(r.get("outlet_canonical")) & target_keys)
-    ]
-    return hits
+def _paged(label, query_fn, page=1000, cap=50000):
+    """Fetch a select in <=``page``-row pages (PostgREST caps each request)."""
+    out, start = [], 0
+    while start < cap:
+        chunk = _safe(f"{label}[{start}:{start + page}]",
+                      lambda s=start: query_fn().range(s, s + page - 1).execute())
+        out.extend(chunk)
+        if len(chunk) < page:
+            break
+        start += page
+    return out
 
 
 def _qty(row):
@@ -114,9 +87,74 @@ def _qty(row):
         return 0.0
 
 
+def _fmt(n):
+    return f"{n:g}"
+
+
+# --- retrieval (robust + instrumented) --------------------------------------
+
+def _resolve_summaries(client, outlet_code, business_date):
+    """(matched_summaries, all_for_date, note). Server-side date filter first;
+    if it returns nothing, scan recent summaries and filter the date client-side
+    (catches a date-type/format quirk in the server-side eq)."""
+    date_str = str(business_date)[:10]
+    note = "server-side eq(business_date)"
+    all_for_date = _safe(
+        "summaries.eq(business_date)",
+        lambda: client.table(ku.SALES_SUMMARY_TABLE)
+        .select("id, outlet_canonical, outlet_code, business_date")
+        .eq("business_date", date_str)
+        .execute(),
+    )
+    if not all_for_date:
+        note = "client-side date filter (server eq returned 0)"
+        scanned = _paged(
+            "summaries.scan",
+            lambda: client.table(ku.SALES_SUMMARY_TABLE)
+            .select("id, outlet_canonical, outlet_code, business_date")
+            .order("business_date", desc=True),
+        )
+        all_for_date = [s for s in scanned if str(s.get("business_date"))[:10] == date_str]
+    tkeys = ku.outlet_join_keys(outlet_code)
+    matched = [
+        s for s in all_for_date
+        if (ku.outlet_join_keys(s.get("outlet_code")) & tkeys)
+        or (ku.outlet_join_keys(s.get("outlet_canonical")) & tkeys)
+    ]
+    return matched, all_for_date, note
+
+
+def _fetch_itemwise_rows(client, summary_ids):
+    if not summary_ids:
+        return []
+    return _paged(
+        "itemwise.in(summary_id)",
+        lambda: client.table(ku.SALES_ITEMWISE_TABLE)
+        .select("item_name, qty, category, summary_id")
+        .in_("summary_id", summary_ids),
+    )
+
+
+def _scan_outlet_across_dates(client, outlet_code, limit=600):
+    tkeys = ku.outlet_join_keys(outlet_code)
+    rows = _safe(
+        "summaries.recent",
+        lambda: client.table(ku.SALES_SUMMARY_TABLE)
+        .select("outlet_code, outlet_canonical, business_date")
+        .order("business_date", desc=True)
+        .limit(limit)
+        .execute(),
+    )
+    return [
+        r for r in rows
+        if (ku.outlet_join_keys(r.get("outlet_code")) & tkeys)
+        or (ku.outlet_join_keys(r.get("outlet_canonical")) & tkeys)
+    ]
+
+
+# --- classification (mirrors shipped matchers) ------------------------------
+
 def _exclusion_reason(name_l, category, base):
-    """Why a dish that CONTAINS a tracked base keyword was not counted, mirroring
-    ``_pos_dish_excluded`` plus the no-style / no-phrase fall-through."""
     if "thai" in str(category or "").lower():
         return "THAI FOOD category"
     if ku._POS_STAFF_SUBSTR in name_l:
@@ -128,82 +166,96 @@ def _exclusion_reason(name_l, category, base):
     return "isi ayam / no tracked style keyword"
 
 
-def _classify(name, category):
-    """Return (matched_item_codes, exclusion_reason_or_None, has_tracked_base).
+def _print_classification_notes(items):
+    """Flag dishes whose treatment is an OWNER decision (not guessed)."""
+    print("\n--- CLASSIFICATION NOTES — needs your decision (not guessed) ---")
+    flagged = False
 
-    Uses the shipped matchers so classification == what pos_qty_for_item sums."""
-    name_l = str(name or "").lower()
-    matched = []
-    reason = None
-    has_base = False
-    for code, spec in ku.ITEM_POS_KEYWORDS.items():
-        base = spec["base"]
-        if base not in name_l:
+    rendang = [r for r in items
+               if "ayam" in str(r.get("item_name") or "").lower()
+               and "rendang" in str(r.get("item_name") or "").lower()]
+    if rendang:
+        flagged = True
+        tot = sum(_qty(r) for r in rendang)
+        print("  * Ayam Rendang — CURRENTLY EXCLUDED (in AYAM_EXCLUDE_SUBSTRINGS):")
+        for r in rendang:
+            print(f"      {r.get('item_name')!r} qty {_fmt(_qty(r))}")
+        print(f"    You noted: 3 rendang = 1 whole pc. So {_fmt(tot)} rendang ~= "
+              f"{_fmt(tot / 3.0)} pc if counted as its own item at a 3:1 ratio.")
+        print("    DECISION: keep excluded, or add an ayam_rendang line (3 dishes = 1 pc)?")
+
+    plain_briyani = []
+    for r in items:
+        n = str(r.get("item_name") or "").lower()
+        if "ayam" not in n:
             continue
-        has_base = True
-        if ku._pos_dish_excluded(name_l, category, base):
-            if reason is None:
-                reason = _exclusion_reason(name_l, category, base)
+        if "briyani" not in n and "biriyani" not in n and "briani" not in n:
             continue
-        if ku._pos_dish_matches(spec, name_l):
-            matched.append(code)
-    if not matched and has_base and reason is None:
-        # base present but no rule matched (plain isi ayam, etc.)
-        any_base = next(
-            ku.ITEM_POS_KEYWORDS[c]["base"]
-            for c in ku.ITEM_POS_KEYWORDS
-            if ku.ITEM_POS_KEYWORDS[c]["base"] in name_l
-        )
-        reason = _exclusion_reason(name_l, category, any_base)
-    return matched, reason, has_base
+        if any(m in n for m in _AYAM_STYLE_MARKERS):
+            continue  # has a tracked style (e.g. Briyani Ayam Bawang) -> already counted
+        plain_briyani.append(r)
+    if plain_briyani:
+        flagged = True
+        print("  * Plain Briyani Ayam (no bawang/goreng/kicap/etc) — CURRENTLY EXCLUDED")
+        print("    as isi ayam (no tracked style keyword):")
+        for r in plain_briyani:
+            print(f"      {r.get('item_name')!r} qty {_fmt(_qty(r))}")
+        print("    DECISION: confirm these are isi ayam (exclude), or whole-cut "
+              "that should count toward an item?")
+
+    if not flagged:
+        print("  (none of the decision-flagged patterns present)")
 
 
-def _fmt(n):
-    return f"{n:g}"
-
+# --- report ------------------------------------------------------------------
 
 def report(client, outlet_code, business_date):
     print("=" * 70)
     print(f"OUTLET {outlet_code!r}   business_date {business_date}")
-    target_keys, all_summaries, matched, items = _fetch_matched(
-        client, outlet_code, business_date
-    )
-    print(f"outlet_join_keys({outlet_code!r}) -> {sorted(target_keys)}")
-    print(f"  {len(all_summaries)} total summary row(s) exist for {business_date}.")
+    tkeys = ku.outlet_join_keys(outlet_code)
+    print(f"outlet_join_keys({outlet_code!r}) -> {sorted(tkeys)}")
+
+    matched, all_for_date, note = _resolve_summaries(client, outlet_code, business_date)
+    print(f"  [stage 1] summary rows for date: {len(all_for_date)}  ({note})")
+
     if not matched:
         print("  NO matching sales_daily_summary row for this outlet/date.\n")
-        print("  --- DIAGNOSTIC: all summary rows present for this date ---")
-        if not all_summaries:
-            print("    (zero summary rows for this date — not ingested yet?)")
-        for s in all_summaries:
-            print(
-                f"    outlet_code={s.get('outlet_code')!r:14} "
-                f"outlet_canonical={s.get('outlet_canonical')!r:18} "
-                f"-> keys {sorted(ku.outlet_join_keys(s.get('outlet_code')) | ku.outlet_join_keys(s.get('outlet_canonical')))}"
-            )
-        print(f"\n  --- DIAGNOSTIC: dates this outlet ({outlet_code!r}) DOES have summaries ---")
+        print("  --- DIAGNOSTIC: every summary row present for this date ---")
+        if not all_for_date:
+            print("    (zero summary rows for this date — not ingested, or date mismatch)")
+        for s in all_for_date:
+            keys = ku.outlet_join_keys(s.get("outlet_code")) | ku.outlet_join_keys(s.get("outlet_canonical"))
+            print(f"    id={s.get('id')} outlet_code={s.get('outlet_code')!r:14} "
+                  f"outlet_canonical={s.get('outlet_canonical')!r:18} keys={sorted(keys)}")
+        print(f"\n  --- DIAGNOSTIC: dates {outlet_code!r} DOES have summaries (recent) ---")
         hits = _scan_outlet_across_dates(client, outlet_code)
         if not hits:
-            print("    (none found in the recent scan — outlet may use a different code)")
+            print("    (none found — outlet may use a different code, or RLS/key hides the table)")
         for h in hits[:25]:
-            print(
-                f"    {h.get('business_date')}  outlet_code={h.get('outlet_code')!r} "
-                f"outlet_canonical={h.get('outlet_canonical')!r}"
-            )
+            print(f"    {h.get('business_date')}  outlet_code={h.get('outlet_code')!r} "
+                  f"outlet_canonical={h.get('outlet_canonical')!r}")
         return
+
+    ids = [s["id"] for s in matched]
+    print(f"  [stage 2] RESOLVED summary_id(s) for {outlet_code!r}: {ids}")
     for s in matched:
-        print(
-            f"  matched summary id={s['id']} "
-            f"outlet_code={s.get('outlet_code')!r} "
-            f"outlet_canonical={s.get('outlet_canonical')!r}"
-        )
-    print(f"  {len(items)} itemwise dish rows pulled.\n")
+        print(f"            id={s['id']} outlet_code={s.get('outlet_code')!r} "
+              f"outlet_canonical={s.get('outlet_canonical')!r} "
+              f"business_date={s.get('business_date')!r}")
+
+    items = _fetch_itemwise_rows(client, ids)
+    print(f"  [stage 3] itemwise rows pulled: {len(items)}")
+    if not items:
+        print("  !! summary FOUND but ZERO itemwise rows — itemwise retrieval issue "
+              "(check summary_id type / RLS on sales_daily_itemwise).")
+        return
+    cats = sorted({str(r.get("category")) for r in items})
+    print(f"  [stage 4] categories present (menu sections, NOT proteins): {cats}\n")
 
     # --- per kitchen item: matched dishes + total -----------------------------
     print("--- PER KITCHEN ITEM: matched POS dishes ---")
-    item_codes = [c for c in ku.ITEM_POS_KEYWORDS]  # ordered as defined
     matched_by_dish = {}  # id(row) -> [codes]
-    for code in item_codes:
+    for code in ku.ITEM_POS_KEYWORDS:
         spec = ku.ITEM_POS_KEYWORDS[code]
         base = spec["base"]
         unit = ku.ITEM_BY_CODE.get(code, {}).get("unit", "pcs")
@@ -223,29 +275,28 @@ def report(client, outlet_code, business_date):
         if not hits:
             print("    (no matching POS dish)")
         for r in hits:
-            print(f"    + {r.get('item_name')!r:42} qty {_fmt(_qty(r))}  [{r.get('category')}]")
+            print(f"    + {str(r.get('item_name')):42} qty {_fmt(_qty(r))}  [{r.get('category')}]")
         if unit == "kg":
             grams = ku.KG_PORTION_GRAMS.get(code, 0.0)
             print(f"    = {_fmt(portions)} portions x {_fmt(grams)} g = {total_qty} kg")
         else:
             print(f"    = TOTAL {total_qty} pcs")
 
-    # --- excluded dishes (carry a tracked base but dropped) -------------------
+    # --- excluded dishes (carry a protein word but dropped) -------------------
     print("\n--- EXCLUDED dishes (contain a protein word but NOT counted) ---")
+    proteins = ("ayam", "ikan", "kambing", "daging")
     excluded_any = False
     for row in items:
         if id(row) in matched_by_dish:
             continue
-        codes, reason, has_base = _classify(row.get("item_name"), row.get("category"))
-        if codes:
-            continue  # actually matched (shouldn't reach here)
-        if not has_base:
-            continue  # not a tracked protein at all (Nasi Putih, Roti, etc.)
+        name_l = str(row.get("item_name") or "").lower()
+        base = next((p for p in proteins if p in name_l), None)
+        if base is None:
+            continue  # not a tracked protein at all (Nasi Putih, Roti, drinks...)
         excluded_any = True
-        print(
-            f"  - {row.get('item_name')!r:42} qty {_fmt(_qty(row))} "
-            f"[{row.get('category')}]  -> {reason}"
-        )
+        reason = _exclusion_reason(name_l, row.get("category"), base)
+        print(f"  - {str(row.get('item_name')):42} qty {_fmt(_qty(row))} "
+              f"[{row.get('category')}]  -> {reason}")
     if not excluded_any:
         print("  (none)")
 
@@ -257,50 +308,28 @@ def report(client, outlet_code, business_date):
             if id(row) in dbl:
                 print(f"     {row.get('item_name')!r} -> {dbl[id(row)]}")
 
-    # --- category header cross-check -----------------------------------------
-    print("\n--- CATEGORY CROSS-CHECK (matched + excluded = POS header) ---")
-    for cat_key, label in (("ayam", "AYAM"), ("kambing", "KAMBING"), ("daging", "DAGING")):
-        cat_rows = [
-            r for r in items
-            if cat_key in str(r.get("category") or "").lower()
-        ]
-        header = sum(_qty(r) for r in cat_rows)
-        matched_pcs = 0.0
-        excluded_pcs = 0.0
-        for r in cat_rows:
-            if id(r) in matched_by_dish:
-                matched_pcs += _qty(r)
-            else:
-                excluded_pcs += _qty(r)
-        ok = abs((matched_pcs + excluded_pcs) - header) < 1e-6
-        line = (
-            f"  {label:8} header={_fmt(header)}  "
-            f"matched={_fmt(matched_pcs)}  excluded={_fmt(excluded_pcs)}  "
-            f"(matched+excluded={'OK' if ok else 'MISMATCH'})"
-        )
-        if cat_key in ("kambing", "daging"):
-            grams = ku.KG_PORTION_GRAMS.get(cat_key, 0.0)
-            line += f"  -> {round(matched_pcs * grams / 1000.0, 2)} kg"
-        print(line)
+    # --- integrity (item_name based, NOT the menu category) -------------------
+    prot_rows = [r for r in items
+                 if any(p in str(r.get("item_name") or "").lower() for p in proteins)]
+    matched_n = sum(1 for r in prot_rows if id(r) in matched_by_dish)
+    print(f"\n--- INTEGRITY: {len(prot_rows)} protein-bearing dishes -> "
+          f"{matched_n} matched, {len(prot_rows) - matched_n} excluded "
+          f"(eyeball the EXCLUDED list above; nothing should be wrongly dropped) ---")
+
+    _print_classification_notes(items)
     print()
 
 
-ALL_KITCHEN_OUTLETS = ("BISTRO7", "SEK20", "SEK14", "SEK15", "SEK6",
-                       "VISTA", "JAKEL", "D", "KLANG", "KLRAZAK")
-
-
 def print_outlet_resolution(client=None):
-    """Print, for all 10 kitchen outlets, the join keys they resolve to and the
-    POS outlet_codes actually present in sales_daily_summary that join to them."""
+    """For all 10 kitchen outlets: join keys + the live POS outlet_code(s) seen."""
     print("=" * 70)
     print("ALL 10 OUTLETS — kitchen code -> join keys (and live POS codes)")
     live = []
     if client is not None:
-        live = _rows(
-            client.table(ku.SALES_SUMMARY_TABLE)
-            .select("outlet_code, outlet_canonical")
-            .limit(2000)
-            .execute()
+        live = _paged(
+            "summaries.codes",
+            lambda: client.table(ku.SALES_SUMMARY_TABLE)
+            .select("outlet_code, outlet_canonical"),
         )
     for code in ALL_KITCHEN_OUTLETS:
         keys = ku.outlet_join_keys(code)

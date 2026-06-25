@@ -938,16 +938,31 @@ def _fetch_itemwise(client, outlet_code, business_date) -> list:
     outlet_code OR its outlet_canonical shares an ``outlet_join_keys`` value with
     the kitchen code — the bare stripped code (KLANG) and the canonical name
     (Klang B.Emas) both bridge, so the join lands for all 10 outlets (this is why
-    POS previously read 0)."""
+    POS previously read 0).
+
+    Retrieval is hardened: if the server-side ``business_date`` filter returns
+    nothing (date-type/format quirks have been seen), it falls back to scanning
+    recent summaries and filtering the date client-side; the itemwise fetch is
+    paginated so a busy day past the PostgREST 1000-row cap is fully read."""
     target_keys = outlet_join_keys(outlet_code)
     if not target_keys:
         return []
+    date_str = str(business_date)[:10]
     summaries = _rows(
         client.table(SALES_SUMMARY_TABLE)
-        .select("id, outlet_canonical, outlet_code")
-        .eq("business_date", str(business_date))
+        .select("id, outlet_canonical, outlet_code, business_date")
+        .eq("business_date", date_str)
         .execute()
     )
+    if not summaries:
+        scanned = _rows(
+            client.table(SALES_SUMMARY_TABLE)
+            .select("id, outlet_canonical, outlet_code, business_date")
+            .order("business_date", desc=True)
+            .limit(5000)
+            .execute()
+        )
+        summaries = [s for s in scanned if str(s.get("business_date"))[:10] == date_str]
     ids = [
         s["id"] for s in summaries
         if (outlet_join_keys(s.get("outlet_code")) & target_keys)
@@ -955,12 +970,21 @@ def _fetch_itemwise(client, outlet_code, business_date) -> list:
     ]
     if not ids:
         return []
-    rows = _rows(
-        client.table(SALES_ITEMWISE_TABLE)
-        .select("item_name, qty, category, summary_id")
-        .in_("summary_id", ids)
-        .execute()
-    )
+    rows = []
+    page = 1000
+    start = 0
+    while True:
+        chunk = _rows(
+            client.table(SALES_ITEMWISE_TABLE)
+            .select("item_name, qty, category, summary_id")
+            .in_("summary_id", ids)
+            .range(start, start + page - 1)
+            .execute()
+        )
+        rows.extend(chunk)
+        if len(chunk) < page:
+            break
+        start += page
     return rows
 
 
