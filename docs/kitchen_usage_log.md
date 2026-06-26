@@ -210,16 +210,66 @@ Dual-gate flag (both gates must trip):
 - The comparison is POS sold for every item except **Telur Ikan**, which is kg
   purchased ("X kg guna vs Y kg beli").
 
-Right after LEFT is submitted, a mini Used-vs-POS recap is posted to the group
-(`render_mini_summary`). `pos_qty` and `mismatch_flag` are persisted on the
-`kitchen_daily_usage` rows.
+### Two-stage timing (POS isn't ingested at 02:00)
+
+Same-day POS sales arrive via the **~7AM** sales email, so at 02:00 (when LEFT is
+keyed) POS is always 0 — comparing then produced false 🔴 leak flags. The digest
+is therefore split into two stages:
+
+- **STAGE 1 — 02:00, right after LEFT is submitted** (`render_save_confirmation`):
+  a **save confirmation + usage only**, header *"✅ Rekod siap — Guna [outlet]
+  [business_date]"*, one line per item showing **masak / baki / guna**
+  (cooked / left / used). **No POS comparison, no flags.** `finalize_submission`
+  no longer writes `pos_qty` / `mismatch_flag` — they stay NULL until Stage 2.
+
+- **STAGE 2 — 09:00, gated on POS COMPLETENESS** (`post_comparison_digests`,
+  scheduled in `bot.py`; retries at 11:00 and 14:00 via
+  `post_comparison_digests_retry`): the real **Used-vs-POS comparison**
+  (`render_mini_summary`, v12-aware classification + dual-gate flags) for the
+  business day that just closed at 02:00. `evaluate_outlet_day` persists `pos_qty`
+  + `mismatch_flag` on the `kitchen_daily_usage` rows.
+
+  **Why completeness matters (the two-shift POS day).** A 24h outlet reports its
+  POS in **two shift-close emails** that BOTH fold to the same `business_date`:
+  the **~7PM day shift** (closes the same evening) and the **~7AM-next-day
+  overnight shift** (started the prior evening, closes after midnight). So a
+  business day's true 24h POS total = both shifts combined, and the second email
+  doesn't arrive until ~7AM the next day. Comparing before both are in would be
+  against a **half-day** of sales. STAGE 2 therefore checks completeness via
+  `pos_shift_coverage` / `pos_complete_for_outlet` and only compares when:
+  - the **D-file daily summary** (`sales_daily_summary`, which carries the
+    itemwise quantities used for the comparison) exists, **and**
+  - the **overnight shift** is present in `sales_daily` (`shift_type='overnight'`
+    for that outlet+`business_date`) — proof the post-midnight portion closed and
+    was reported.
+
+  **Fold is correct (verified).** `sales_parser.determine_shift_type_and_business_date`
+  dates the day shift (closes 17–22h) to the close date and the overnight shift
+  (closes 5–10h) to the close date **− 1 day**, so both shifts of business day D
+  map to `business_date = D` — the SAME day the kitchen folds 18:00 D / 00:00 D+1
+  / 02:00 D+1 into. The D-file (`sales_daily_parser.business_date_for_printed`)
+  folds the same way. No fold mismatch; `scripts/report_shift_coverage.py` prints
+  the live shift rows per `business_date` to confirm on real data.
+
+  **Business date:** before noon (09:00, 11:00) the just-closed day is
+  `business_date_for(now)` (noon-fold); the **14:00** retry is past noon, so it is
+  pinned to `now − 1 day` to keep targeting the SAME closed day.
+
+  **Safety / idempotency:** until POS is complete, the outlet shows
+  **"⏳ POS belum lengkap"** (detail naming what's missing — nothing yet vs the
+  overnight shift) and is **never flagged** (deferred — the 09:00 run notifies
+  once; the 11:00/14:00 retries stay silent, then post once POS completes). A day
+  already reconciled (`pos_qty` set) or with an incomplete COOKED/LEFT record is
+  skipped.
 
 ## Digest
 
 The 23:00 **Daily Intelligence digest** appends a **🍳 KITCHEN USAGE vs POS**
 section per outlet for the just-completed business day (yesterday at digest
-time). If COOKED or LEFT is missing for an outlet, the row reads **"Rekod tak
-lengkap"** instead of a false mismatch.
+time). It reads the `pos_qty` / `mismatch_flag` written by the 09:00 Stage 2 job
+(which ran earlier the same day), so by 23:00 the values are present. If COOKED or
+LEFT is missing for an outlet, the row reads **"Rekod tak lengkap"** instead of a
+false mismatch.
 
 ## Files
 
@@ -229,4 +279,8 @@ lengkap"** instead of a false mismatch.
   POS matching, dual-gate flag) + Telegram handlers + schedulers.
 - `config/kitchen_groups.py` — chat_id → outlet_code stub (paste the 10 IDs).
 - `digest.py` / `digest_data.py` — the digest section + its data gatherer.
-- `tests/test_kitchen_usage.py` — numpad, Used, dual-gate, Bistro-only, span.
+- `scripts/report_shift_coverage.py` — READ-ONLY: per-`business_date` POS shift
+  rows + completeness for an outlet (run on Render to verify the two-shift fold
+  and arrival times on live data).
+- `tests/test_kitchen_usage.py` — numpad, Used, dual-gate, Bistro-only, span,
+  two-stage timing + POS shift-completeness gate.

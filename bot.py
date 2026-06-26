@@ -4636,6 +4636,42 @@ async def run_bot() -> None:
         id="kitchen_left_form",
         replace_existing=True,
     )
+    # STAGE 2 of the kitchen digest — the real Used-vs-POS comparison, gated on POS
+    # COMPLETENESS. A 24h outlet reports its POS in TWO shift-close emails that both
+    # fold to the same business_date: the ~7PM day shift and the ~7AM-NEXT-DAY
+    # overnight shift. The day's true 24h total isn't known until BOTH are in, so
+    # the comparison only posts once complete. The 02:00 LEFT submission only
+    # confirms the save + usage (STAGE 1). This runs at 09:00 (the overnight email
+    # is normally in by ~7AM) and retries at 11:00 and 14:00 for late POS; until
+    # complete each outlet shows "⏳ POS belum lengkap" and is never flagged. The
+    # 09:00 run notifies; the retries stay silent (the group was told at 09:00).
+    scheduler.add_job(
+        kitchen_usage.post_comparison_digests,
+        trigger="cron",
+        hour=9,
+        minute=0,
+        args=[app],
+        id="kitchen_comparison",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        kitchen_usage.post_comparison_digests_retry,
+        trigger="cron",
+        hour=11,
+        minute=0,
+        args=[app],
+        id="kitchen_comparison_retry",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        kitchen_usage.post_comparison_digests_retry,
+        trigger="cron",
+        hour=14,
+        minute=0,
+        args=[app],
+        id="kitchen_comparison_retry_2",
+        replace_existing=True,
+    )
 
     async with app:
         await app.start()
