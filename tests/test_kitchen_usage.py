@@ -1609,3 +1609,255 @@ def test_kosongkan_unsets_item(monkeypatch):
     assert entries.get("kambing") == 3    # other items untouched
     # returned to the item list (form text + item keyboard)
     assert edits and "Ayam Goreng: —" in str(edits[0])
+
+
+# --- two-stage digest: STAGE 1 save-confirm (02:00) + STAGE 2 vs POS (09:00) --
+
+def _seed_complete_day(fake, outlet="SEK20", date="2026-06-24"):
+    """A complete COOKED+LEFT record (cooked & left set) for one outlet/day."""
+    fake._store["kitchen_daily_usage"] = [
+        {"outlet_code": outlet, "business_date": date, "item_code": "ayam_goreng",
+         "item_label": "Ayam Goreng", "unit": "pcs", "cooked_qty": 100, "left_qty": 0},
+        {"outlet_code": outlet, "business_date": date, "item_code": "ayam_bawang",
+         "item_label": "Ayam Bawang", "unit": "pcs", "cooked_qty": 10, "left_qty": 2},
+    ]
+
+
+def test_stage1_finalize_left_does_not_compare_pos():
+    """STAGE 1: submitting LEFT at 02:00 must NOT write pos_qty / mismatch_flag —
+    same-day POS isn't ingested yet, so any comparison would false-flag."""
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    # A POS summary that, if compared, would make Used(100) >> POS(0) -> 🔴.
+    # finalize must IGNORE it at STAGE 1.
+    session = {
+        "id": "l1", "chat_id": -1, "outlet_code": "SEK20",
+        "business_date": "2026-06-24", "phase": "left", "status": "open",
+        "entries": {"ayam_goreng": 0},  # left 0 -> used = cooked
+    }
+    fake._store["kitchen_daily_usage"] = [
+        {"outlet_code": "SEK20", "business_date": "2026-06-24", "item_code": "ayam_goreng",
+         "item_label": "Ayam Goreng", "unit": "pcs", "cooked_qty": 100, "left_qty": None},
+    ]
+    fake._store["kitchen_log_session"] = [dict(session)]
+
+    usage = ku.finalize_submission(fake, dict(session), submitter="Cashier")
+
+    # Returns usage-only rollup (cooked/left/used), no pos/flag keys.
+    rollup = {u["code"]: u for u in usage}
+    assert rollup["ayam_goreng"]["used"] == 100
+    assert "pos" not in rollup["ayam_goreng"]
+    # Nothing in the DB got a pos_qty / mismatch_flag at STAGE 1.
+    rows = fake.rows("kitchen_daily_usage")
+    assert all(r.get("pos_qty") is None for r in rows)
+    assert all(r.get("mismatch_flag") is None for r in rows)
+
+
+def test_render_save_confirmation_usage_only_no_pos_no_flags():
+    usage = [
+        {"code": "ayam_goreng", "label": "Ayam Goreng", "unit": "pcs",
+         "cooked": 100, "left": 8, "used": 92},
+        {"code": "kambing", "label": "Kambing", "unit": "kg",
+         "cooked": 5.0, "left": 1.5, "used": 3.5},
+    ]
+    text = ku.render_save_confirmation("SEK-20", "2026-06-24", usage)
+    assert text.startswith("✅ Rekod siap — Guna SEK-20 2026-06-24")
+    assert "masak 100, baki 8, guna 92 pcs" in text
+    assert "masak 5, baki 1.5, guna 3.5 kg" in text
+    # STAGE 1 shows NO flags anywhere, and no per-item POS comparison line.
+    assert "🔴" not in text and "⚠️" not in text
+    item_lines = [ln for ln in text.splitlines() if ln.startswith("• ")]
+    assert item_lines and all("POS" not in ln and "vs" not in ln for ln in item_lines)
+
+
+def test_pos_ingested_for_outlet_true_when_summary_exists():
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store[ku.SALES_SUMMARY_TABLE] = [
+        {"id": 1, "outlet_code": "D-SEK20", "outlet_canonical": "SEK-20",
+         "business_date": "2026-06-24"},
+    ]
+    assert ku.pos_ingested_for_outlet(fake, "SEK20", "2026-06-24") is True
+    # different outlet's summary doesn't count
+    assert ku.pos_ingested_for_outlet(fake, "KLANG", "2026-06-24") is False
+    # wrong date doesn't count
+    assert ku.pos_ingested_for_outlet(fake, "SEK20", "2026-06-23") is False
+
+
+def test_pos_ingested_for_outlet_false_when_not_ingested():
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()  # no sales_daily_summary rows at all
+    assert ku.pos_ingested_for_outlet(fake, "SEK20", "2026-06-24") is False
+
+
+def test_day_record_complete():
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_complete_day(fake)
+    assert ku.day_record_complete(fake, "SEK20", "2026-06-24") is True
+    # missing LEFT -> incomplete
+    fake._store["kitchen_daily_usage"][0]["left_qty"] = None
+    assert ku.day_record_complete(fake, "SEK20", "2026-06-24") is False
+    # no rows at all -> incomplete
+    assert ku.day_record_complete(FakeSupabase(), "SEK20", "2026-06-24") is False
+
+
+def test_comparison_already_posted_idempotency():
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_complete_day(fake)
+    assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is False
+    # once STAGE 2 writes a pos_qty, it's considered done
+    fake._store["kitchen_daily_usage"][0]["pos_qty"] = 80
+    assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is True
+
+
+def test_evaluate_outlet_day_writes_pos_and_flags():
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_complete_day(fake)  # ayam_goreng cooked 100 left 0 -> used 100
+    fake._store[ku.SALES_SUMMARY_TABLE] = [
+        {"id": 1, "outlet_code": "D-SEK20", "outlet_canonical": "SEK-20",
+         "business_date": "2026-06-24"},
+    ]
+    fake._store[ku.SALES_ITEMWISE_TABLE] = [
+        {"id": 10, "summary_id": 1, "item_name": "Ayam Goreng", "qty": 80},
+    ]
+    evals = ku.evaluate_outlet_day(fake, "SEK20", "2026-06-24")
+    ag = next(e for e in evals if e["code"] == "ayam_goreng")
+    assert ag["used"] == 100 and ag["pos"] == 80
+    assert ag["flag"] == "LEAK"  # 100 vs 80 trips both gates
+    # persisted to the DB
+    row = next(r for r in fake.rows("kitchen_daily_usage") if r["item_code"] == "ayam_goreng")
+    assert row["pos_qty"] == 80 and row["mismatch_flag"] == "LEAK"
+
+
+def test_stage2_business_date_is_the_just_closed_day_at_9am():
+    # Noon-fold: at 09:00 on 25 Jun, the business day that ran 18:00 24 Jun ->
+    # 02:00 25 Jun (closed a few hours ago) is 2026-06-24.
+    nine_am = datetime(2026, 6, 25, 9, 0, tzinfo=MY)
+    assert ku.business_date_for(nine_am).isoformat() == "2026-06-24"
+
+
+def test_render_pos_pending_shows_belum_masuk_no_flag():
+    text = ku.render_pos_pending("SEK-20", "2026-06-24")
+    assert "POS belum masuk" in text
+    assert "🔴" not in text
+
+
+# --- STAGE 2 scheduler job end-to-end (async) --------------------------------
+
+class _CaptureBot:
+    def __init__(self):
+        self.sent = []  # list of (chat_id, text)
+
+    async def send_message(self, chat_id, text, **k):
+        self.sent.append((chat_id, text))
+        import types as _t
+        return _t.SimpleNamespace(message_id=1)
+
+
+def _run_stage2(fake, monkeypatch, *, notify_missing=True, now=None):
+    import asyncio
+    import types
+
+    monkeypatch.setenv("KITCHEN_LOG_ENABLED", "1")
+    monkeypatch.setattr(ku, "_supabase", fake)
+    # one group: chat -100 -> SEK20
+    monkeypatch.setattr(
+        "config.kitchen_groups.configured_groups", lambda client: [(-100, "SEK20")]
+    )
+    if now is not None:
+        real = ku.datetime
+
+        class _DT:
+            @staticmethod
+            def now(tz=None):
+                return now
+        monkeypatch.setattr(ku, "datetime", _DT)
+    bot = _CaptureBot()
+    app = types.SimpleNamespace(bot=bot)
+    asyncio.run(ku.post_comparison_digests(app, notify_missing=notify_missing))
+    return bot
+
+
+def test_stage2_job_posts_comparison_when_pos_present(monkeypatch):
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_complete_day(fake)
+    fake._store[ku.SALES_SUMMARY_TABLE] = [
+        {"id": 1, "outlet_code": "D-SEK20", "outlet_canonical": "SEK-20",
+         "business_date": "2026-06-24"},
+    ]
+    fake._store[ku.SALES_ITEMWISE_TABLE] = [
+        {"id": 10, "summary_id": 1, "item_name": "Ayam Goreng", "qty": 80},
+    ]
+    bot = _run_stage2(fake, monkeypatch, now=datetime(2026, 6, 25, 9, 0, tzinfo=MY))
+    assert len(bot.sent) == 1
+    chat_id, text = bot.sent[0]
+    assert chat_id == -100
+    assert "Ringkasan Guna vs POS" in text and "🔴" in text  # real comparison
+    # persisted
+    assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is True
+
+
+def test_stage2_job_shows_belum_masuk_not_red_when_pos_missing(monkeypatch):
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_complete_day(fake)  # complete record but NO sales summary ingested
+    bot = _run_stage2(fake, monkeypatch, now=datetime(2026, 6, 25, 9, 0, tzinfo=MY))
+    assert len(bot.sent) == 1
+    _, text = bot.sent[0]
+    assert "POS belum masuk" in text
+    assert "🔴" not in text
+    # nothing flagged / written
+    assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is False
+
+
+def test_stage2_retry_is_silent_when_pos_still_missing(monkeypatch):
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_complete_day(fake)
+    bot = _run_stage2(fake, monkeypatch, notify_missing=False,
+                      now=datetime(2026, 6, 25, 11, 0, tzinfo=MY))
+    # retry stays silent — the 09:00 run already notified
+    assert bot.sent == []
+
+
+def test_stage2_idempotent_skips_already_posted(monkeypatch):
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_complete_day(fake)
+    # mark as already reconciled
+    for r in fake._store["kitchen_daily_usage"]:
+        r["pos_qty"] = 80
+    fake._store[ku.SALES_SUMMARY_TABLE] = [
+        {"id": 1, "outlet_code": "D-SEK20", "outlet_canonical": "SEK-20",
+         "business_date": "2026-06-24"},
+    ]
+    bot = _run_stage2(fake, monkeypatch, now=datetime(2026, 6, 25, 9, 0, tzinfo=MY))
+    assert bot.sent == []  # nothing re-posted
+
+
+def test_stage2_skips_incomplete_day_silently(monkeypatch):
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_complete_day(fake)
+    fake._store["kitchen_daily_usage"][0]["left_qty"] = None  # LEFT missing
+    fake._store[ku.SALES_SUMMARY_TABLE] = [
+        {"id": 1, "outlet_code": "D-SEK20", "outlet_canonical": "SEK-20",
+         "business_date": "2026-06-24"},
+    ]
+    bot = _run_stage2(fake, monkeypatch, now=datetime(2026, 6, 25, 9, 0, tzinfo=MY))
+    assert bot.sent == []  # incomplete record -> skip, no false flag

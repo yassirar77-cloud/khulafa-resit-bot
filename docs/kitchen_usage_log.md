@@ -210,16 +210,42 @@ Dual-gate flag (both gates must trip):
 - The comparison is POS sold for every item except **Telur Ikan**, which is kg
   purchased ("X kg guna vs Y kg beli").
 
-Right after LEFT is submitted, a mini Used-vs-POS recap is posted to the group
-(`render_mini_summary`). `pos_qty` and `mismatch_flag` are persisted on the
-`kitchen_daily_usage` rows.
+### Two-stage timing (POS isn't ingested at 02:00)
+
+Same-day POS sales arrive via the **~7AM** sales email, so at 02:00 (when LEFT is
+keyed) POS is always 0 — comparing then produced false 🔴 leak flags. The digest
+is therefore split into two stages:
+
+- **STAGE 1 — 02:00, right after LEFT is submitted** (`render_save_confirmation`):
+  a **save confirmation + usage only**, header *"✅ Rekod siap — Guna [outlet]
+  [business_date]"*, one line per item showing **masak / baki / guna**
+  (cooked / left / used). **No POS comparison, no flags.** `finalize_submission`
+  no longer writes `pos_qty` / `mismatch_flag` — they stay NULL until Stage 2.
+
+- **STAGE 2 — 09:00** (`post_comparison_digests`, scheduled in `bot.py`; retry at
+  11:00 via `post_comparison_digests_retry`): the real **Used-vs-POS comparison**
+  (`render_mini_summary`, v12-aware classification + dual-gate flags) for the
+  business day that just closed at 02:00. By 09:00 the 7AM POS email is ingested.
+  `evaluate_outlet_day` persists `pos_qty` + `mismatch_flag` on the
+  `kitchen_daily_usage` rows.
+
+  **Business date (noon-fold):** at 09:00 the day that ran 18:00→02:00 is
+  `business_date_for(now)` — 09:00 is before the noon cutoff, so it folds back to
+  the prior calendar day (the one that just closed).
+
+  **Safety / idempotency:** an outlet whose POS still isn't ingested shows
+  **"⏳ POS belum masuk"** and is **never flagged** (deferred — the 09:00 run
+  notifies once; the 11:00 retry stays silent). A day already reconciled
+  (`pos_qty` set) or with an incomplete COOKED/LEFT record is skipped.
 
 ## Digest
 
 The 23:00 **Daily Intelligence digest** appends a **🍳 KITCHEN USAGE vs POS**
 section per outlet for the just-completed business day (yesterday at digest
-time). If COOKED or LEFT is missing for an outlet, the row reads **"Rekod tak
-lengkap"** instead of a false mismatch.
+time). It reads the `pos_qty` / `mismatch_flag` written by the 09:00 Stage 2 job
+(which ran earlier the same day), so by 23:00 the values are present. If COOKED or
+LEFT is missing for an outlet, the row reads **"Rekod tak lengkap"** instead of a
+false mismatch.
 
 ## Files
 

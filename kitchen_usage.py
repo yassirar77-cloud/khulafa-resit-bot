@@ -938,8 +938,8 @@ def _save_session(client, session_id, **fields) -> None:
     client.table(SESSION_TABLE).update(fields).eq("id", session_id).execute()
 
 
-def _fetch_itemwise(client, outlet_code, business_date) -> list:
-    """POS itemwise rows for an outlet's business_date (used to compute pos_qty).
+def _matching_summary_ids(client, outlet_code, business_date) -> list:
+    """sales_daily_summary ids for an outlet's business_date.
 
     sales_daily_summary keys outlets with a POS S-/D- prefix (e.g. "D-KLANG")
     while the kitchen keys them bare ("KLANG"). A summary matches when its
@@ -950,8 +950,8 @@ def _fetch_itemwise(client, outlet_code, business_date) -> list:
 
     Retrieval is hardened: if the server-side ``business_date`` filter returns
     nothing (date-type/format quirks have been seen), it falls back to scanning
-    recent summaries and filtering the date client-side; the itemwise fetch is
-    paginated so a busy day past the PostgREST 1000-row cap is fully read."""
+    recent summaries and filtering the date client-side. An empty result means
+    the POS sales email for that outlet+date has NOT been ingested yet."""
     target_keys = outlet_join_keys(outlet_code)
     if not target_keys:
         return []
@@ -971,11 +971,36 @@ def _fetch_itemwise(client, outlet_code, business_date) -> list:
             .execute()
         )
         summaries = [s for s in scanned if str(s.get("business_date"))[:10] == date_str]
-    ids = [
+    return [
         s["id"] for s in summaries
         if (outlet_join_keys(s.get("outlet_code")) & target_keys)
         or (outlet_join_keys(s.get("outlet_canonical")) & target_keys)
     ]
+
+
+def pos_ingested_for_outlet(client, outlet_code, business_date) -> bool:
+    """True when the POS sales summary for this outlet+business_date exists — i.e.
+    the ~7AM sales email has been ingested. STAGE 2 only computes a Used-vs-POS
+    comparison (and flags) when this is True; otherwise it shows "POS belum
+    masuk" and DEFERS rather than raising a false 🔴 against POS 0."""
+    try:
+        return bool(_matching_summary_ids(client, outlet_code, business_date))
+    except Exception:
+        logger.warning(
+            "kitchen: POS-ingested check failed for %s %s",
+            outlet_code, business_date, exc_info=True,
+        )
+        return False
+
+
+def _fetch_itemwise(client, outlet_code, business_date) -> list:
+    """POS itemwise rows for an outlet's business_date (used to compute pos_qty).
+
+    The itemwise fetch is paginated so a busy day past the PostgREST 1000-row cap
+    is fully read. Returns [] when no matching summary exists (POS not ingested)
+    OR the summary has no itemwise rows — use ``pos_ingested_for_outlet`` to tell
+    the two apart before flagging."""
+    ids = _matching_summary_ids(client, outlet_code, business_date)
     if not ids:
         return []
     rows = []
@@ -1133,8 +1158,55 @@ def finalize_submission(client, session: dict, submitter: str):
     if phase != PHASE_LEFT:
         return []
 
-    # LEFT just landed -> compute Used vs comparison qty for the whole day.
-    # POS items use sales itemwise; Telur Ikan uses kg purchased from receipts.
+    # STAGE 1 (02:00): LEFT just landed. Same-day POS sales aren't ingested until
+    # the ~7AM email, so we deliberately do NOT compare vs POS here — at 02:00 POS
+    # always reads 0 and every item would false-flag 🔴. Instead we confirm the
+    # save and return the usage numbers (cooked / left / used) only. The real
+    # Used-vs-POS comparison runs in STAGE 2 at 09:00 (``post_comparison_digests``
+    # / ``evaluate_outlet_day``), once POS for the closed day exists.
+    return gather_usage_rollup(client, outlet_code, business_date)
+
+
+def gather_usage_rollup(client, outlet_code, business_date) -> list:
+    """Per-item usage (cooked / left / used) for an outlet's business_date — the
+    STAGE 1 (02:00) save-confirmation data, with NO POS comparison and NO flags.
+
+    Returns a list of {code, label, unit, cooked, left, used} for every tracked
+    item that has a kitchen_daily_usage row that day."""
+    usage_rows = _rows(
+        client.table(USAGE_TABLE)
+        .select("item_code, cooked_qty, left_qty")
+        .eq("outlet_code", outlet_code)
+        .eq("business_date", str(business_date))
+        .execute()
+    )
+    by_code = {r["item_code"]: r for r in usage_rows}
+    out = []
+    for it in items_for_outlet(outlet_code):
+        rec = by_code.get(it["code"])
+        if rec is None:
+            continue
+        cooked, left = rec.get("cooked_qty"), rec.get("left_qty")
+        out.append({
+            "code": it["code"],
+            "label": it["label"],
+            "unit": it["unit"],
+            "cooked": cooked,
+            "left": left,
+            "used": used_qty(cooked, left),
+        })
+    return out
+
+
+def evaluate_outlet_day(client, outlet_code, business_date) -> list:
+    """STAGE 2 core: compute Used vs POS for every tracked item of an outlet's
+    business_date, persist pos_qty + mismatch_flag, and return the per-item
+    evaluations (same dict shape as ``evaluate_usage``).
+
+    POS items use the sales itemwise rows (v12-aware classification); Telur Ikan
+    uses kg purchased from receipts. Call this only once POS for the day exists
+    (guard with ``pos_ingested_for_outlet``) — otherwise pos reads 0 and items
+    false-flag, which is exactly the 02:00 bug this two-stage split fixes."""
     itemwise = _fetch_itemwise(client, outlet_code, business_date)
     purchased = {
         code: _fetch_purchased_kg(client, outlet_code, business_date, code)
@@ -1144,7 +1216,7 @@ def finalize_submission(client, session: dict, submitter: str):
         client.table(USAGE_TABLE)
         .select("item_code, cooked_qty, left_qty")
         .eq("outlet_code", outlet_code)
-        .eq("business_date", business_date)
+        .eq("business_date", str(business_date))
         .execute()
     )
     by_code = {r["item_code"]: r for r in usage_rows}
@@ -1162,7 +1234,7 @@ def finalize_submission(client, session: dict, submitter: str):
         try:
             client.table(USAGE_TABLE).update(
                 {"pos_qty": ev["pos"], "mismatch_flag": ev["flag"]}
-            ).eq("outlet_code", outlet_code).eq("business_date", business_date).eq(
+            ).eq("outlet_code", outlet_code).eq("business_date", str(business_date)).eq(
                 "item_code", code
             ).execute()
         except Exception:
@@ -1170,10 +1242,74 @@ def finalize_submission(client, session: dict, submitter: str):
     return evaluations
 
 
+def comparison_already_posted(client, outlet_code, business_date) -> bool:
+    """True when STAGE 2 has already reconciled this outlet+date (any row carries
+    a non-null pos_qty). Makes the 09:00 run and its later retry idempotent —
+    STAGE 1 leaves pos_qty NULL, so a non-null value means STAGE 2 already ran."""
+    rows = _rows(
+        client.table(USAGE_TABLE)
+        .select("pos_qty")
+        .eq("outlet_code", outlet_code)
+        .eq("business_date", str(business_date))
+        .execute()
+    )
+    return any(r.get("pos_qty") is not None for r in rows)
+
+
+def day_record_complete(client, outlet_code, business_date) -> bool:
+    """True when the outlet has a complete COOKED+LEFT record for the day (every
+    row has both cooked_qty and left_qty). STAGE 2 only reconciles complete days;
+    an incomplete day is a missing-submission issue, not a POS-timing one."""
+    rows = _rows(
+        client.table(USAGE_TABLE)
+        .select("item_code, cooked_qty, left_qty")
+        .eq("outlet_code", outlet_code)
+        .eq("business_date", str(business_date))
+        .execute()
+    )
+    if not rows:
+        return False
+    return all(
+        r.get("cooked_qty") is not None and r.get("left_qty") is not None
+        for r in rows
+    )
+
+
 # --- summary rendering -------------------------------------------------------
 
+def render_save_confirmation(outlet_label, business_date, usage: list) -> str:
+    """STAGE 1 (02:00) save confirmation: usage numbers ONLY — no POS comparison,
+    no flags. Posted in the group right after LEFT so staff see the record saved
+    correctly (masak / baki / guna per item). The Used-vs-POS comparison comes in
+    STAGE 2 at 09:00 once the POS sales email is ingested."""
+    lines = [
+        f"✅ Rekod siap — Guna {outlet_label} {business_date}",
+        "",
+    ]
+    for ev in usage:
+        unit = ev["unit"]
+        cooked = format_value(ev["cooked"], unit)
+        left = format_value(ev["left"], unit)
+        used = format_value(ev["used"], unit)
+        lines.append(f"• {ev['label']}: masak {cooked}, baki {left}, guna {used} {unit}")
+    lines.append("")
+    lines.append("Guna vs POS akan keluar pagi nanti (lepas data POS masuk).")
+    return "\n".join(lines)
+
+
+def render_pos_pending(outlet_label, business_date) -> str:
+    """STAGE 2 notice when POS sales for the day still aren't ingested at 09:00 —
+    show "POS belum masuk" and do NOT flag, so a late/missing email never produces
+    a false 🔴. The comparison is deferred and retried later."""
+    return (
+        f"⏳ POS belum masuk — {outlet_label} {business_date}\n"
+        "Perbandingan Guna vs POS akan dibuat bila data POS sampai. "
+        "Tiada flag dibuat sekarang."
+    )
+
+
 def render_mini_summary(outlet_label, business_date, evaluations: list) -> str:
-    """The short Used-vs-POS recap posted in the group right after LEFT."""
+    """The short Used-vs-POS recap (STAGE 2) posted in the group at 09:00."""
     lines = [
         "📊 Ringkasan Guna vs POS",
         f"{outlet_label} • {business_date}",
@@ -1410,7 +1546,8 @@ async def handle_kitchen_callback(update, context) -> None:
         with contextlib.suppress(Exception):
             await query.edit_message_text(f"✅ Tersimpan — {form_title(phase)}\n{outlet_label} • {business_date}")
         if phase == PHASE_LEFT and evaluations:
-            summary = render_mini_summary(outlet_label, business_date, evaluations)
+            # STAGE 1: usage-only save confirmation (no POS comparison at 02:00).
+            summary = render_save_confirmation(outlet_label, business_date, evaluations)
             with contextlib.suppress(Exception):
                 await context.bot.send_message(chat_id=session["chat_id"], text=summary)
         return
@@ -1576,6 +1713,103 @@ async def post_night_forms(application) -> None:
 async def post_left_forms(application) -> None:
     """APScheduler job: 02:00 LEFT form to every kitchen group."""
     await _post_forms(application, PHASE_LEFT)
+
+
+async def post_comparison_digests(application, *, notify_missing: bool = True) -> None:
+    """STAGE 2 (09:00 MY): post the real Used-vs-POS comparison for the business
+    day that just closed at 02:00. By 09:00 the ~7AM POS sales email is ingested,
+    so POS exists and the v12-aware classification + dual-gate flags are valid —
+    unlike the 02:00 save (STAGE 1), which never compares vs POS.
+
+    Noon-fold: at 09:00 the business day that ran 18:00→02:00 and closed a few
+    hours ago is ``business_date_for(now)`` (09:00 is before the noon cutoff, so
+    it folds back to the prior calendar day).
+
+    Per kitchen group, for that just-closed business_date:
+      * already reconciled (pos_qty set) -> skip (idempotent across the retry);
+      * incomplete COOKED/LEFT record -> skip silently (not a POS-timing issue);
+      * POS not ingested yet -> show "POS belum masuk", do NOT flag (defer). The
+        09:00 run posts the notice (``notify_missing=True``); the later retry run
+        stays silent (``notify_missing=False``) so the group isn't spammed;
+      * otherwise -> compute, persist pos_qty + flags, post the comparison.
+    """
+    from config.kitchen_groups import configured_groups
+
+    enabled = kitchen_log_enabled()
+    logger.info(
+        "kitchen STAGE2 comparison fired, enabled=%s notify_missing=%s",
+        enabled, notify_missing,
+    )
+    if not enabled:
+        logger.info("kitchen: KITCHEN_LOG_ENABLED not set — STAGE2 skipped (safety gate)")
+        return
+    if _supabase is None:
+        logger.warning("kitchen: supabase not initialised — STAGE2 skipped")
+        return
+    groups = await asyncio.to_thread(configured_groups, _supabase)
+    if not groups:
+        logger.info("kitchen: no groups resolved — STAGE2 skipped")
+        return
+
+    now_my = datetime.now(MY_TZ)
+    business_date = business_date_for(now_my).isoformat()
+    posted = deferred = 0
+    for chat_id, outlet_code in groups:
+        try:
+            from outlet_mapping import outlet_display_name
+            outlet_label = outlet_display_name(outlet_code)
+        except Exception:
+            outlet_label = outlet_code
+        try:
+            if await asyncio.to_thread(
+                comparison_already_posted, _supabase, outlet_code, business_date
+            ):
+                continue
+            if not await asyncio.to_thread(
+                day_record_complete, _supabase, outlet_code, business_date
+            ):
+                # No complete COOKED+LEFT record for the day — nothing to
+                # reconcile (a missing submission, not a POS-timing issue).
+                continue
+            if not await asyncio.to_thread(
+                pos_ingested_for_outlet, _supabase, outlet_code, business_date
+            ):
+                # SAFETY: POS still missing — show "belum masuk", never false-flag.
+                if notify_missing:
+                    with contextlib.suppress(Exception):
+                        await application.bot.send_message(
+                            chat_id=chat_id,
+                            text=render_pos_pending(outlet_label, business_date),
+                        )
+                deferred += 1
+                continue
+            evaluations = await asyncio.to_thread(
+                evaluate_outlet_day, _supabase, outlet_code, business_date
+            )
+            if evaluations:
+                summary = render_mini_summary(outlet_label, business_date, evaluations)
+                with contextlib.suppress(Exception):
+                    await application.bot.send_message(chat_id=chat_id, text=summary)
+                posted += 1
+        except Exception as exc:
+            if _is_missing_table_error(exc):
+                logger.error(
+                    "kitchen: STAGE2 skipped for chat %s (%s) — kitchen tables "
+                    "unavailable in PostgREST schema cache. (%s)",
+                    chat_id, outlet_code, exc,
+                )
+            else:
+                logger.exception("kitchen: STAGE2 failed for chat %s (%s)", chat_id, outlet_code)
+    logger.info(
+        "kitchen STAGE2 done: posted %d, POS-deferred %d, of %d group(s)",
+        posted, deferred, len(groups),
+    )
+
+
+async def post_comparison_digests_retry(application) -> None:
+    """Later retry of STAGE 2 for outlets whose POS arrived after 09:00. Stays
+    silent on outlets still missing POS (the 09:00 run already notified)."""
+    await post_comparison_digests(application, notify_missing=False)
 
 
 def register_handlers(app) -> None:

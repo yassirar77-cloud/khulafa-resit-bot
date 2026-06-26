@@ -4636,6 +4636,30 @@ async def run_bot() -> None:
         id="kitchen_left_form",
         replace_existing=True,
     )
+    # STAGE 2 of the kitchen digest — the real Used-vs-POS comparison. The 02:00
+    # LEFT submission only confirms the save + usage (STAGE 1); same-day POS isn't
+    # ingested until the ~7AM sales email. At 09:00 POS exists, so this posts the
+    # v12-aware comparison (with dual-gate flags) for the business day that just
+    # closed at 02:00. A retry at 11:00 catches outlets whose POS email was late
+    # (it stays silent on outlets still missing POS — they were notified at 09:00).
+    scheduler.add_job(
+        kitchen_usage.post_comparison_digests,
+        trigger="cron",
+        hour=9,
+        minute=0,
+        args=[app],
+        id="kitchen_comparison",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        kitchen_usage.post_comparison_digests_retry,
+        trigger="cron",
+        hour=11,
+        minute=0,
+        args=[app],
+        id="kitchen_comparison_retry",
+        replace_existing=True,
+    )
 
     async with app:
         await app.start()
