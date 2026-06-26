@@ -1623,6 +1623,37 @@ def _seed_complete_day(fake, outlet="SEK20", date="2026-06-24"):
     ]
 
 
+def _seed_pos_summary(fake, date="2026-06-24", pos_code="D-SEK20", ag_qty=80, total_shifts=2):
+    """The D-file daily summary + itemwise (one merged row per business_date)."""
+    fake._store[ku.SALES_SUMMARY_TABLE] = [
+        {"id": 1, "outlet_code": pos_code, "outlet_canonical": "SEK-20",
+         "business_date": date, "total_shifts": total_shifts},
+    ]
+    fake._store[ku.SALES_ITEMWISE_TABLE] = [
+        {"id": 10, "summary_id": 1, "item_name": "Ayam Goreng", "qty": ag_qty},
+    ]
+
+
+def _seed_pos_shifts(fake, date="2026-06-24", types=("day", "overnight"), pos_code="S-SEK20"):
+    """Per-shift S-file rows in sales_daily for a business_date (day/overnight)."""
+    rows = []
+    for i, t in enumerate(types):
+        rows.append({
+            "id": 100 + i, "outlet_code": pos_code, "outlet_canonical": "SEK-20",
+            "shift_no": str(1500 + i), "shift_type": t,
+            "shift_business_date": date,
+            "shift_close_at": f"{date}T19:00:00" if t == "day" else None,
+            "received_at": f"{date}T19:30:00",
+        })
+    fake._store[ku.SALES_DAILY_TABLE] = rows
+
+
+def _seed_pos_complete(fake, date="2026-06-24"):
+    """A COMPLETE POS day: D-file summary + itemwise AND both shifts ingested."""
+    _seed_pos_summary(fake, date=date)
+    _seed_pos_shifts(fake, date=date, types=("day", "overnight"))
+
+
 def test_stage1_finalize_left_does_not_compare_pos():
     """STAGE 1: submitting LEFT at 02:00 must NOT write pos_qty / mismatch_flag —
     same-day POS isn't ingested yet, so any comparison would false-flag."""
@@ -1745,10 +1776,18 @@ def test_stage2_business_date_is_the_just_closed_day_at_9am():
     assert ku.business_date_for(nine_am).isoformat() == "2026-06-24"
 
 
-def test_render_pos_pending_shows_belum_masuk_no_flag():
-    text = ku.render_pos_pending("SEK-20", "2026-06-24")
-    assert "POS belum masuk" in text
+def test_render_pos_incomplete_belum_lengkap_no_flag():
+    # Nothing in yet -> belum lengkap, "belum masuk lagi" detail, no flag.
+    none_yet = {"summary_present": False, "shift_count": 0, "has_overnight": False}
+    text = ku.render_pos_incomplete("SEK-20", "2026-06-24", none_yet)
+    assert "POS belum lengkap" in text
     assert "🔴" not in text
+    # Day shift in but overnight pending -> names the overnight shift.
+    day_only = {"summary_present": True, "shift_count": 1, "has_overnight": False}
+    text2 = ku.render_pos_incomplete("SEK-20", "2026-06-24", day_only)
+    assert "POS belum lengkap" in text2
+    assert "malam" in text2.lower()
+    assert "🔴" not in text2
 
 
 # --- STAGE 2 scheduler job end-to-end (async) --------------------------------
@@ -1787,18 +1826,12 @@ def _run_stage2(fake, monkeypatch, *, notify_missing=True, now=None):
     return bot
 
 
-def test_stage2_job_posts_comparison_when_pos_present(monkeypatch):
+def test_stage2_job_posts_comparison_when_pos_complete(monkeypatch):
     from tests.fake_supabase import FakeSupabase
 
     fake = FakeSupabase()
     _seed_complete_day(fake)
-    fake._store[ku.SALES_SUMMARY_TABLE] = [
-        {"id": 1, "outlet_code": "D-SEK20", "outlet_canonical": "SEK-20",
-         "business_date": "2026-06-24"},
-    ]
-    fake._store[ku.SALES_ITEMWISE_TABLE] = [
-        {"id": 10, "summary_id": 1, "item_name": "Ayam Goreng", "qty": 80},
-    ]
+    _seed_pos_complete(fake)  # summary + itemwise + BOTH shifts
     bot = _run_stage2(fake, monkeypatch, now=datetime(2026, 6, 25, 9, 0, tzinfo=MY))
     assert len(bot.sent) == 1
     chat_id, text = bot.sent[0]
@@ -1808,29 +1841,70 @@ def test_stage2_job_posts_comparison_when_pos_present(monkeypatch):
     assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is True
 
 
-def test_stage2_job_shows_belum_masuk_not_red_when_pos_missing(monkeypatch):
-    from tests.fake_supabase import FakeSupabase
-
-    fake = FakeSupabase()
-    _seed_complete_day(fake)  # complete record but NO sales summary ingested
-    bot = _run_stage2(fake, monkeypatch, now=datetime(2026, 6, 25, 9, 0, tzinfo=MY))
-    assert len(bot.sent) == 1
-    _, text = bot.sent[0]
-    assert "POS belum masuk" in text
-    assert "🔴" not in text
-    # nothing flagged / written
-    assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is False
-
-
-def test_stage2_retry_is_silent_when_pos_still_missing(monkeypatch):
+def test_stage2_defers_when_only_day_shift_in_then_posts_after_overnight(monkeypatch):
+    """The core timing fix: at 09:00 only the day shift is in (overnight pending)
+    -> show 'belum lengkap', NEVER flag. Once the overnight shift lands, the
+    retry posts the real comparison."""
     from tests.fake_supabase import FakeSupabase
 
     fake = FakeSupabase()
     _seed_complete_day(fake)
+    _seed_pos_summary(fake)                       # D-file present...
+    _seed_pos_shifts(fake, types=("day",))        # ...but only the DAY shift
+
+    bot = _run_stage2(fake, monkeypatch, now=datetime(2026, 6, 25, 9, 0, tzinfo=MY))
+    assert len(bot.sent) == 1
+    _, text = bot.sent[0]
+    assert "POS belum lengkap" in text and "🔴" not in text
+    # nothing compared / written against a half-day
+    assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is False
+
+    # overnight email now arrives; the 11:00 retry posts the real comparison once.
+    _seed_pos_shifts(fake, types=("day", "overnight"))
+    bot2 = _run_stage2(fake, monkeypatch, notify_missing=False,
+                       now=datetime(2026, 6, 25, 11, 0, tzinfo=MY))
+    assert len(bot2.sent) == 1
+    _, text2 = bot2.sent[0]
+    assert "Ringkasan Guna vs POS" in text2
+    assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is True
+
+
+def test_stage2_shows_belum_lengkap_not_red_when_no_pos(monkeypatch):
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_complete_day(fake)  # complete kitchen record but NO POS at all
+    bot = _run_stage2(fake, monkeypatch, now=datetime(2026, 6, 25, 9, 0, tzinfo=MY))
+    assert len(bot.sent) == 1
+    _, text = bot.sent[0]
+    assert "POS belum lengkap" in text
+    assert "🔴" not in text
+    assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is False
+
+
+def test_stage2_retry_is_silent_when_pos_still_incomplete(monkeypatch):
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_complete_day(fake)  # no POS -> incomplete
     bot = _run_stage2(fake, monkeypatch, notify_missing=False,
                       now=datetime(2026, 6, 25, 11, 0, tzinfo=MY))
     # retry stays silent — the 09:00 run already notified
     assert bot.sent == []
+
+
+def test_stage2_14h_retry_targets_same_closed_day(monkeypatch):
+    """The 14:00 retry is AFTER noon, so it must still target the day that closed
+    that morning (yesterday), not the day now in progress."""
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_complete_day(fake, date="2026-06-24")
+    _seed_pos_complete(fake, date="2026-06-24")
+    bot = _run_stage2(fake, monkeypatch, notify_missing=False,
+                      now=datetime(2026, 6, 25, 14, 0, tzinfo=MY))
+    assert len(bot.sent) == 1
+    assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is True
 
 
 def test_stage2_idempotent_skips_already_posted(monkeypatch):
@@ -1838,13 +1912,10 @@ def test_stage2_idempotent_skips_already_posted(monkeypatch):
 
     fake = FakeSupabase()
     _seed_complete_day(fake)
+    _seed_pos_complete(fake)
     # mark as already reconciled
     for r in fake._store["kitchen_daily_usage"]:
         r["pos_qty"] = 80
-    fake._store[ku.SALES_SUMMARY_TABLE] = [
-        {"id": 1, "outlet_code": "D-SEK20", "outlet_canonical": "SEK-20",
-         "business_date": "2026-06-24"},
-    ]
     bot = _run_stage2(fake, monkeypatch, now=datetime(2026, 6, 25, 9, 0, tzinfo=MY))
     assert bot.sent == []  # nothing re-posted
 
@@ -1855,9 +1926,76 @@ def test_stage2_skips_incomplete_day_silently(monkeypatch):
     fake = FakeSupabase()
     _seed_complete_day(fake)
     fake._store["kitchen_daily_usage"][0]["left_qty"] = None  # LEFT missing
-    fake._store[ku.SALES_SUMMARY_TABLE] = [
-        {"id": 1, "outlet_code": "D-SEK20", "outlet_canonical": "SEK-20",
-         "business_date": "2026-06-24"},
-    ]
+    _seed_pos_complete(fake)
     bot = _run_stage2(fake, monkeypatch, now=datetime(2026, 6, 25, 9, 0, tzinfo=MY))
-    assert bot.sent == []  # incomplete record -> skip, no false flag
+    assert bot.sent == []  # incomplete kitchen record -> skip, no false flag
+
+
+# --- POS shift completeness gate + fold confirmation -------------------------
+
+def test_matching_shift_rows_bridges_outlet_codes():
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store[ku.SALES_DAILY_TABLE] = [
+        {"id": 1, "outlet_code": "S-SEK20", "outlet_canonical": "SEK-20",
+         "shift_type": "day", "shift_business_date": "2026-06-24"},
+        {"id": 2, "outlet_code": "D-SEK20", "outlet_canonical": "SEK-20",
+         "shift_type": "overnight", "shift_business_date": "2026-06-24"},
+        {"id": 3, "outlet_code": "S-KLANG", "outlet_canonical": "Klang B.Emas",
+         "shift_type": "day", "shift_business_date": "2026-06-24"},  # other outlet
+        {"id": 4, "outlet_code": "S-SEK20", "outlet_canonical": "SEK-20",
+         "shift_type": "day", "shift_business_date": "2026-06-23"},  # other day
+    ]
+    rows = ku._matching_shift_rows(fake, "SEK20", "2026-06-24")
+    assert {r["shift_type"] for r in rows} == {"day", "overnight"}
+    assert len(rows) == 2  # not the KLANG row, not the 23rd
+
+
+def test_pos_shift_coverage_and_completeness():
+    from tests.fake_supabase import FakeSupabase
+
+    # day only + summary -> NOT complete (overnight missing)
+    fake = FakeSupabase()
+    _seed_pos_summary(fake)
+    _seed_pos_shifts(fake, types=("day",))
+    cov = ku.pos_shift_coverage(fake, "SEK20", "2026-06-24")
+    assert cov["has_day"] and not cov["has_overnight"]
+    assert cov["summary_present"] and cov["complete"] is False
+    assert ku.pos_complete_for_outlet(fake, "SEK20", "2026-06-24") is False
+
+    # both shifts + summary -> complete
+    _seed_pos_shifts(fake, types=("day", "overnight"))
+    cov2 = ku.pos_shift_coverage(fake, "SEK20", "2026-06-24")
+    assert cov2["has_overnight"] and cov2["complete"] is True
+    assert ku.pos_complete_for_outlet(fake, "SEK20", "2026-06-24") is True
+
+    # overnight in but NO D-file summary -> not complete (no itemwise to compare)
+    fake2 = FakeSupabase()
+    _seed_pos_shifts(fake2, types=("day", "overnight"))
+    assert ku.pos_complete_for_outlet(fake2, "SEK20", "2026-06-24") is False
+
+
+def test_pos_fold_both_shifts_map_to_same_business_date_as_kitchen():
+    """Confirm the POS fold matches the kitchen fold: both the day shift (closes
+    ~7PM on D) and the overnight shift (closes ~7AM on D+1) map to business_date
+    D — the same day the kitchen folds 18:00 D / 00:00 D+1 / 02:00 D+1 into."""
+    import sales_parser as sp
+
+    # day shift: closes 19:00 on 24 Jun -> business_date 24 Jun
+    stype_day, bd_day = sp.determine_shift_type_and_business_date(
+        datetime(2026, 6, 24, 19, 0)
+    )
+    assert stype_day == "day" and bd_day.isoformat() == "2026-06-24"
+
+    # overnight shift: closes 07:00 on 25 Jun -> business_date 24 Jun (the day it started)
+    stype_night, bd_night = sp.determine_shift_type_and_business_date(
+        datetime(2026, 6, 25, 7, 0)
+    )
+    assert stype_night == "overnight" and bd_night.isoformat() == "2026-06-24"
+
+    # kitchen folds the same way: 18:00 24 Jun and 02:00 25 Jun both -> 24 Jun
+    assert ku.business_date_for(datetime(2026, 6, 24, 18, 0, tzinfo=MY)).isoformat() == "2026-06-24"
+    assert ku.business_date_for(datetime(2026, 6, 25, 2, 0, tzinfo=MY)).isoformat() == "2026-06-24"
+    # so all three sources agree on business_date D
+    assert bd_day == bd_night == ku.business_date_for(datetime(2026, 6, 24, 18, 0, tzinfo=MY))

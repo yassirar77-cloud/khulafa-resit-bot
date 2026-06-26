@@ -222,21 +222,45 @@ is therefore split into two stages:
   (cooked / left / used). **No POS comparison, no flags.** `finalize_submission`
   no longer writes `pos_qty` / `mismatch_flag` — they stay NULL until Stage 2.
 
-- **STAGE 2 — 09:00** (`post_comparison_digests`, scheduled in `bot.py`; retry at
-  11:00 via `post_comparison_digests_retry`): the real **Used-vs-POS comparison**
+- **STAGE 2 — 09:00, gated on POS COMPLETENESS** (`post_comparison_digests`,
+  scheduled in `bot.py`; retries at 11:00 and 14:00 via
+  `post_comparison_digests_retry`): the real **Used-vs-POS comparison**
   (`render_mini_summary`, v12-aware classification + dual-gate flags) for the
-  business day that just closed at 02:00. By 09:00 the 7AM POS email is ingested.
-  `evaluate_outlet_day` persists `pos_qty` + `mismatch_flag` on the
-  `kitchen_daily_usage` rows.
+  business day that just closed at 02:00. `evaluate_outlet_day` persists `pos_qty`
+  + `mismatch_flag` on the `kitchen_daily_usage` rows.
 
-  **Business date (noon-fold):** at 09:00 the day that ran 18:00→02:00 is
-  `business_date_for(now)` — 09:00 is before the noon cutoff, so it folds back to
-  the prior calendar day (the one that just closed).
+  **Why completeness matters (the two-shift POS day).** A 24h outlet reports its
+  POS in **two shift-close emails** that BOTH fold to the same `business_date`:
+  the **~7PM day shift** (closes the same evening) and the **~7AM-next-day
+  overnight shift** (started the prior evening, closes after midnight). So a
+  business day's true 24h POS total = both shifts combined, and the second email
+  doesn't arrive until ~7AM the next day. Comparing before both are in would be
+  against a **half-day** of sales. STAGE 2 therefore checks completeness via
+  `pos_shift_coverage` / `pos_complete_for_outlet` and only compares when:
+  - the **D-file daily summary** (`sales_daily_summary`, which carries the
+    itemwise quantities used for the comparison) exists, **and**
+  - the **overnight shift** is present in `sales_daily` (`shift_type='overnight'`
+    for that outlet+`business_date`) — proof the post-midnight portion closed and
+    was reported.
 
-  **Safety / idempotency:** an outlet whose POS still isn't ingested shows
-  **"⏳ POS belum masuk"** and is **never flagged** (deferred — the 09:00 run
-  notifies once; the 11:00 retry stays silent). A day already reconciled
-  (`pos_qty` set) or with an incomplete COOKED/LEFT record is skipped.
+  **Fold is correct (verified).** `sales_parser.determine_shift_type_and_business_date`
+  dates the day shift (closes 17–22h) to the close date and the overnight shift
+  (closes 5–10h) to the close date **− 1 day**, so both shifts of business day D
+  map to `business_date = D` — the SAME day the kitchen folds 18:00 D / 00:00 D+1
+  / 02:00 D+1 into. The D-file (`sales_daily_parser.business_date_for_printed`)
+  folds the same way. No fold mismatch; `scripts/report_shift_coverage.py` prints
+  the live shift rows per `business_date` to confirm on real data.
+
+  **Business date:** before noon (09:00, 11:00) the just-closed day is
+  `business_date_for(now)` (noon-fold); the **14:00** retry is past noon, so it is
+  pinned to `now − 1 day` to keep targeting the SAME closed day.
+
+  **Safety / idempotency:** until POS is complete, the outlet shows
+  **"⏳ POS belum lengkap"** (detail naming what's missing — nothing yet vs the
+  overnight shift) and is **never flagged** (deferred — the 09:00 run notifies
+  once; the 11:00/14:00 retries stay silent, then post once POS completes). A day
+  already reconciled (`pos_qty` set) or with an incomplete COOKED/LEFT record is
+  skipped.
 
 ## Digest
 
@@ -255,4 +279,8 @@ false mismatch.
   POS matching, dual-gate flag) + Telegram handlers + schedulers.
 - `config/kitchen_groups.py` — chat_id → outlet_code stub (paste the 10 IDs).
 - `digest.py` / `digest_data.py` — the digest section + its data gatherer.
-- `tests/test_kitchen_usage.py` — numpad, Used, dual-gate, Bistro-only, span.
+- `scripts/report_shift_coverage.py` — READ-ONLY: per-`business_date` POS shift
+  rows + completeness for an outlet (run on Render to verify the two-shift fold
+  and arrival times on live data).
+- `tests/test_kitchen_usage.py` — numpad, Used, dual-gate, Bistro-only, span,
+  two-stage timing + POS shift-completeness gate.
