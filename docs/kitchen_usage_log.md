@@ -222,45 +222,48 @@ is therefore split into two stages:
   (cooked / left / used). **No POS comparison, no flags.** `finalize_submission`
   no longer writes `pos_qty` / `mismatch_flag` — they stay NULL until Stage 2.
 
-- **STAGE 2 — 09:00, gated on POS COMPLETENESS** (`post_comparison_digests`,
-  scheduled in `bot.py`; retries at 11:00 and 14:00 via
-  `post_comparison_digests_retry`): the real **Used-vs-POS comparison**
-  (`render_mini_summary`, v12-aware classification + dual-gate flags) for the
-  business day that just closed at 02:00. `evaluate_outlet_day` persists `pos_qty`
-  + `mismatch_flag` on the `kitchen_daily_usage` rows.
+- **STAGE 2 — reconcile the latest COMPLETE day, gated on POS completeness**
+  (`post_comparison_digests`, scheduled in `bot.py`; 09:00 + retries 11:00 via
+  `post_comparison_digests_retry` and 14:00 via `post_comparison_digests_final`):
+  the real **Used-vs-POS comparison** (`render_mini_summary`, v12-aware
+  classification + dual-gate flags). `evaluate_outlet_day` persists `pos_qty` +
+  `mismatch_flag` on the `kitchen_daily_usage` rows.
 
-  **Why completeness matters (the two-shift POS day).** A 24h outlet reports its
-  POS in **two shift-close emails** that BOTH fold to the same `business_date`:
-  the **~7PM day shift** (closes the same evening) and the **~7AM-next-day
-  overnight shift** (started the prior evening, closes after midnight). So a
-  business day's true 24h POS total = both shifts combined, and the second email
-  doesn't arrive until ~7AM the next day. Comparing before both are in would be
-  against a **half-day** of sales. STAGE 2 therefore checks completeness via
-  `pos_shift_coverage` / `pos_complete_for_outlet` and only compares when:
-  - the **D-file daily summary** (`sales_daily_summary`, which carries the
-    itemwise quantities used for the comparison) exists, **and**
-  - the **overnight shift** is present in `sales_daily` (`shift_type='overnight'`
-    for that outlet+`business_date`) — proof the post-midnight portion closed and
-    was reported.
+  **Target the latest closed-and-complete day, NEVER today.** A 24h outlet reports
+  its POS in **two shift-close emails** that BOTH fold to the same `business_date`:
+  the **~7PM day shift** and the **~7AM-next-day overnight shift**. So *today* can
+  never be complete in the morning (its overnight email won't arrive until ~7AM
+  tomorrow) — targeting "today" always failed (live: 9AM on 26 Jun posted "belum
+  lengkap — 26 Jun"). Instead STAGE 2 scans the last `RECONCILE_LOOKBACK_DAYS`
+  calendar days **before** today (`select_reconcile_target_dates`) and reconciles
+  the complete, unreconciled ones — usually yesterday, whose overnight arrived
+  ~7AM today. This separates "which day the kitchen is recording" (noon-fold) from
+  "which closed day we reconcile against POS" (a settled calendar day = today−1).
 
-  **Fold is correct (verified).** `sales_parser.determine_shift_type_and_business_date`
+  **Completeness needs BOTH shifts** (`pos_shift_coverage` / `pos_complete_for_outlet`):
+  - the **D-file daily summary** (`sales_daily_summary`, carrying the itemwise
+    quantities) exists, **and**
+  - **both** `shift_type='day'` **and** `shift_type='overnight'` rows exist in
+    `sales_daily` for that outlet+`business_date`. Live SEK-20 25 Jun had *only*
+    the overnight shift (its day email never ingested) → correctly **incomplete**,
+    never compared as a half-day.
+
+  **Fold is correct (verified on live SEK-6).** `sales_parser.determine_shift_type_and_business_date`
   dates the day shift (closes 17–22h) to the close date and the overnight shift
   (closes 5–10h) to the close date **− 1 day**, so both shifts of business day D
   map to `business_date = D` — the SAME day the kitchen folds 18:00 D / 00:00 D+1
-  / 02:00 D+1 into. The D-file (`sales_daily_parser.business_date_for_printed`)
-  folds the same way. No fold mismatch; `scripts/report_shift_coverage.py` prints
-  the live shift rows per `business_date` to confirm on real data.
+  / 02:00 D+1 into.
 
-  **Business date:** before noon (09:00, 11:00) the just-closed day is
-  `business_date_for(now)` (noon-fold); the **14:00** retry is past noon, so it is
-  pinned to `now − 1 day` to keep targeting the SAME closed day.
-
-  **Safety / idempotency:** until POS is complete, the outlet shows
-  **"⏳ POS belum lengkap"** (detail naming what's missing — nothing yet vs the
-  overnight shift) and is **never flagged** (deferred — the 09:00 run notifies
-  once; the 11:00/14:00 retries stay silent, then post once POS completes). A day
-  already reconciled (`pos_qty` set) or with an incomplete COOKED/LEFT record is
-  skipped.
+  **Safety / idempotency:** until a day's POS is complete it shows
+  **"⏳ POS belum lengkap"** (detail naming the missing shift) and is **never
+  flagged**. The 09:00 run notifies the most-recent pending day; 11:00 is silent;
+  the **14:00 final pass** escalates any still-incomplete day to a distinct
+  **"⚠️ POS &lt;siang|malam&gt; hilang … tak boleh banding"** ingestion-gap alert
+  (`render_pos_missing_shift`) so a missing email is surfaced, not silently
+  "belum lengkap" forever. A day already reconciled (`pos_qty` set) or with an
+  incomplete COOKED/LEFT record is skipped. Diagnose a gap with
+  `scripts/report_shift_coverage.py --outlet SEK20 --diagnose` (dumps raw
+  `sales_daily` rows incl. misclassified `unknown` shifts + `sales_ingest_log`).
 
 ## Digest
 

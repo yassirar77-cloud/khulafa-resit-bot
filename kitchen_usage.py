@@ -1059,24 +1059,41 @@ def pos_shift_coverage(client, outlet_code, business_date) -> dict:
         except Exception:
             total_shifts = None
     summary_present = bool(summary_ids)
+    has_day = "day" in types
     has_overnight = "overnight" in types
     return {
         "summary_present": summary_present,
         "total_shifts": total_shifts,
-        "has_day": "day" in types,
+        "has_day": has_day,
         "has_overnight": has_overnight,
         "shift_types": types,
         "shift_count": len(shifts),
-        "complete": summary_present and has_overnight,
+        # COMPLETE = the FULL 24h is in: BOTH the day and overnight shift, plus the
+        # D-file summary that carries the itemwise quantities. Live SEK-20 25 Jun
+        # had ONLY the overnight shift (day email never ingested) — that must read
+        # incomplete, never compared as a half-day.
+        "complete": summary_present and has_day and has_overnight,
     }
+
+
+def missing_pos_shifts(coverage: dict) -> list:
+    """The shift halves of a 24h POS day that have NOT been ingested, for a
+    coverage dict from ``pos_shift_coverage`` — e.g. ['day'] when only the
+    overnight shift is in. Empty when both shifts are present."""
+    missing = []
+    if not coverage.get("has_day"):
+        missing.append("day")
+    if not coverage.get("has_overnight"):
+        missing.append("overnight")
+    return missing
 
 
 def pos_complete_for_outlet(client, outlet_code, business_date) -> bool:
     """True when the FULL 24h of POS for this outlet+business_date is in — both
-    the day and (critically) the overnight shift, plus the D-file summary that
-    carries the itemwise quantities. STAGE 2 only compares (and flags) when this
-    is True; otherwise it shows "⏳ POS belum lengkap" and DEFERS, so we never
-    compare Used against a half-day of sales and never raise a false 🔴."""
+    the day and the overnight shift, plus the D-file summary that carries the
+    itemwise quantities. STAGE 2 only compares (and flags) when this is True;
+    otherwise it shows "⏳ POS belum lengkap" and DEFERS, so we never compare Used
+    against a half-day of sales and never raise a false 🔴."""
     try:
         return pos_shift_coverage(client, outlet_code, business_date)["complete"]
     except Exception:
@@ -1085,6 +1102,36 @@ def pos_complete_for_outlet(client, outlet_code, business_date) -> bool:
             outlet_code, business_date, exc_info=True,
         )
         return False
+
+
+def select_reconcile_target_dates(client, outlet_code, candidate_dates) -> dict:
+    """Classify candidate business_dates (newest first) for POS reconciliation.
+
+    The comparison must target the most-recent COMPLETE, not-yet-reconciled day —
+    NEVER today, whose overnight POS won't arrive until ~7AM tomorrow. Returns
+    {'reconcile': [dates ready to compare — kitchen-complete, POS-complete,
+    unreconciled], 'pending': [(date, coverage) — kitchen-complete, unreconciled,
+    but POS still incomplete]}. Dates already reconciled (pos_qty set) or with no
+    complete COOKED+LEFT record are ignored (not a POS-timing concern)."""
+    reconcile, pending = [], []
+    for d in candidate_dates:
+        try:
+            if comparison_already_posted(client, outlet_code, d):
+                continue
+            if not day_record_complete(client, outlet_code, d):
+                continue
+            cov = pos_shift_coverage(client, outlet_code, d)
+        except Exception:
+            logger.warning(
+                "kitchen: reconcile-target scan failed for %s %s",
+                outlet_code, d, exc_info=True,
+            )
+            continue
+        if cov["complete"]:
+            reconcile.append(d)
+        else:
+            pending.append((d, cov))
+    return {"reconcile": reconcile, "pending": pending}
 
 
 def _fetch_itemwise(client, outlet_code, business_date) -> list:
@@ -1399,10 +1446,11 @@ def render_pos_incomplete(outlet_label, business_date, coverage=None) -> str:
     what's still missing (nothing yet vs. overnight shift pending)."""
     cov = coverage or {}
     header = f"⏳ POS belum lengkap — {outlet_label} {business_date}"
+    missing = missing_pos_shifts(cov)
     if not cov.get("summary_present") and not cov.get("shift_count"):
         detail = "POS belum masuk lagi."
-    elif not cov.get("has_overnight"):
-        detail = "Shift malam (~7 pagi) belum masuk."
+    elif missing:
+        detail = f"Shift {_shift_names_my(missing)} belum masuk."
     elif not cov.get("summary_present"):
         detail = "Ringkasan harian POS belum masuk."
     else:
@@ -1410,6 +1458,30 @@ def render_pos_incomplete(outlet_label, business_date, coverage=None) -> str:
     return (
         f"{header}\n{detail} "
         "Perbandingan Guna vs POS akan dibuat bila POS penuh. Tiada flag sekarang."
+    )
+
+
+_SHIFT_NAME_MY = {"day": "siang", "overnight": "malam"}
+
+
+def _shift_names_my(shift_types) -> str:
+    """Malay names for shift types, joined: ['day','overnight'] -> 'siang + malam'."""
+    return " + ".join(_SHIFT_NAME_MY.get(t, t) for t in shift_types) or "POS"
+
+
+def render_pos_missing_shift(outlet_label, business_date, coverage=None) -> str:
+    """STAGE 2 ingestion-gap ALERT: by the final (14:00) retry a shift of this
+    day's POS still hasn't been ingested, so the day can never complete on its own
+    — distinct from the normal "belum lengkap" wait. Names the missing shift(s) so
+    the gap can be investigated (email never arrived / parse fail / dedup). Never
+    flags — we still refuse to compare a half-day."""
+    cov = coverage or {}
+    missing = missing_pos_shifts(cov)
+    label = _shift_names_my(missing) if missing else "ringkasan harian"
+    return (
+        f"⚠️ POS {label} hilang untuk {outlet_label} {business_date} — "
+        "tak boleh banding Guna vs POS.\n"
+        "Email POS shift ni nampaknya tak masuk (ingestion gap) — sila semak."
     )
 
 
@@ -1820,33 +1892,45 @@ async def post_left_forms(application) -> None:
     await _post_forms(application, PHASE_LEFT)
 
 
-async def post_comparison_digests(application, *, notify_missing: bool = True) -> None:
-    """STAGE 2: post the real Used-vs-POS comparison for the business day that just
-    closed at 02:00 — but ONLY once that day's POS is COMPLETE. A 24h outlet
-    reports its POS in two shift-close emails that both fold to the same
-    business_date: the ~7PM day shift and the ~7AM-next-day overnight shift. The
-    day's true 24h total isn't known until BOTH are in, so comparing earlier would
-    be against a half-day of sales (the old false-🔴 bug). This runs at 09:00 and
-    retries (11:00, 14:00) until POS is complete, then posts once.
+# How many days back STAGE 2 scans for a complete-but-unreconciled day. Covers
+# yesterday plus a couple of days of catch-up (bot downtime / late POS) without
+# re-touching long-settled days.
+RECONCILE_LOOKBACK_DAYS = 3
 
-    Noon-fold: at 09:00/11:00/14:00 the day that ran 18:00→02:00 and closed a few
-    hours ago is ``business_date_for(now)`` (all three are before the noon... note
-    14:00 is AFTER noon, so it is pinned explicitly below to the just-closed day).
 
-    Per kitchen group, for that just-closed business_date:
-      * already reconciled (pos_qty set) -> skip (idempotent across retries);
-      * incomplete COOKED/LEFT record -> skip silently (not a POS-timing issue);
-      * POS not COMPLETE (overnight shift / D-file summary missing) -> show
-        "⏳ POS belum lengkap", do NOT flag (defer). The 09:00 run posts the notice
-        (``notify_missing=True``); retries stay silent (``notify_missing=False``);
-      * otherwise -> compute, persist pos_qty + flags, post the comparison.
+async def post_comparison_digests(
+    application, *, notify_missing: bool = True, alert_missing_shift: bool = False
+) -> None:
+    """STAGE 2: post the real Used-vs-POS comparison for the most-recent COMPLETE,
+    not-yet-reconciled business day — NEVER today.
+
+    A 24h outlet reports its POS in two shift-close emails that both fold to the
+    same business_date: the ~7PM day shift and the ~7AM-NEXT-DAY overnight shift.
+    So a day's true 24h total isn't known until BOTH are in — and TODAY can never
+    be complete in the morning (its overnight email won't arrive until ~7AM
+    tomorrow). Targeting "today" therefore always failed (live: 9AM on 26 Jun
+    posted "belum lengkap — 26 Jun"). Instead we scan the last
+    ``RECONCILE_LOOKBACK_DAYS`` calendar days BEFORE today and reconcile the
+    complete, unreconciled ones (usually yesterday, whose overnight arrived ~7AM
+    today). This separates "which day kitchen is recording now" from "which closed
+    day we reconcile against POS".
+
+    Runs at 09:00 and retries at 11:00 and 14:00. Per kitchen group, for each
+    candidate day (kitchen COOKED+LEFT complete, not yet reconciled):
+      * POS complete (day + overnight + D-file) -> compute, persist pos_qty +
+        flags, post the comparison (idempotent — done once);
+      * POS incomplete -> defer, NEVER flag. At 09:00 (``notify_missing``) post a
+        gentle "⏳ POS belum lengkap" for the most-recent pending day; retries stay
+        silent UNTIL the final 14:00 pass (``alert_missing_shift``), which raises a
+        distinct "⚠️ POS <shift> hilang" ingestion-gap alert for any day still
+        missing a shift (live: 25 Jun SEK-20 day shift never ingested).
     """
     from config.kitchen_groups import configured_groups
 
     enabled = kitchen_log_enabled()
     logger.info(
-        "kitchen STAGE2 comparison fired, enabled=%s notify_missing=%s",
-        enabled, notify_missing,
+        "kitchen STAGE2 comparison fired, enabled=%s notify_missing=%s alert_missing_shift=%s",
+        enabled, notify_missing, alert_missing_shift,
     )
     if not enabled:
         logger.info("kitchen: KITCHEN_LOG_ENABLED not set — STAGE2 skipped (safety gate)")
@@ -1859,15 +1943,16 @@ async def post_comparison_digests(application, *, notify_missing: bool = True) -
         logger.info("kitchen: no groups resolved — STAGE2 skipped")
         return
 
-    # The just-closed business day. Before noon ``business_date_for`` folds back to
-    # it; the 14:00 retry is past noon, so pin to "yesterday" to keep targeting the
-    # SAME closed day rather than the day now in progress.
-    now_my = datetime.now(MY_TZ)
-    if now_my.hour < BUSINESS_DAY_CUTOFF_HOUR:
-        business_date = business_date_for(now_my).isoformat()
-    else:
-        business_date = (now_my.date() - timedelta(days=1)).isoformat()
-    posted = deferred = 0
+    # Candidate business days: yesterday back RECONCILE_LOOKBACK_DAYS — NEVER today.
+    # Plain calendar dates (newest first); a closed business day D is reconciled on
+    # day D+1, i.e. at today-1. This sidesteps the noon-fold entirely: the fold
+    # decides which day the KITCHEN is recording, not which closed day to reconcile.
+    today = datetime.now(MY_TZ).date()
+    candidates = [
+        (today - timedelta(days=k)).isoformat()
+        for k in range(1, RECONCILE_LOOKBACK_DAYS + 1)
+    ]
+    posted = deferred = alerted = 0
     for chat_id, outlet_code in groups:
         try:
             from outlet_mapping import outlet_display_name
@@ -1875,42 +1960,48 @@ async def post_comparison_digests(application, *, notify_missing: bool = True) -
         except Exception:
             outlet_label = outlet_code
         try:
-            if await asyncio.to_thread(
-                comparison_already_posted, _supabase, outlet_code, business_date
-            ):
-                continue
-            if not await asyncio.to_thread(
-                day_record_complete, _supabase, outlet_code, business_date
-            ):
-                # No complete COOKED+LEFT record for the day — nothing to
-                # reconcile (a missing submission, not a POS-timing issue).
-                continue
-            coverage = await asyncio.to_thread(
-                pos_shift_coverage, _supabase, outlet_code, business_date
+            targets = await asyncio.to_thread(
+                select_reconcile_target_dates, _supabase, outlet_code, candidates
             )
-            if not coverage.get("complete"):
-                # SAFETY: the full 24h of POS isn't in yet (overnight shift and/or
-                # D-file summary missing) — show "belum lengkap", never false-flag.
-                logger.info(
-                    "kitchen STAGE2 defer %s %s — POS incomplete %s",
-                    outlet_code, business_date, coverage,
+            # Reconcile every complete, unreconciled day (oldest first for a
+            # readable chronological order on catch-up).
+            for d in reversed(targets["reconcile"]):
+                evaluations = await asyncio.to_thread(
+                    evaluate_outlet_day, _supabase, outlet_code, d
                 )
-                if notify_missing:
+                if evaluations:
+                    summary = render_mini_summary(outlet_label, d, evaluations)
+                    with contextlib.suppress(Exception):
+                        await application.bot.send_message(chat_id=chat_id, text=summary)
+                    posted += 1
+            pending = targets["pending"]  # newest first
+            if alert_missing_shift:
+                # Final (14:00) pass: any still-incomplete day is an ingestion gap.
+                for d, cov in pending:
+                    logger.warning(
+                        "kitchen STAGE2 missing-shift gap %s %s — coverage %s",
+                        outlet_code, d, cov,
+                    )
                     with contextlib.suppress(Exception):
                         await application.bot.send_message(
                             chat_id=chat_id,
-                            text=render_pos_incomplete(outlet_label, business_date, coverage),
+                            text=render_pos_missing_shift(outlet_label, d, cov),
                         )
-                deferred += 1
-                continue
-            evaluations = await asyncio.to_thread(
-                evaluate_outlet_day, _supabase, outlet_code, business_date
-            )
-            if evaluations:
-                summary = render_mini_summary(outlet_label, business_date, evaluations)
+                    alerted += 1
+            elif notify_missing and pending:
+                # 09:00: gentle "belum lengkap" for the most-recent pending day only.
+                d, cov = pending[0]
+                logger.info(
+                    "kitchen STAGE2 defer %s %s — POS incomplete %s",
+                    outlet_code, d, cov,
+                )
                 with contextlib.suppress(Exception):
-                    await application.bot.send_message(chat_id=chat_id, text=summary)
-                posted += 1
+                    await application.bot.send_message(
+                        chat_id=chat_id,
+                        text=render_pos_incomplete(outlet_label, d, cov),
+                    )
+                deferred += 1
+            # 11:00 (notify_missing False, alert_missing_shift False): silent.
         except Exception as exc:
             if _is_missing_table_error(exc):
                 logger.error(
@@ -1921,16 +2012,25 @@ async def post_comparison_digests(application, *, notify_missing: bool = True) -
             else:
                 logger.exception("kitchen: STAGE2 failed for chat %s (%s)", chat_id, outlet_code)
     logger.info(
-        "kitchen STAGE2 done: posted %d, POS-deferred %d, of %d group(s)",
-        posted, deferred, len(groups),
+        "kitchen STAGE2 done: posted %d, deferred %d, gap-alerts %d, of %d group(s)",
+        posted, deferred, alerted, len(groups),
     )
 
 
 async def post_comparison_digests_retry(application) -> None:
-    """Later retry of STAGE 2 (11:00 / 14:00) for outlets whose POS became COMPLETE
-    after 09:00 (the overnight shift email arrived late). Stays silent on outlets
-    whose POS is still incomplete — the 09:00 run already posted the notice."""
+    """11:00 retry of STAGE 2 for outlets whose POS became COMPLETE after 09:00 (the
+    overnight shift email arrived late). Silent on still-incomplete days — the
+    09:00 run already posted the gentle notice; the 14:00 final pass alerts on
+    genuine gaps."""
     await post_comparison_digests(application, notify_missing=False)
+
+
+async def post_comparison_digests_final(application) -> None:
+    """14:00 final pass of STAGE 2: still posts any newly-complete comparison, and
+    raises a distinct "⚠️ POS <shift> hilang" alert for any kitchen-complete day
+    whose POS is STILL missing a shift — an ingestion gap to investigate, not a
+    silent forever-"belum lengkap"."""
+    await post_comparison_digests(application, notify_missing=False, alert_missing_shift=True)
 
 
 def register_handlers(app) -> None:
