@@ -1782,8 +1782,9 @@ def test_render_pos_incomplete_belum_lengkap_no_flag():
     text = ku.render_pos_incomplete("SEK-20", "2026-06-24", none_yet)
     assert "POS belum lengkap" in text
     assert "🔴" not in text
-    # Day shift in but overnight pending -> names the overnight shift.
-    day_only = {"summary_present": True, "shift_count": 1, "has_overnight": False}
+    # Day shift in but overnight pending -> names the overnight ('malam') shift.
+    day_only = {"summary_present": True, "shift_count": 1,
+                "has_day": True, "has_overnight": False}
     text2 = ku.render_pos_incomplete("SEK-20", "2026-06-24", day_only)
     assert "POS belum lengkap" in text2
     assert "malam" in text2.lower()
@@ -1802,7 +1803,7 @@ class _CaptureBot:
         return _t.SimpleNamespace(message_id=1)
 
 
-def _run_stage2(fake, monkeypatch, *, notify_missing=True, now=None):
+def _run_stage2(fake, monkeypatch, *, notify_missing=True, alert_missing_shift=False, now=None):
     import asyncio
     import types
 
@@ -1813,8 +1814,6 @@ def _run_stage2(fake, monkeypatch, *, notify_missing=True, now=None):
         "config.kitchen_groups.configured_groups", lambda client: [(-100, "SEK20")]
     )
     if now is not None:
-        real = ku.datetime
-
         class _DT:
             @staticmethod
             def now(tz=None):
@@ -1822,7 +1821,9 @@ def _run_stage2(fake, monkeypatch, *, notify_missing=True, now=None):
         monkeypatch.setattr(ku, "datetime", _DT)
     bot = _CaptureBot()
     app = types.SimpleNamespace(bot=bot)
-    asyncio.run(ku.post_comparison_digests(app, notify_missing=notify_missing))
+    asyncio.run(ku.post_comparison_digests(
+        app, notify_missing=notify_missing, alert_missing_shift=alert_missing_shift
+    ))
     return bot
 
 
@@ -1893,18 +1894,140 @@ def test_stage2_retry_is_silent_when_pos_still_incomplete(monkeypatch):
     assert bot.sent == []
 
 
-def test_stage2_14h_retry_targets_same_closed_day(monkeypatch):
-    """The 14:00 retry is AFTER noon, so it must still target the day that closed
-    that morning (yesterday), not the day now in progress."""
+def test_stage2_targets_yesterday_never_today(monkeypatch):
+    """ISSUE A regression: the run must reconcile the just-closed day (today-1),
+    NEVER today — today's overnight POS won't exist until ~7AM tomorrow."""
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    # complete + POS-complete for 25 Jun (yesterday relative to a 26 Jun run)
+    _seed_complete_day(fake, date="2026-06-25")
+    _seed_pos_complete(fake, date="2026-06-25")
+    # TODAY (26 Jun) also has a kitchen record but obviously no overnight POS yet
+    fake._store["kitchen_daily_usage"].append(
+        {"outlet_code": "SEK20", "business_date": "2026-06-26", "item_code": "ayam_goreng",
+         "item_label": "Ayam Goreng", "unit": "pcs", "cooked_qty": 100, "left_qty": 0}
+    )
+    bot = _run_stage2(fake, monkeypatch, now=datetime(2026, 6, 26, 9, 0, tzinfo=MY))
+    assert len(bot.sent) == 1
+    _, text = bot.sent[0]
+    assert "2026-06-25" in text and "2026-06-26" not in text  # yesterday, not today
+    assert ku.comparison_already_posted(fake, "SEK20", "2026-06-25") is True
+    assert ku.comparison_already_posted(fake, "SEK20", "2026-06-26") is False
+
+
+def test_stage2_14h_targets_yesterday_not_today_after_noon(monkeypatch):
+    """The 14:00 pass is AFTER noon — it must still reconcile the just-closed day
+    (today-1), not the day now in progress."""
     from tests.fake_supabase import FakeSupabase
 
     fake = FakeSupabase()
     _seed_complete_day(fake, date="2026-06-24")
     _seed_pos_complete(fake, date="2026-06-24")
-    bot = _run_stage2(fake, monkeypatch, notify_missing=False,
+    bot = _run_stage2(fake, monkeypatch, notify_missing=False, alert_missing_shift=True,
                       now=datetime(2026, 6, 25, 14, 0, tzinfo=MY))
     assert len(bot.sent) == 1
+    _, text = bot.sent[0]
+    assert "2026-06-24" in text
     assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is True
+
+
+def test_stage2_user_scenario_26jun_missing_day_shift(monkeypatch):
+    """The live SEK-20 case: run on 26 Jun. 25 Jun has ONLY its overnight shift
+    (day shift never ingested) -> incomplete; 24 Jun is fully complete and not yet
+    reconciled. At 09:00 it should reconcile 24 Jun AND gently flag 25 Jun, NEVER
+    target 26 Jun. At 14:00 it raises the missing-shift ALERT for 25 Jun."""
+    from tests.fake_supabase import FakeSupabase
+
+    def _fresh():
+        fake = FakeSupabase()
+        # 24 Jun: complete kitchen + complete POS, unreconciled
+        fake._store["kitchen_daily_usage"] = [
+            {"outlet_code": "SEK20", "business_date": "2026-06-24", "item_code": "ayam_goreng",
+             "item_label": "Ayam Goreng", "unit": "pcs", "cooked_qty": 100, "left_qty": 0},
+            # 25 Jun: complete kitchen record too
+            {"outlet_code": "SEK20", "business_date": "2026-06-25", "item_code": "ayam_goreng",
+             "item_label": "Ayam Goreng", "unit": "pcs", "cooked_qty": 100, "left_qty": 0},
+        ]
+        fake._store[ku.SALES_SUMMARY_TABLE] = [
+            {"id": 1, "outlet_code": "D-SEK20", "outlet_canonical": "SEK-20",
+             "business_date": "2026-06-24", "total_shifts": 2},
+            {"id": 2, "outlet_code": "D-SEK20", "outlet_canonical": "SEK-20",
+             "business_date": "2026-06-25", "total_shifts": 2},
+        ]
+        fake._store[ku.SALES_ITEMWISE_TABLE] = [
+            {"id": 10, "summary_id": 1, "item_name": "Ayam Goreng", "qty": 80},
+            {"id": 11, "summary_id": 2, "item_name": "Ayam Goreng", "qty": 80},
+        ]
+        fake._store[ku.SALES_DAILY_TABLE] = [
+            # 24 Jun: BOTH shifts
+            {"id": 100, "outlet_code": "S-SEK20", "outlet_canonical": "SEK-20",
+             "shift_type": "day", "shift_business_date": "2026-06-24"},
+            {"id": 101, "outlet_code": "S-SEK20", "outlet_canonical": "SEK-20",
+             "shift_type": "overnight", "shift_business_date": "2026-06-24"},
+            # 25 Jun: ONLY overnight (the day shift never ingested)
+            {"id": 102, "outlet_code": "S-SEK20", "outlet_canonical": "SEK-20",
+             "shift_type": "overnight", "shift_business_date": "2026-06-25"},
+        ]
+        return fake
+
+    # 09:00 run: reconcile 24 Jun + gentle belum-lengkap for 25 Jun, NOT 26 Jun
+    fake = _fresh()
+    bot = _run_stage2(fake, monkeypatch, now=datetime(2026, 6, 26, 9, 0, tzinfo=MY))
+    texts = [t for _, t in bot.sent]
+    assert any("Ringkasan Guna vs POS" in t and "2026-06-24" in t for t in texts)
+    assert any("POS belum lengkap" in t and "2026-06-25" in t for t in texts)
+    assert all("2026-06-26" not in t for t in texts)  # never today
+    assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is True
+    assert ku.comparison_already_posted(fake, "SEK20", "2026-06-25") is False
+
+    # 14:00 final pass (fresh state): reconcile 24 + ALERT the 25 Jun gap
+    fake2 = _fresh()
+    bot2 = _run_stage2(fake2, monkeypatch, notify_missing=False, alert_missing_shift=True,
+                       now=datetime(2026, 6, 26, 14, 0, tzinfo=MY))
+    texts2 = [t for _, t in bot2.sent]
+    assert any("Ringkasan Guna vs POS" in t and "2026-06-24" in t for t in texts2)
+    gap = next(t for t in texts2 if "hilang" in t)
+    assert "2026-06-25" in gap and "siang" in gap  # the missing DAY shift named
+    assert "🔴" not in gap
+
+
+def test_select_reconcile_target_dates_classifies(monkeypatch):
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store["kitchen_daily_usage"] = [
+        {"outlet_code": "SEK20", "business_date": "2026-06-24", "item_code": "ayam_goreng",
+         "item_label": "Ayam Goreng", "unit": "pcs", "cooked_qty": 100, "left_qty": 0},
+        {"outlet_code": "SEK20", "business_date": "2026-06-25", "item_code": "ayam_goreng",
+         "item_label": "Ayam Goreng", "unit": "pcs", "cooked_qty": 100, "left_qty": 0},
+    ]
+    fake._store[ku.SALES_SUMMARY_TABLE] = [
+        {"id": 1, "outlet_code": "D-SEK20", "outlet_canonical": "SEK-20",
+         "business_date": "2026-06-24", "total_shifts": 2},
+        {"id": 2, "outlet_code": "D-SEK20", "outlet_canonical": "SEK-20",
+         "business_date": "2026-06-25", "total_shifts": 2},
+    ]
+    fake._store[ku.SALES_DAILY_TABLE] = [
+        {"id": 100, "outlet_code": "S-SEK20", "outlet_canonical": "SEK-20",
+         "shift_type": "day", "shift_business_date": "2026-06-24"},
+        {"id": 101, "outlet_code": "S-SEK20", "outlet_canonical": "SEK-20",
+         "shift_type": "overnight", "shift_business_date": "2026-06-24"},
+        {"id": 102, "outlet_code": "S-SEK20", "outlet_canonical": "SEK-20",
+         "shift_type": "overnight", "shift_business_date": "2026-06-25"},  # day missing
+    ]
+    out = ku.select_reconcile_target_dates(
+        fake, "SEK20", ["2026-06-25", "2026-06-24", "2026-06-23"]
+    )
+    assert out["reconcile"] == ["2026-06-24"]
+    assert [d for d, _ in out["pending"]] == ["2026-06-25"]
+    # already-reconciled day drops out
+    fake._store["kitchen_daily_usage"][0]["pos_qty"] = 80  # 24 Jun done
+    out2 = ku.select_reconcile_target_dates(
+        fake, "SEK20", ["2026-06-25", "2026-06-24", "2026-06-23"]
+    )
+    assert out2["reconcile"] == []
+    assert [d for d, _ in out2["pending"]] == ["2026-06-25"]
 
 
 def test_stage2_idempotent_skips_already_posted(monkeypatch):
@@ -1974,6 +2097,32 @@ def test_pos_shift_coverage_and_completeness():
     fake2 = FakeSupabase()
     _seed_pos_shifts(fake2, types=("day", "overnight"))
     assert ku.pos_complete_for_outlet(fake2, "SEK20", "2026-06-24") is False
+
+    # ISSUE B: overnight ONLY + summary -> NOT complete (day shift never ingested,
+    # the live 25 Jun SEK-20 case) — must never compare a half-day.
+    fake3 = FakeSupabase()
+    _seed_pos_summary(fake3)
+    _seed_pos_shifts(fake3, types=("overnight",))
+    cov3 = ku.pos_shift_coverage(fake3, "SEK20", "2026-06-24")
+    assert cov3["has_overnight"] and not cov3["has_day"]
+    assert cov3["complete"] is False
+    assert ku.missing_pos_shifts(cov3) == ["day"]
+
+
+def test_missing_pos_shifts_and_alert_wording():
+    # names the missing half(s)
+    assert ku.missing_pos_shifts({"has_day": False, "has_overnight": True}) == ["day"]
+    assert ku.missing_pos_shifts({"has_day": True, "has_overnight": False}) == ["overnight"]
+    assert ku.missing_pos_shifts({"has_day": True, "has_overnight": True}) == []
+
+    # day missing -> 'siang'; never flags
+    cov = {"has_day": False, "has_overnight": True, "summary_present": True, "shift_count": 1}
+    text = ku.render_pos_missing_shift("SEK-20", "2026-06-25", cov)
+    assert "hilang" in text and "siang" in text and "2026-06-25" in text
+    assert "🔴" not in text
+    # overnight missing -> 'malam'
+    cov2 = {"has_day": True, "has_overnight": False, "summary_present": True, "shift_count": 1}
+    assert "malam" in ku.render_pos_missing_shift("SEK-20", "2026-06-25", cov2)
 
 
 def test_pos_fold_both_shifts_map_to_same_business_date_as_kitchen():
