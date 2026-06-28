@@ -27,43 +27,45 @@ def _num(value):
 
 
 def _parse_dt(v):
+    """Parse a timestamp to a MYT-AWARE datetime so gaps between columns are real.
+
+    ``sales_daily.shift_close_at`` is a NAIVE ``timestamp`` holding the POS
+    wall-clock (Malaysia local); ``received_at`` / ``created_at`` are
+    ``timestamptz`` returned in UTC. Mixing them — a naive MYT close vs a UTC
+    recv — is exactly what produced the phantom "send 16h" for overnight shifts
+    (a 07:00 MYT email is 23:00 UTC, an 8h skew per boundary). Normalising BOTH to
+    MYT-aware makes close→recv ('send') and recv→ingest ('pull') correct: a
+    promptly-sent 7AM email shows ~0 send lag."""
     if not v:
         return None
     try:
-        return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
     except ValueError:
         return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=_MY_TZ)  # naive = POS wall-clock = Malaysia local
+    return dt.astimezone(_MY_TZ)
 
 
 def _hm(dt) -> str:
-    """Render a datetime in Malaysia local time (tz-aware values are converted)."""
-    if dt is None:
-        return "—"
-    if dt.tzinfo is not None:
-        dt = dt.astimezone(_MY_TZ)
-    return dt.strftime("%d/%m %H:%M")
+    """Render a (MYT-aware) datetime in Malaysia local time."""
+    return dt.strftime("%d/%m %H:%M") if dt is not None else "—"
 
 
 def _lag(later, earlier) -> str:
-    """Signed h/m gap between two datetimes (naive vs tz-aware tolerated)."""
+    """Signed h/m gap between two MYT-aware datetimes."""
     if later is None or earlier is None:
         return "—"
-    try:
-        secs = (later - earlier).total_seconds()
-    except TypeError:  # one tz-aware, one naive — drop tz and retry
-        secs = (later.replace(tzinfo=None) - earlier.replace(tzinfo=None)).total_seconds()
+    secs = (later - earlier).total_seconds()
     sign = "-" if secs < 0 else ""
     secs = abs(secs)
     return f"{sign}{int(secs // 3600)}h{int((secs % 3600) // 60):02d}m"
 
 
-def _ingest_lag_minutes(recv, ingest):
-    if recv is None or ingest is None:
+def _gap_minutes(later, earlier):
+    if later is None or earlier is None:
         return None
-    try:
-        return (ingest - recv).total_seconds() / 60.0
-    except TypeError:
-        return (ingest.replace(tzinfo=None) - recv.replace(tzinfo=None)).total_seconds() / 60.0
+    return (later - earlier).total_seconds() / 60.0
 
 
 def format_ingest_latency(outlet_code, rows) -> str:
@@ -80,7 +82,8 @@ def format_ingest_latency(outlet_code, rows) -> str:
     if not rows:
         lines.append("No sales_daily rows in the window.")
         return "\n".join(lines)
-    pull_lags = []
+    pull_lags = []  # recv -> ingest  (our poll/ingest delay)
+    send_lags = []  # close -> recv   (POS dispatch delay)
     ordered = sorted(
         rows, key=lambda r: (str(r.get("shift_business_date")), str(r.get("shift_type"))),
         reverse=True,
@@ -89,26 +92,35 @@ def format_ingest_latency(outlet_code, rows) -> str:
         close = _parse_dt(r.get("shift_close_at"))
         recv = _parse_dt(r.get("received_at"))
         ingest = _parse_dt(r.get("created_at"))
-        m = _ingest_lag_minutes(recv, ingest)
-        if m is not None:
-            pull_lags.append(m)
+        pm = _gap_minutes(ingest, recv)
+        sm = _gap_minutes(recv, close)
+        if pm is not None:
+            pull_lags.append(pm)
+        if sm is not None:
+            send_lags.append(sm)
         lines.append(
             f"• {r.get('shift_business_date')} {r.get('shift_type')}: "
             f"close {_hm(close)} → recv {_hm(recv)} (send {_lag(recv, close)}) "
             f"→ ingest {_hm(ingest)} (pull {_lag(ingest, recv)})"
         )
-    if pull_lags:
-        worst = max(pull_lags)
+    if pull_lags or send_lags:
+        worst_pull = max(pull_lags) if pull_lags else 0.0
+        worst_send = max(send_lags) if send_lags else 0.0
         lines.append("")
-        if worst <= 45:
+        if worst_pull > 45:
             lines.append(
-                f"Verdict: poll is PROMPT (worst pull {worst:.0f} min). The lateness "
-                "is POS send-side — the 23:30 pass reconciles same-night."
+                f"Verdict: POLL-SIDE delay (worst pull {worst_pull:.0f} min) — emails "
+                "sat before ingest; check poll cadence."
+            )
+        elif worst_send > 90:
+            lines.append(
+                f"Verdict: POS SEND-SIDE delay (worst send {worst_send:.0f} min) — the "
+                "POS dispatched the email late; faster polling can't help."
             )
         else:
             lines.append(
-                f"Verdict: POLL-SIDE delay (worst pull {worst:.0f} min) — emails sat "
-                "before ingest; check poll cadence."
+                f"Verdict: ALL PROMPT — POS sent within {worst_send:.0f} min of close, "
+                f"ingested within {worst_pull:.0f} min. 9AM has both shifts."
             )
     return "\n".join(lines)
 
