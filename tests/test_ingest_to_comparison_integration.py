@@ -96,6 +96,34 @@ def test_real_ingest_makes_overnight_visible_then_comparison_reconciles():
     assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is True
 
 
+def test_received_at_is_email_date_header_not_ingest_time():
+    """ROOT-CAUSE clarifier: sales_daily.received_at is the email's Date header
+    (when the POS sent it), NOT when we ingested it. So received_at clustering at
+    ~11:00/23:00 means the POS BATCHES its sends — poll-side latency can't move
+    received_at (it only affects created_at, the DB now() default). The live
+    determination is therefore created_at vs received_at, not received_at alone."""
+    email_dict = {
+        "subject": "S-SEK20 SHIFTCLOSE (1500)",
+        "message_id": "<m@pos>",
+        "outlet_code": "S-SEK20",
+        "shift_no_from_subject": "1500",
+        "filename": "s.TXT",
+        # email Date header = 07:05 (when the POS dated/sent it)
+        "received_at": "Thu, 25 Jun 2026 07:05:00 +0800",
+        "content": _shift_content("25/Jun/2026", "07:00:04"),
+    }
+    parsed = si.parse_shift_close(email_dict["content"])
+    # ingest happens MUCH later (e.g. a 23:00 poll) — a deliberately different time
+    ingest_now = datetime(2026, 6, 25, 23, 0, tzinfo=MY)
+    record = si.build_sales_record(email_dict, parsed, "SEK-20", ingest_now)
+    recv = record["parent"]["received_at"]
+    assert recv.startswith("2026-06-25T07:05")          # the email's Date header
+    assert "23:00" not in recv                           # NOT the ingest time
+    # created_at is NOT set by build_sales_record — it's the DB now() default, i.e.
+    # the real ingest time, kept separate from received_at.
+    assert "created_at" not in record["parent"]
+
+
 def test_real_ingest_dedups_repeat_email_no_double_row():
     """The poll running every 15 min re-sees the same unread email until it is
     marked seen — ingest must dedup so a shift isn't double-counted."""
