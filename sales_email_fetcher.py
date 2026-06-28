@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 IMAP_HOST = "imap.gmail.com"
 DEFAULT_SENDER = "myposkhulafa@gmail.com"
 DEFAULT_SUBJECT_TOKEN = "SHIFTCLOSE"
+IMAP_TIMEOUT_SECONDS = 30
 
 _S_SUBJECT_RE = re.compile(r"^\s*(S-[\w\s]+?)\s+SHIFTCLOSE", re.IGNORECASE)
 _D_SUBJECT_RE = re.compile(r"^\s*(D-[\w\s]+?)\s+ON\s+\d", re.IGNORECASE)
@@ -73,7 +74,9 @@ class Mailbox:
                 host: str = IMAP_HOST, folder: str = "INBOX") -> "Mailbox":
         inbox = inbox or os.environ["GMAIL_INBOX"]
         password = password or os.environ["GMAIL_APP_PASSWORD"]
-        conn = imaplib.IMAP4_SSL(host)
+        # timeout so a stalled IMAP socket can't hang the poll indefinitely — under
+        # the scheduler's max_instances=1 a wedged run would block every later poll.
+        conn = imaplib.IMAP4_SSL(host, timeout=IMAP_TIMEOUT_SECONDS)
         conn.login(inbox, password)
         conn.select(folder)
         return cls(conn, folder)

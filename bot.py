@@ -4443,6 +4443,31 @@ async def poll_sales_emails() -> None:
         logger.exception("Sales ingest poll failed")
 
 
+async def _ingest_then_compare(app, compare_coro) -> None:
+    """Run a one-off sales-email ingest IMMEDIATELY BEFORE a kitchen comparison
+    pass, so the comparison always reconciles against the freshest POS the inbox
+    has right now — not whatever the last */15 poll happened to catch. Best-effort:
+    an ingest failure must never block the comparison (it just runs on existing
+    data). This is the direct guard against "the 09:00 comparison had stale POS"."""
+    try:
+        await poll_sales_emails()
+    except Exception:
+        logger.exception("pre-comparison sales ingest failed (continuing)")
+    await compare_coro(app)
+
+
+async def post_kitchen_comparison_0900(app) -> None:
+    await _ingest_then_compare(app, kitchen_usage.post_comparison_digests)
+
+
+async def post_kitchen_comparison_retry(app) -> None:
+    await _ingest_then_compare(app, kitchen_usage.post_comparison_digests_retry)
+
+
+async def post_kitchen_comparison_final(app) -> None:
+    await _ingest_then_compare(app, kitchen_usage.post_comparison_digests_final)
+
+
 async def run_bot() -> None:
     # concurrent_updates(True): process updates as independent tasks so a slow
     # handler (a multi-second OCR on an uploaded receipt) doesn't block other
@@ -4557,7 +4582,16 @@ async def run_bot() -> None:
         else:
             logger.error("Polling error: %s", error, exc_info=error)
 
-    scheduler = AsyncIOScheduler(timezone=MALAYSIA_TZ)
+    # job_defaults: APScheduler's default misfire_grace_time is just 1 SECOND, so
+    # in this single-process asyncio bot a cron fire that lands while the event
+    # loop is briefly busy (an in-flight OCR, a slow handler) is marked "misfired"
+    # and SILENTLY SKIPPED — which can make a */30 poll effectively run far less
+    # often than intended. A 5-minute grace + coalesce makes a slightly-late fire
+    # still run (and collapses any pile-up into one), so the poll keeps cadence.
+    scheduler = AsyncIOScheduler(
+        timezone=MALAYSIA_TZ,
+        job_defaults={"coalesce": True, "max_instances": 1, "misfire_grace_time": 300},
+    )
     scheduler.add_job(
         post_daily_summary,
         trigger="cron",
@@ -4567,12 +4601,15 @@ async def run_bot() -> None:
         id="daily_summary",
         replace_existing=True,
     )
-    # PR #35: poll the master inbox for shift-close emails every 30 min, 24/7.
-    # In-process (no separate Render cron) — $0 extra.
+    # PR #35: poll the master inbox for shift-close emails, 24/7. Every 15 min so
+    # an email that lands ~07:00 (the overnight shift report) is in sales_daily
+    # well before the 09:00 kitchen comparison. In-process (no separate Render
+    # cron) — $0 extra. NOTE: received_at on the row is the email's Date header
+    # (when the POS sent it), NOT our ingest time — ingest time is created_at.
     scheduler.add_job(
         poll_sales_emails,
         trigger="cron",
-        minute="*/30",
+        minute="*/15",
         id="sales_ingest",
         replace_existing=True,
     )
@@ -4645,8 +4682,10 @@ async def run_bot() -> None:
     # 14:00 (final) also raises a "⚠️ POS <shift> hilang" alert for any day still
     # missing a shift (ingestion gap). Until complete each outlet shows "⏳ POS belum
     # lengkap" and is never flagged. The 09:00 run notifies; 11:00 is silent.
+    # Each pass INGESTS the inbox first (post_kitchen_comparison_*) so it always
+    # reconciles against the freshest POS, independent of the */15 poll's timing.
     scheduler.add_job(
-        kitchen_usage.post_comparison_digests,
+        post_kitchen_comparison_0900,
         trigger="cron",
         hour=9,
         minute=0,
@@ -4655,7 +4694,7 @@ async def run_bot() -> None:
         replace_existing=True,
     )
     scheduler.add_job(
-        kitchen_usage.post_comparison_digests_retry,
+        post_kitchen_comparison_retry,
         trigger="cron",
         hour=11,
         minute=0,
@@ -4664,7 +4703,7 @@ async def run_bot() -> None:
         replace_existing=True,
     )
     scheduler.add_job(
-        kitchen_usage.post_comparison_digests_final,
+        post_kitchen_comparison_final,
         trigger="cron",
         hour=14,
         minute=0,
