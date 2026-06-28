@@ -4711,6 +4711,22 @@ async def run_bot() -> None:
         id="kitchen_comparison_retry_2",
         replace_existing=True,
     )
+    # Late catch-up pass at 23:30. The POS appears to dispatch the overnight shift
+    # report in a late (~23:00) batch — received_at (the email's Date header, NOT
+    # our ingest time) clusters at ~11:00/23:00 — so a day can become POS-complete
+    # only late that evening. This pass ingests first, then reconciles, so the day
+    # closes the SAME night instead of waiting for next morning's lookback. Silent
+    # on still-incomplete days (the 14:00 pass already alerted on real gaps) and
+    # idempotent via pos_qty, so it no-ops once a day is already reconciled.
+    scheduler.add_job(
+        post_kitchen_comparison_retry,
+        trigger="cron",
+        hour=23,
+        minute=30,
+        args=[app],
+        id="kitchen_comparison_late",
+        replace_existing=True,
+    )
 
     async with app:
         await app.start()
