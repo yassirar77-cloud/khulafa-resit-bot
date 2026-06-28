@@ -9,6 +9,14 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+# All POS/ingest timestamps are stored as timestamptz (an absolute instant). A
+# 07:00 Malaysia email is the instant 23:00 UTC the previous day, so reading it
+# raw (UTC) makes a 7AM email LOOK like "23:00" — the artifact that made the
+# overnight shift seem 16h late. Always render in MYT so the diagnostics are
+# trustworthy. (Storage is correct and unchanged; this is display only.)
+_MY_TZ = ZoneInfo("Asia/Kuala_Lumpur")
 
 
 def _num(value):
@@ -28,7 +36,12 @@ def _parse_dt(v):
 
 
 def _hm(dt) -> str:
-    return dt.strftime("%d/%m %H:%M") if dt is not None else "—"
+    """Render a datetime in Malaysia local time (tz-aware values are converted)."""
+    if dt is None:
+        return "—"
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(_MY_TZ)
+    return dt.strftime("%d/%m %H:%M")
 
 
 def _lag(later, earlier) -> str:
@@ -62,7 +75,7 @@ def format_ingest_latency(outlet_code, rows) -> str:
     created_at, shift_type, shift_business_date."""
     lines = [
         f"⏱️ POS ingest latency — {outlet_code}",
-        "recv = email Date (POS sent) · ingest = when we stored it",
+        "times in MYT · recv = email Date (POS sent) · ingest = when we stored it",
     ]
     if not rows:
         lines.append("No sales_daily rows in the window.")

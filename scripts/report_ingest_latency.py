@@ -31,11 +31,16 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import kitchen_usage as ku  # noqa: E402
+
+# Timestamps are stored as timestamptz; a 07:00 MYT email is 23:00 UTC the prior
+# day, so rendering raw (UTC) makes a 7AM email look like "23:00". Show MYT.
+_MY_TZ = ZoneInfo("Asia/Kuala_Lumpur")
 
 
 def _build_client():
@@ -60,6 +65,19 @@ def _f(v) -> str:
     return "—" if v is None else str(v)
 
 
+def _ts(v) -> str:
+    """Render a timestamptz in MYT (so a 7AM email isn't shown as 23:00 UTC)."""
+    if v is None:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    except ValueError:
+        return str(v)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(_MY_TZ)
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def report(client, outlet_code: str, days: int) -> None:
     keys = ku.outlet_join_keys(outlet_code)
     since = (date.today() - timedelta(days=days)).isoformat()
@@ -77,16 +95,16 @@ def report(client, outlet_code: str, days: int) -> None:
             if (ku.outlet_join_keys(r.get("outlet_code")) & keys)
             or (ku.outlet_join_keys(r.get("outlet_canonical")) & keys)]
 
-    print(f"\n=== sales_daily ingest latency for {outlet_code} (since {since}) ===")
+    print(f"\n=== sales_daily ingest latency for {outlet_code} (since {since}) — times MYT ===")
     print("  bd / type | shift_close_at | received_at(email Date) | created_at(ingest)")
     if not mine:
         print("  (no rows)")
     for r in sorted(mine, key=lambda r: (str(r.get("shift_business_date")),
                                          str(r.get("shift_type")))):
         print(f"  {_f(r.get('shift_business_date'))} {_f(r.get('shift_type')):<9} | "
-              f"close={_f(r.get('shift_close_at'))} | "
-              f"recv={_f(r.get('received_at'))} | "
-              f"ingest={_f(r.get('created_at'))}")
+              f"close={_ts(r.get('shift_close_at'))} | "
+              f"recv={_ts(r.get('received_at'))} | "
+              f"ingest={_ts(r.get('created_at'))}")
 
     log = _safe(
         "sales_ingest_log",
@@ -100,7 +118,7 @@ def report(client, outlet_code: str, days: int) -> None:
     if not log:
         print("  (no log rows)")
     for r in log[:40]:
-        print(f"  {_f(r.get('ran_at'))} [{_f(r.get('status'))}] "
+        print(f"  {_ts(r.get('ran_at'))} [{_f(r.get('status'))}] "
               f"{_f(r.get('outlet_canonical'))} :: {_f(r.get('detail'))}")
     print("\nRead: recv ≈ ingest but both hours after close -> POS sends late "
           "(faster polling won't help). ingest hours after recv -> the poll is "
