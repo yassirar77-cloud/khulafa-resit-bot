@@ -3653,6 +3653,46 @@ async def sales_ingest_status_command(update: Update, context: ContextTypes.DEFA
     await message.reply_text(sales_analytics.format_ingest_status(rows))
 
 
+def _fetch_sales_daily_latency(outlet_code, since_date):
+    """Recent sales_daily rows for one kitchen outlet (bridged via outlet_join_keys),
+    carrying the timestamps that separate send-side from poll-side latency:
+    shift_close_at, received_at (email Date), created_at (our ingest time)."""
+    import kitchen_usage as ku
+    keys = ku.outlet_join_keys(outlet_code)
+    resp = (
+        supabase.table("sales_daily")
+        .select("outlet_code, outlet_canonical, shift_type, shift_no, "
+                "shift_close_at, shift_business_date, received_at, created_at")
+        .gte("shift_business_date", since_date)
+        .order("shift_business_date", desc=True)
+        .execute()
+    )
+    return [
+        r for r in (resp.data or [])
+        if (ku.outlet_join_keys(r.get("outlet_code")) & keys)
+        or (ku.outlet_join_keys(r.get("outlet_canonical")) & keys)
+    ]
+
+
+async def sales_ingest_latency_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner check: did the POS shift emails arrive AND get ingested in time for
+    the 09:00 comparison? Shows close → recv(email Date) → ingest(created_at) per
+    shift with a send-side vs poll-side verdict. Usage: /sales_ingest_latency [OUTLET]."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    parts = (message.text or "").split()
+    outlet = parts[1].upper() if len(parts) > 1 else "KLANG"
+    since_date = (datetime.now(MALAYSIA_TZ).date() - timedelta(days=5)).isoformat()
+    try:
+        rows = await asyncio.to_thread(_fetch_sales_daily_latency, outlet, since_date)
+    except Exception:
+        logger.exception("sales_ingest_latency failed")
+        await message.reply_text("Failed to read sales_daily.")
+        return
+    await message.reply_text(sales_analytics.format_ingest_latency(outlet, rows))
+
+
 async def sales_ingest_manual_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message or not is_reviewer(_command_owner_id(update)):
@@ -4526,6 +4566,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("sales_yesterday", sales_yesterday_command))
     app.add_handler(CommandHandler("sales_outlet", sales_outlet_command))
     app.add_handler(CommandHandler("sales_ingest_status", sales_ingest_status_command))
+    app.add_handler(CommandHandler("sales_ingest_latency", sales_ingest_latency_command))
     app.add_handler(CommandHandler("sales_ingest_manual", sales_ingest_manual_command))
     app.add_handler(CommandHandler("food_cost_today", food_cost_today_command))
     app.add_handler(CommandHandler("food_cost_week", food_cost_week_command))

@@ -8,6 +8,7 @@ No I/O here.
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime
 
 
 def _num(value):
@@ -15,6 +16,88 @@ def _num(value):
         return None if value is None else float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _parse_dt(v):
+    if not v:
+        return None
+    try:
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _hm(dt) -> str:
+    return dt.strftime("%d/%m %H:%M") if dt is not None else "—"
+
+
+def _lag(later, earlier) -> str:
+    """Signed h/m gap between two datetimes (naive vs tz-aware tolerated)."""
+    if later is None or earlier is None:
+        return "—"
+    try:
+        secs = (later - earlier).total_seconds()
+    except TypeError:  # one tz-aware, one naive — drop tz and retry
+        secs = (later.replace(tzinfo=None) - earlier.replace(tzinfo=None)).total_seconds()
+    sign = "-" if secs < 0 else ""
+    secs = abs(secs)
+    return f"{sign}{int(secs // 3600)}h{int((secs % 3600) // 60):02d}m"
+
+
+def _ingest_lag_minutes(recv, ingest):
+    if recv is None or ingest is None:
+        return None
+    try:
+        return (ingest - recv).total_seconds() / 60.0
+    except TypeError:
+        return (ingest.replace(tzinfo=None) - recv.replace(tzinfo=None)).total_seconds() / 60.0
+
+
+def format_ingest_latency(outlet_code, rows) -> str:
+    """Owner /sales_ingest_latency: per shift, when the POS SENT the email
+    (received_at = its Date header) vs when WE ingested it (created_at), so the
+    blocker is unambiguous. Big SEND lag (close→recv) with small PULL lag
+    (recv→ingest) = POS batches sends (faster polling won't help). Big PULL lag =
+    poll-side delay. ``rows``: sales_daily rows with shift_close_at, received_at,
+    created_at, shift_type, shift_business_date."""
+    lines = [
+        f"⏱️ POS ingest latency — {outlet_code}",
+        "recv = email Date (POS sent) · ingest = when we stored it",
+    ]
+    if not rows:
+        lines.append("No sales_daily rows in the window.")
+        return "\n".join(lines)
+    pull_lags = []
+    ordered = sorted(
+        rows, key=lambda r: (str(r.get("shift_business_date")), str(r.get("shift_type"))),
+        reverse=True,
+    )
+    for r in ordered[:10]:
+        close = _parse_dt(r.get("shift_close_at"))
+        recv = _parse_dt(r.get("received_at"))
+        ingest = _parse_dt(r.get("created_at"))
+        m = _ingest_lag_minutes(recv, ingest)
+        if m is not None:
+            pull_lags.append(m)
+        lines.append(
+            f"• {r.get('shift_business_date')} {r.get('shift_type')}: "
+            f"close {_hm(close)} → recv {_hm(recv)} (send {_lag(recv, close)}) "
+            f"→ ingest {_hm(ingest)} (pull {_lag(ingest, recv)})"
+        )
+    if pull_lags:
+        worst = max(pull_lags)
+        lines.append("")
+        if worst <= 45:
+            lines.append(
+                f"Verdict: poll is PROMPT (worst pull {worst:.0f} min). The lateness "
+                "is POS send-side — the 23:30 pass reconciles same-night."
+            )
+        else:
+            lines.append(
+                f"Verdict: POLL-SIDE delay (worst pull {worst:.0f} min) — emails sat "
+                "before ingest; check poll cadence."
+            )
+    return "\n".join(lines)
 
 
 def _money(value) -> str:
