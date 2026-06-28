@@ -63,3 +63,38 @@ class DailyFallbackTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- /sales_ingest_latency formatting (send-side vs poll-side verdict) --------
+
+def test_format_ingest_latency_sendside_verdict():
+    import sales_analytics as sa
+    # recv ≈ ingest (pulled within minutes) but both hours after close -> send-side
+    rows = [{
+        "shift_business_date": "2026-06-26", "shift_type": "overnight",
+        "shift_close_at": "2026-06-27T07:00:00+08:00",
+        "received_at": "2026-06-27T23:00:08+08:00",   # POS dated it 23:00
+        "created_at": "2026-06-27T23:05:00+08:00",     # we ingested 5 min later
+    }]
+    text = sa.format_ingest_latency("KLANG", rows)
+    assert "send-side" in text.lower()
+    assert "overnight" in text
+    assert "POLL-SIDE" not in text
+
+
+def test_format_ingest_latency_pollside_verdict():
+    import sales_analytics as sa
+    # email dated 07:05 but not ingested until 23:00 -> big pull lag -> poll-side
+    rows = [{
+        "shift_business_date": "2026-06-26", "shift_type": "overnight",
+        "shift_close_at": "2026-06-27T07:00:00+08:00",
+        "received_at": "2026-06-27T07:05:00+08:00",
+        "created_at": "2026-06-27T23:00:00+08:00",
+    }]
+    text = sa.format_ingest_latency("KLANG", rows)
+    assert "POLL-SIDE" in text
+
+
+def test_format_ingest_latency_empty():
+    import sales_analytics as sa
+    assert "No sales_daily rows" in sa.format_ingest_latency("KLANG", [])
