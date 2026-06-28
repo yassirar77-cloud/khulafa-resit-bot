@@ -1345,9 +1345,24 @@ def evaluate_outlet_day(client, outlet_code, business_date) -> list:
     evaluations (same dict shape as ``evaluate_usage``).
 
     POS items use the sales itemwise rows (v12-aware classification); Telur Ikan
-    uses kg purchased from receipts. Call this only once POS for the day exists
-    (guard with ``pos_ingested_for_outlet``) — otherwise pos reads 0 and items
-    false-flag, which is exactly the 02:00 bug this two-stage split fixes."""
+    uses kg purchased from receipts.
+
+    SAFETY (self-gating): writes pos_qty/mismatch_flag ONLY when the day's POS is
+    genuinely COMPLETE — the D-file summary exists AND both day+overnight shifts
+    are ingested (``pos_complete_for_outlet``). If POS is absent/incomplete it
+    writes NOTHING and returns [] (the rows stay pos_qty NULL → "belum lengkap"),
+    so a false pos_qty=0 / LEAK is never persisted against not-yet-ingested POS
+    and the day is never marked reconciled prematurely. This is the bug where a
+    run during the ~16h overnight-send delay wrote 0/LEAK and froze the day. The
+    caller (STAGE 2) already gates too; this is defense-in-depth that also makes
+    ``recompute_outlet_day`` safe."""
+    if not pos_complete_for_outlet(client, outlet_code, business_date):
+        logger.info(
+            "kitchen: evaluate_outlet_day skipped %s %s — POS not complete, "
+            "leaving pos_qty NULL (no 0/LEAK written)",
+            outlet_code, business_date,
+        )
+        return []
     itemwise = _fetch_itemwise(client, outlet_code, business_date)
     purchased = {
         code: _fetch_purchased_kg(client, outlet_code, business_date, code)
@@ -1395,6 +1410,57 @@ def comparison_already_posted(client, outlet_code, business_date) -> bool:
         .execute()
     )
     return any(r.get("pos_qty") is not None for r in rows)
+
+
+def _clear_pos_reconciliation(client, outlet_code, business_date) -> int:
+    """Reset pos_qty + mismatch_flag to NULL for an outlet+business_date — i.e.
+    un-reconcile the day so it no longer counts as done (and shows "belum
+    lengkap" until real POS is reconciled). Returns the row count touched."""
+    rows = _rows(
+        client.table(USAGE_TABLE)
+        .select("item_code")
+        .eq("outlet_code", outlet_code)
+        .eq("business_date", str(business_date))
+        .execute()
+    )
+    if not rows:
+        return 0
+    try:
+        client.table(USAGE_TABLE).update(
+            {"pos_qty": None, "mismatch_flag": None}
+        ).eq("outlet_code", outlet_code).eq("business_date", str(business_date)).execute()
+    except Exception:
+        logger.exception(
+            "kitchen: clear reconciliation failed for %s %s", outlet_code, business_date
+        )
+        return 0
+    return len(rows)
+
+
+def recompute_outlet_day(client, outlet_code, business_date) -> dict:
+    """Re-reconcile a day even if it was ALREADY (wrongly) reconciled — bypasses
+    the pos_qty-not-null idempotency guard. For repairing days written with a
+    false pos_qty=0 / LEAK during the POS overnight-send delay.
+
+    * POS now COMPLETE -> recompute and overwrite pos_qty/mismatch_flag with the
+      real values (``evaluate_outlet_day``).
+    * POS still NOT complete -> CLEAR the stale pos_qty/flag back to NULL so the
+      day stops masquerading as reconciled (it will reconcile once POS is in),
+      instead of keeping a false 0/LEAK.
+
+    Returns {outlet, date, action: 'recomputed'|'cleared'|'noop', detail}."""
+    if pos_complete_for_outlet(client, outlet_code, business_date):
+        evals = evaluate_outlet_day(client, outlet_code, business_date)
+        return {
+            "outlet": outlet_code, "date": str(business_date),
+            "action": "recomputed", "detail": f"{len(evals)} item(s) vs POS",
+        }
+    cleared = _clear_pos_reconciliation(client, outlet_code, business_date)
+    return {
+        "outlet": outlet_code, "date": str(business_date),
+        "action": "cleared" if cleared else "noop",
+        "detail": f"POS not complete; {cleared} row(s) reset to NULL",
+    }
 
 
 def day_record_complete(client, outlet_code, business_date) -> bool:

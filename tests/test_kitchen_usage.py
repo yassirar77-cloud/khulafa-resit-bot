@@ -1753,13 +1753,8 @@ def test_evaluate_outlet_day_writes_pos_and_flags():
 
     fake = FakeSupabase()
     _seed_complete_day(fake)  # ayam_goreng cooked 100 left 0 -> used 100
-    fake._store[ku.SALES_SUMMARY_TABLE] = [
-        {"id": 1, "outlet_code": "D-SEK20", "outlet_canonical": "SEK-20",
-         "business_date": "2026-06-24"},
-    ]
-    fake._store[ku.SALES_ITEMWISE_TABLE] = [
-        {"id": 10, "summary_id": 1, "item_name": "Ayam Goreng", "qty": 80},
-    ]
+    _seed_pos_summary(fake, ag_qty=80)                      # D-file + itemwise
+    _seed_pos_shifts(fake, types=("day", "overnight"))      # both shifts -> complete
     evals = ku.evaluate_outlet_day(fake, "SEK20", "2026-06-24")
     ag = next(e for e in evals if e["code"] == "ayam_goreng")
     assert ag["used"] == 100 and ag["pos"] == 80
@@ -2148,3 +2143,80 @@ def test_pos_fold_both_shifts_map_to_same_business_date_as_kitchen():
     assert ku.business_date_for(datetime(2026, 6, 25, 2, 0, tzinfo=MY)).isoformat() == "2026-06-24"
     # so all three sources agree on business_date D
     assert bd_day == bd_night == ku.business_date_for(datetime(2026, 6, 24, 18, 0, tzinfo=MY))
+
+
+# --- regression: never persist pos_qty=0/LEAK when POS isn't complete ---------
+
+def test_evaluate_outlet_day_writes_nothing_when_pos_absent():
+    """The 24/25 Jun bug: a run with NO ingested POS must NOT write pos_qty=0/LEAK
+    and must NOT mark the day reconciled — rows stay pos_qty NULL."""
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_complete_day(fake, date="2026-06-24")  # kitchen complete, but NO POS at all
+    evals = ku.evaluate_outlet_day(fake, "SEK20", "2026-06-24")
+    assert evals == []
+    rows = fake.rows("kitchen_daily_usage")
+    assert all(r.get("pos_qty") is None for r in rows)
+    assert all(r.get("mismatch_flag") is None for r in rows)
+    assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is False
+
+
+def test_evaluate_outlet_day_writes_zero_only_when_summary_complete():
+    """A legitimate 0-sold item DOES get pos_qty=0 — but only when the POS day is
+    genuinely complete (summary + both shifts). Distinguishes 'sold 0' from
+    'not ingested'."""
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_complete_day(fake, date="2026-06-24")           # ayam_goreng cooked100 left0
+    _seed_pos_summary(fake, date="2026-06-24", ag_qty=0)  # summary exists, 0 ayam goreng sold
+    _seed_pos_shifts(fake, date="2026-06-24", types=("day", "overnight"))
+    evals = ku.evaluate_outlet_day(fake, "SEK20", "2026-06-24")
+    ag = next(e for e in evals if e["code"] == "ayam_goreng")
+    assert ag["pos"] == 0.0  # genuinely 0 sold (summary present)
+    row = next(r for r in fake.rows("kitchen_daily_usage") if r["item_code"] == "ayam_goreng")
+    assert row["pos_qty"] == 0.0  # written, because the day is complete
+
+
+def test_recompute_outlet_day_repairs_stale_zero_leak():
+    """recompute_outlet_day overwrites a frozen pos_qty=0/LEAK once real POS is
+    complete — bypassing the idempotency guard that otherwise blocks the fix."""
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    # Stale bad state: complete kitchen record, pos_qty=0 + LEAK on the item.
+    fake._store["kitchen_daily_usage"] = [
+        {"outlet_code": "SEK20", "business_date": "2026-06-24", "item_code": "ayam_goreng",
+         "item_label": "Ayam Goreng", "unit": "pcs", "cooked_qty": 100, "left_qty": 0,
+         "pos_qty": 0.0, "mismatch_flag": "LEAK"},
+    ]
+    # the idempotency guard currently considers it "done"
+    assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is True
+    # real POS now exists and is complete
+    _seed_pos_summary(fake, date="2026-06-24", ag_qty=80)
+    _seed_pos_shifts(fake, date="2026-06-24", types=("day", "overnight"))
+
+    res = ku.recompute_outlet_day(fake, "SEK20", "2026-06-24")
+    assert res["action"] == "recomputed"
+    row = next(r for r in fake.rows("kitchen_daily_usage") if r["item_code"] == "ayam_goreng")
+    assert row["pos_qty"] == 80          # real value now written
+    assert row["mismatch_flag"] == "LEAK"  # 100 vs 80 is a real flag (legit)
+
+
+def test_recompute_outlet_day_clears_when_pos_still_absent():
+    """If POS still isn't complete, recompute CLEARS the stale 0/LEAK to NULL so
+    the day stops counting as reconciled (shows 'belum lengkap' until POS lands)."""
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store["kitchen_daily_usage"] = [
+        {"outlet_code": "SEK20", "business_date": "2026-06-24", "item_code": "ayam_goreng",
+         "item_label": "Ayam Goreng", "unit": "pcs", "cooked_qty": 100, "left_qty": 0,
+         "pos_qty": 0.0, "mismatch_flag": "LEAK"},
+    ]
+    res = ku.recompute_outlet_day(fake, "SEK20", "2026-06-24")  # no POS seeded
+    assert res["action"] == "cleared"
+    row = fake.rows("kitchen_daily_usage")[0]
+    assert row["pos_qty"] is None and row["mismatch_flag"] is None
+    assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is False
