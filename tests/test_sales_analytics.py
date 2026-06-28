@@ -98,3 +98,20 @@ def test_format_ingest_latency_pollside_verdict():
 def test_format_ingest_latency_empty():
     import sales_analytics as sa
     assert "No sales_daily rows" in sa.format_ingest_latency("KLANG", [])
+
+
+def test_format_ingest_latency_renders_myt_not_utc():
+    """A 07:00 +0800 email must show as 07:00 MYT, NOT 23:00 (the UTC artifact
+    that made the overnight shift look 16h late)."""
+    import sales_analytics as sa
+    rows = [{
+        "shift_business_date": "2026-06-26", "shift_type": "overnight",
+        "shift_close_at": "2026-06-27T07:00:00+08:00",
+        "received_at": "2026-06-27T07:00:00+08:00",   # POS dated it 07:00 MYT
+        "created_at": "2026-06-27T07:12:00+08:00",     # ingested 12 min later
+    }]
+    text = sa.format_ingest_latency("KLANG", rows)
+    assert "07:00" in text          # rendered in MYT
+    assert "23:00" not in text      # NOT the UTC rendering
+    assert "MYT" in text
+    assert "send-side" in text.lower()  # prompt pull (12 min) -> not poll-side
