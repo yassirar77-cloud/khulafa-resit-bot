@@ -114,4 +114,25 @@ def test_format_ingest_latency_renders_myt_not_utc():
     assert "07:00" in text          # rendered in MYT
     assert "23:00" not in text      # NOT the UTC rendering
     assert "MYT" in text
-    assert "send-side" in text.lower()  # prompt pull (12 min) -> not poll-side
+    # send ~0 and pull 12 min -> healthy, NOT a send-side or poll-side delay
+    assert "ALL PROMPT" in text
+    assert "POLL-SIDE" not in text
+
+
+def test_format_ingest_latency_overnight_naive_close_vs_utc_recv_no_phantom_lag():
+    """Real storage shapes: shift_close_at is a NAIVE `timestamp` (MYT wall clock);
+    received_at/created_at are `timestamptz` (UTC). A promptly-sent 7AM overnight
+    email (12h cycle) must show ~0 send lag, not the phantom 16h the tz-mixing
+    caused."""
+    import sales_analytics as sa
+    rows = [{
+        "shift_business_date": "2026-06-25", "shift_type": "overnight",
+        "shift_close_at": "2026-06-26T07:00:00",        # naive MYT (timestamp col)
+        "received_at": "2026-06-25T23:00:00+00:00",      # UTC == 26 Jun 07:00 MYT
+        "created_at": "2026-06-25T23:10:00+00:00",        # 26 Jun 07:10 MYT
+    }]
+    text = sa.format_ingest_latency("KLANG", rows)
+    assert "send 0h00m" in text       # prompt at close, NOT 16h
+    assert "16h" not in text
+    assert "ALL PROMPT" in text
+    assert "07:00" in text and "23:00" not in text  # MYT rendering of both
