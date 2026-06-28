@@ -1,0 +1,42 @@
+name: ingest-latency-check
+
+# READ-ONLY diagnostic, MANUAL trigger only (never runs automatically). Runs
+# scripts/report_ingest_latency.py against the live DB and prints, per shift,
+# shift_close_at / received_at (email Date) / created_at (our ingest time) in MYT
+# plus recent sales_ingest_log poll times — so the POS-ingest freshness can be
+# verified from CI logs. Requires SUPABASE_URL / SUPABASE_KEY as repo Actions
+# secrets. The script only issues .select() queries; nothing is written.
+
+on:
+  workflow_dispatch:
+    inputs:
+      outlet:
+        description: "Kitchen outlet code (e.g. KLANG, SEK20, SEK6)"
+        required: false
+        default: "KLANG"
+      days:
+        description: "How many days back to report"
+        required: false
+        default: "5"
+
+jobs:
+  latency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install minimal deps
+        run: pip install --quiet supabase tzdata
+      - name: Report ingest latency (read-only)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ]; then
+            echo "::error::SUPABASE_URL / SUPABASE_KEY repo Actions secrets are not set."
+            echo "Add them under Settings → Secrets and variables → Actions, then re-run."
+            exit 1
+          fi
+          python scripts/report_ingest_latency.py --outlet "${{ inputs.outlet }}" --days "${{ inputs.days }}"
