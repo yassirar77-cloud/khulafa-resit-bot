@@ -1492,6 +1492,38 @@ def test_numpad_ok_commits_to_db_and_clears_memory(monkeypatch):
     assert ku._numpad_state == {}  # memory cleared on commit
 
 
+def test_sweep_evicts_abandoned_numpad_buffers(monkeypatch):
+    # An item opened but never committed/cleared/submitted leaves an in-memory
+    # buffer. _sweep_numpad_state must evict it past the TTL while keeping a
+    # freshly-touched one — the regression guard for the slow numpad-state leak.
+    ku._numpad_state.clear()
+    ku._numpad_state_ts.clear()
+    monkeypatch.setattr(ku, "_NUMPAD_STATE_TTL_S", 100)
+
+    stale_key = ku._numpad_key(-77, 7, "old_session", "ayam_goreng")
+    fresh_key = ku._numpad_key(-77, 7, "new_session", "kambing")
+    ku._touch_numpad_state(stale_key, {"buffer": "3", "phase": "cooked"})
+    ku._touch_numpad_state(fresh_key, {"buffer": "5", "phase": "cooked"})
+    ku._numpad_state_ts[stale_key] -= 1000  # backdate well past the TTL
+
+    ku._sweep_numpad_state()
+
+    assert stale_key not in ku._numpad_state
+    assert stale_key not in ku._numpad_state_ts
+    assert ku._numpad_state.get(fresh_key) == {"buffer": "5", "phase": "cooked"}
+
+
+def test_sweep_disabled_when_ttl_zero(monkeypatch):
+    ku._numpad_state.clear()
+    ku._numpad_state_ts.clear()
+    monkeypatch.setattr(ku, "_NUMPAD_STATE_TTL_S", 0)
+    key = ku._numpad_key(-77, 7, "s", "ayam_goreng")
+    ku._touch_numpad_state(key, {"buffer": "1", "phase": "cooked"})
+    ku._numpad_state_ts[key] -= 10_000
+    ku._sweep_numpad_state()
+    assert key in ku._numpad_state  # TTL<=0 disables sweeping
+
+
 def test_numpad_memory_miss_recovers_from_db_once(monkeypatch):
     import asyncio
 
