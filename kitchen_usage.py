@@ -1636,7 +1636,38 @@ def _submitter_name(user) -> str:
 # uncommitted half-typed buffer (acceptable) — committed values are persisted.
 _numpad_state: dict = {}
 
+# Last-touch monotonic timestamp per numpad key, kept PARALLEL to _numpad_state
+# (deliberately NOT stored inside the buffer dict, which must stay exactly
+# {"buffer", "phase"}). A chef can tap an item OPEN — which seeds an in-memory
+# buffer — and then abandon the form without ever committing (✓), clearing (🗑),
+# or submitting (Hantar), each of which is the only thing that calls
+# _clear_numpad_state. That orphaned buffer would otherwise live forever, and
+# across 3 daily forms × every kitchen outlet it accumulates into a slow, steady
+# memory climb with no eviction. _sweep_numpad_state drops anything untouched
+# past the TTL (set NUMPAD_STATE_TTL_S=0 to disable).
+_numpad_state_ts: dict = {}
+_NUMPAD_STATE_TTL_S = int(os.environ.get("NUMPAD_STATE_TTL_S", str(6 * 3600)))
+
 _DIGIT_ACTIONS = frozenset({"bs", "dot"})
+
+
+def _touch_numpad_state(key, st) -> None:
+    """Store/refresh a numpad buffer and stamp its last-touch time."""
+    _numpad_state[key] = st
+    _numpad_state_ts[key] = time.monotonic()
+
+
+def _sweep_numpad_state(now: float | None = None) -> None:
+    """Evict numpad buffers abandoned past the TTL (see _numpad_state_ts)."""
+    if _NUMPAD_STATE_TTL_S <= 0:
+        return
+    now = time.monotonic() if now is None else now
+    stale = [k for k, ts in _numpad_state_ts.items() if now - ts > _NUMPAD_STATE_TTL_S]
+    for k in stale:
+        _numpad_state.pop(k, None)
+        _numpad_state_ts.pop(k, None)
+    if stale:
+        logger.info("kitchen numpad: swept %d abandoned buffer(s)", len(stale))
 
 
 def _is_numpad_key(action: str) -> bool:
@@ -1688,10 +1719,12 @@ async def _handle_numpad_key(query, session_id, item_code, action) -> None:
                 await query.answer("Sesi dah tamat — tunggu borang baru.")
             return
         st = {"buffer": session.get("buffer") or "", "phase": session.get("phase") or PHASE_COOKED}
-        _numpad_state[key] = st
 
     # In-memory mutation (synchronous, no await) — atomic within this task.
     st["buffer"] = apply_key(st["buffer"], _action_to_key(action), unit)
+    # Store + stamp (refreshes the TTL on every keypress so an actively-edited
+    # buffer is never swept mid-entry).
+    _touch_numpad_state(key, st)
     display = buffer_display(st["buffer"])
 
     t_ans = time.monotonic()
@@ -1710,6 +1743,7 @@ def _clear_numpad_state(session_id) -> None:
     sid = str(session_id)
     for k in [k for k in _numpad_state if k[2] == sid]:
         _numpad_state.pop(k, None)
+        _numpad_state_ts.pop(k, None)
 
 
 async def handle_kitchen_callback(update, context) -> None:
@@ -1808,9 +1842,14 @@ async def handle_kitchen_callback(update, context) -> None:
         current = format_value(existing, unit) if existing is not None else "—"
         chat_id = query.message.chat_id if query.message else None
         user_id = query.from_user.id if query.from_user else None
-        _numpad_state[_numpad_key(chat_id, user_id, session_id, item_code)] = {
-            "buffer": "", "phase": phase,
-        }
+        # Opening an item is the only place new buffers are created, so sweep
+        # abandoned ones here — keeps _numpad_state bounded without touching the
+        # per-digit fast path.
+        _sweep_numpad_state()
+        _touch_numpad_state(
+            _numpad_key(chat_id, user_id, session_id, item_code),
+            {"buffer": "", "phase": phase},
+        )
         with contextlib.suppress(Exception):
             await query.edit_message_text(
                 numpad_text(phase, meta["label"], unit, current),

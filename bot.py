@@ -131,6 +131,39 @@ ZAI_VERIFY_MODEL = os.environ.get("ZAI_VERIFY_MODEL", ZAI_MODEL)
 ZAI_OCR_PROVIDER = os.environ.get("ZAI_OCR_PROVIDER", "glm-4.6v-flash")
 IMAGE_RESIZE_ENABLED = os.environ.get("IMAGE_RESIZE_ENABLED", "true").lower() == "true"
 IMAGE_MAX_DIM = int(os.environ.get("IMAGE_MAX_DIM", "1600"))
+
+# Memory guard for receipt OCR. concurrent_updates(True) (see run_bot) lets PTB
+# process every update as an independent task, so a burst of receipt photos
+# (e.g. several outlets uploading at shift close) would otherwise decode N full
+# phone photos with Pillow AT THE SAME TIME — each decode is width*height*3
+# bytes plus an exif-transpose copy plus the resize intermediate, so a single
+# 12MP photo transiently costs ~80-100MB and N of them in parallel is the most
+# likely OOM trigger on a small instance. This semaphore caps how many receipts
+# sit in the heavy region (download -> decode -> OCR -> verify -> archive) at
+# once, bounding peak RSS regardless of how many photos arrive together. Numpad
+# taps and text commands are unaffected — they never take this lock.
+OCR_MAX_CONCURRENCY = max(1, int(os.environ.get("OCR_MAX_CONCURRENCY", "2")))
+_ocr_semaphore = asyncio.Semaphore(OCR_MAX_CONCURRENCY)
+
+
+def _release_freed_memory() -> None:
+    """Best-effort return of freed heap arenas to the OS after a receipt.
+
+    CPython frees the large image buffers when they go out of scope, but glibc's
+    allocator keeps the arenas mapped, so RSS ratchets UP after each OCR burst
+    and never comes back down — which reads on Render's memory graph like a leak
+    even though no Python object is retained. A gc pass + malloc_trim hands the
+    pages back. Linux/glibc only and fully guarded; a no-op anywhere else."""
+    import gc
+
+    gc.collect()
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL("libc.so.6")
+        libc.malloc_trim(0)
+    except Exception:  # noqa: BLE001 - non-glibc / unavailable: harmless to skip
+        pass
 RECEIPTS_TABLE = "receipts"
 AUDIT_TABLE = "audit_responses"
 STAFF_ADVANCES_TABLE = "staff_advances"
@@ -1389,55 +1422,85 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await message.reply_text("Processing receipt…")
 
     photo = message.photo[-1]
-    file = await context.bot.get_file(photo.file_id)
-    image_bytes = bytes(await file.download_as_bytearray())
-
-    # Persist the image for every receipt (re-OCR / model comparison / debug).
-    # Capture the Telegram file_id (free fallback reference) and kick off a
-    # best-effort Cloudinary archive of the ORIGINAL full-res bytes (before
-    # resize downscales them) as a background task. It runs concurrently with
-    # OCR — which dominates latency — so archival adds ~nothing to the live
-    # flow, and upload_receipt_image never raises (returns None on failure).
     photo_file_id = photo.file_id
-    image_upload_task = asyncio.create_task(
-        asyncio.to_thread(upload_receipt_image, image_bytes)
-    )
 
-    if IMAGE_RESIZE_ENABLED:
-        image_bytes = await asyncio.to_thread(
-            resize_for_ocr, image_bytes, IMAGE_MAX_DIM
+    # Everything from here to collecting the archived image_url holds large byte
+    # buffers and decoded Pillow images in memory, so it runs under the OCR
+    # semaphore to cap how many receipts decode at once (see OCR_MAX_CONCURRENCY).
+    # image_bytes/image_upload_task are bound to None first so the `finally` can
+    # release them unconditionally even if get_file/download raises.
+    image_bytes = None
+    image_upload_task = None
+    await _ocr_semaphore.acquire()
+    try:
+        file = await context.bot.get_file(photo.file_id)
+        image_bytes = bytes(await file.download_as_bytearray())
+
+        # Persist the image for every receipt (re-OCR / model comparison /
+        # debug). Kick off a best-effort Cloudinary archive of the ORIGINAL
+        # full-res bytes (before resize downscales them) as a background task.
+        # It runs concurrently with OCR — which dominates latency — so archival
+        # adds ~nothing to the live flow, and upload_receipt_image never raises
+        # (returns None on failure).
+        image_upload_task = asyncio.create_task(
+            asyncio.to_thread(upload_receipt_image, image_bytes)
         )
 
-    ocr_start = time.monotonic()
-    try:
-        if ZAI_OCR_PROVIDER == "glm-ocr":
-            from ocr_glm import extract_with_glm_ocr
-            parsed = await extract_with_glm_ocr(image_bytes)
-        else:
-            parsed = await extract_with_glm_chat(image_bytes)
-    except Exception:
-        logger.exception("OCR failed (provider=%s)", ZAI_OCR_PROVIDER)
-        # Receipt won't be saved, so the archive isn't needed — let the
-        # background upload finish quietly rather than orphaning the task.
-        image_upload_task.cancel()
-        await message.reply_text("Failed to read receipt. Try a clearer photo.")
-        return
-    ocr_latency = time.monotonic() - ocr_start
-    logger.info(
-        "OCR pipeline complete: provider=%s total_latency=%.2fs merchant=%r total=%s",
-        ZAI_OCR_PROVIDER, ocr_latency, parsed.get("merchant"), parsed.get("total"),
-    )
+        if IMAGE_RESIZE_ENABLED:
+            image_bytes = await asyncio.to_thread(
+                resize_for_ocr, image_bytes, IMAGE_MAX_DIM
+            )
 
-    # Normalise to a single internal shape: chat returns "date", glm-ocr returns
-    # "receipt_date". Use receipt_date as canonical going forward.
-    if parsed.get("receipt_date") is None and parsed.get("date") is not None:
-        parsed["receipt_date"] = parsed.get("date")
+        ocr_start = time.monotonic()
+        try:
+            if ZAI_OCR_PROVIDER == "glm-ocr":
+                from ocr_glm import extract_with_glm_ocr
+                parsed = await extract_with_glm_ocr(image_bytes)
+            else:
+                parsed = await extract_with_glm_chat(image_bytes)
+        except Exception:
+            logger.exception("OCR failed (provider=%s)", ZAI_OCR_PROVIDER)
+            # Receipt won't be saved, so the archive isn't needed — let the
+            # background upload finish quietly rather than orphaning the task.
+            image_upload_task.cancel()
+            await message.reply_text("Failed to read receipt. Try a clearer photo.")
+            return
+        ocr_latency = time.monotonic() - ocr_start
+        logger.info(
+            "OCR pipeline complete: provider=%s total_latency=%.2fs merchant=%r total=%s",
+            ZAI_OCR_PROVIDER, ocr_latency, parsed.get("merchant"), parsed.get("total"),
+        )
 
-    # Single safety net for both OCR providers: ensure items is always a list
-    # of dicts before anything (verifier, alerts, audit, Supabase) reads it.
-    parsed["items"] = normalize_items(parsed.get("items"))
+        # Normalise to a single internal shape: chat returns "date", glm-ocr
+        # returns "receipt_date". Use receipt_date as canonical going forward.
+        if parsed.get("receipt_date") is None and parsed.get("date") is not None:
+            parsed["receipt_date"] = parsed.get("date")
 
-    verification, verify_prefix = await run_verification(image_bytes, parsed)
+        # Single safety net for both OCR providers: ensure items is always a
+        # list of dicts before anything (verifier, alerts, audit, Supabase)
+        # reads it.
+        parsed["items"] = normalize_items(parsed.get("items"))
+
+        verification, verify_prefix = await run_verification(image_bytes, parsed)
+
+        # Collect the background image archive result (started before OCR, so it
+        # has overlapped the slow OCR/verification work). Never let it break the
+        # save.
+        try:
+            image_url = await image_upload_task
+        except Exception:
+            logger.warning("Receipt image archive task failed; continuing", exc_info=True)
+            image_url = None
+    finally:
+        # Drop the big buffers BEFORE releasing the lock so the next waiting
+        # receipt doesn't decode while this one's image is still resident, and
+        # hand the freed arenas back to the OS so RSS doesn't ratchet up across
+        # a burst. image_upload_task already owns its own reference to the
+        # original bytes for as long as the upload runs.
+        image_bytes = None
+        image_upload_task = None
+        _release_freed_memory()
+        _ocr_semaphore.release()
 
     # PR #24: classify receipt type before any downstream logic. Only
     # SUPPLIER_PURCHASE receipts trigger price aggregation, spike alerts,
@@ -1454,14 +1517,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         total=_to_float(parsed.get("total")),
         merchant=parsed.get("merchant"),
     )
-
-    # Collect the background image archive result (started before OCR, so it has
-    # overlapped the slow OCR/verification work). Never let it break the save.
-    try:
-        image_url = await image_upload_task
-    except Exception:
-        logger.warning("Receipt image archive task failed; continuing", exc_info=True)
-        image_url = None
 
     user = update.effective_user
     merchant_raw = parsed.get("merchant")

@@ -58,6 +58,11 @@ def resize_for_ocr(
                 )
                 return image_bytes
 
+            # exif_transpose returns a NEW image (rotated) when EXIF is present;
+            # convert() makes yet another. On big phone photos each copy is
+            # width*height*3 bytes, so close every intermediate explicitly
+            # rather than waiting for GC — under a burst of receipts these
+            # decode buffers are the dominant transient memory cost.
             oriented = ImageOps.exif_transpose(img)
             oriented.thumbnail(
                 (target_max_dim, target_max_dim), Image.Resampling.LANCZOS
@@ -65,11 +70,17 @@ def resize_for_ocr(
             resized_dims = oriented.size
 
             if oriented.mode not in ("RGB", "L"):
-                oriented = oriented.convert("RGB")
+                converted = oriented.convert("RGB")
+                oriented.close()
+                oriented = converted
 
             buf = io.BytesIO()
-            oriented.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
-            resized_bytes = buf.getvalue()
+            try:
+                oriented.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
+                resized_bytes = buf.getvalue()
+            finally:
+                buf.close()
+                oriented.close()
     except Exception as exc:
         logger.warning(
             "resize_for_ocr: decode/resize failed (%s: %s); returning original bytes",
