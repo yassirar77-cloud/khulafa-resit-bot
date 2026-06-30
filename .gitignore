@@ -4,3 +4,7 @@ __pycache__/
 .venv/
 venv/
 .env
+
+# Date-repair run artifacts (generated when date-repair code runs, e.g. during
+# tests). Transient — not source.
+date_repair_journal_*.jsonl
