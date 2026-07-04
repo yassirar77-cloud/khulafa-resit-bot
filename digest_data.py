@@ -563,6 +563,28 @@ def _kitchen_usage(client, now_my) -> list:
     return ku.gather_digest_usage(client, business_date)
 
 
+def digest_already_sent(client, recipient, now_my) -> bool:
+    """True when a ``success`` digest_log row already exists for this recipient
+    on the current MY-local day — the idempotency guard against a re-run cron
+    double-sending the whole multi-message digest. Fail-open: if the check
+    itself errors, return False (a rare duplicate beats a missing digest)."""
+    start_local = datetime.combine(now_my.date(), time.min, tzinfo=MALAYSIA_TZ)
+    start_utc = start_local.astimezone(timezone.utc).isoformat()
+    try:
+        rows = _rows(
+            client.table(DIGEST_LOG_TABLE)
+            .select("recipient")
+            .eq("recipient", recipient)
+            .eq("status", "success")
+            .gte("sent_at", start_utc)
+            .execute()
+        )
+    except Exception:
+        logger.warning("digest: already-sent check failed (sending anyway)", exc_info=True)
+        return False
+    return bool(rows)
+
+
 def log_digest(client, recipient, message_text, status, error_msg=None, message_bytes=None) -> None:
     payload = {
         "recipient": recipient,

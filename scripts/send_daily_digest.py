@@ -33,6 +33,7 @@ from digest import build_digest_messages, parse_mode_attempts  # noqa: E402
 from digest_data import (  # noqa: E402
     FOOD_COST_LOOKBACK_DAYS,
     MALAYSIA_TZ,
+    digest_already_sent,
     gather_digest_data,
     log_digest,
 )
@@ -107,11 +108,27 @@ def _merchant_review_digest_line(client):
         return None
 
 
-def run(client, *, recipients, now_my, send_fn, data=None, plain=False) -> dict:
+def run(client, *, recipients, now_my, send_fn, data=None, plain=False, force=False) -> dict:
     """Build + deliver the digest to each recipient, logging each outcome.
     Returns ``{recipient: status}``. ``send_fn(recipient, text, parse_mode)``
     must raise on failure; delivery falls back to plain text on a Markdown
-    parse error so it always gets through."""
+    parse error so it always gets through.
+
+    Idempotent per MY-day: a recipient who already has a ``success``
+    digest_log row today is skipped (status ``skipped_duplicate``), so a
+    cron re-run / manual re-invocation can't double-send. ``force=True``
+    bypasses the guard for a deliberate corrected re-send."""
+    if not force:
+        pending, skipped = [], []
+        for recipient in recipients:
+            (skipped if digest_already_sent(client, recipient, now_my) else pending).append(recipient)
+        if skipped:
+            logger.info("Digest already sent today to %s — skipping (use --force to re-send)", skipped)
+        recipients = pending
+        if not recipients:
+            return {r: "skipped_duplicate" for r in skipped}
+    else:
+        skipped = []
     if data is None:
         data = gather_digest_data(client, now_my)
     messages = build_digest_messages(data, now_my)
@@ -144,6 +161,8 @@ def run(client, *, recipients, now_my, send_fn, data=None, plain=False) -> dict:
             error = "delivered as plain text (markdown parse fallback)"
         log_digest(client, recipient, full_text, status, error, message_bytes=message_bytes)
         summary[recipient] = status
+    for recipient in skipped:
+        summary[recipient] = "skipped_duplicate"
     return summary
 
 
@@ -153,6 +172,10 @@ def main() -> None:
     parser.add_argument(
         "--plain", action="store_true",
         help="send as plain text (no Markdown) — use if formatting keeps breaking",
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="re-send even if today's digest was already delivered (corrected re-send)",
     )
     args = parser.parse_args()
 
@@ -164,7 +187,8 @@ def main() -> None:
     now_my = datetime.now(MALAYSIA_TZ)
     _reconcile_before_digest(client, now_my)
     try:
-        summary = run(client, recipients=recipients, now_my=now_my, send_fn=_telegram_send, plain=args.plain)
+        summary = run(client, recipients=recipients, now_my=now_my, send_fn=_telegram_send,
+                      plain=args.plain, force=args.force)
     except Exception as exc:  # noqa: BLE001
         # A build/deliver crash must not vanish into the cron log: record a
         # failed digest_log row per recipient (best-effort — the DB itself may

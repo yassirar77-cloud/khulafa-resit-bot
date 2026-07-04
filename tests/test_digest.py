@@ -215,14 +215,30 @@ class Splitting(unittest.TestCase):
 class _FakeQuery:
     def __init__(self, store, table):
         self.store, self.table, self.payload = store, table, None
+        self._filters = []
 
     def insert(self, payload):
         self.payload = payload
         return self
 
+    def select(self, _columns):
+        return self
+
+    def eq(self, column, value):
+        self._filters.append(lambda r: r.get(column) == value)
+        return self
+
+    def gte(self, column, value):
+        self._filters.append(lambda r: str(r.get(column, "")) >= str(value))
+        return self
+
     def execute(self):
-        self.store.setdefault(self.table, []).append(self.payload)
-        return types.SimpleNamespace(data=[self.payload])
+        if self.payload is not None:
+            self.store.setdefault(self.table, []).append(self.payload)
+            return types.SimpleNamespace(data=[self.payload])
+        rows = [r for r in self.store.get(self.table, [])
+                if all(f(r) for f in self._filters)]
+        return types.SimpleNamespace(data=rows)
 
 
 class FakeClient:
@@ -330,6 +346,57 @@ class DegradedGather(unittest.TestCase):
     def test_no_warning_block_when_nothing_degraded(self):
         messages = digest.build_digest_messages(dict(EMPTY_DATA), NOW)
         self.assertNotIn("DATA TAK LENGKAP", "\n\n".join(messages))
+
+
+class DedupeGuard(unittest.TestCase):
+    def _client_with_success_row(self):
+        client = FakeClient()
+        client.store["digest_log"] = [{
+            "recipient": 123, "status": "success",
+            "sent_at": NOW.astimezone(ZoneInfo("UTC")).isoformat(),
+        }]
+        return client
+
+    def test_second_run_same_day_is_skipped(self):
+        client = self._client_with_success_row()
+        sent = []
+        summary = send_daily_digest.run(
+            client, recipients=[123], now_my=NOW,
+            send_fn=lambda r, t, pm: sent.append(r), data=EMPTY_DATA,
+        )
+        self.assertEqual(summary, {123: "skipped_duplicate"})
+        self.assertEqual(sent, [])
+        self.assertEqual(len(client.store["digest_log"]), 1)  # no new log row
+
+    def test_force_resends_despite_success_row(self):
+        client = self._client_with_success_row()
+        sent = []
+        summary = send_daily_digest.run(
+            client, recipients=[123], now_my=NOW,
+            send_fn=lambda r, t, pm: sent.append(r), data=EMPTY_DATA, force=True,
+        )
+        self.assertEqual(summary, {123: "success"})
+        self.assertTrue(sent)
+
+    def test_failed_run_does_not_block_retry(self):
+        client = FakeClient()
+        client.store["digest_log"] = [{
+            "recipient": 123, "status": "failed",
+            "sent_at": NOW.astimezone(ZoneInfo("UTC")).isoformat(),
+        }]
+        summary = send_daily_digest.run(
+            client, recipients=[123], now_my=NOW,
+            send_fn=lambda r, t, pm: None, data=EMPTY_DATA,
+        )
+        self.assertEqual(summary, {123: "success"})
+
+    def test_guard_fails_open_on_query_error(self):
+        class _NoSelectClient(FakeClient):
+            def table(self, name):
+                raise RuntimeError("db down")
+
+        import digest_data
+        self.assertFalse(digest_data.digest_already_sent(_NoSelectClient(), 123, NOW))
 
 
 class Migration(unittest.TestCase):
