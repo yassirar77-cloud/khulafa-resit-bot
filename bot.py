@@ -525,7 +525,7 @@ def store_receipt(record: dict) -> dict:
             result = supabase.table(RECEIPTS_TABLE).insert(payload).execute()
         elif "bill_to" in payload and "bill_to" in msg:
             logger.warning(
-                "receipts.bill_to column missing — apply migrations/add_bill_to_column.sql. "
+                "receipts.bill_to column missing — apply migrations/0034_add_bill_to_column.sql. "
                 "Saving without bill_to for now."
             )
             _bill_to_column_available = False
