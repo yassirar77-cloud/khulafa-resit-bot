@@ -2,7 +2,7 @@
 """PR #35 — POS shift-close email ingestion (CLI entry point).
 
 Thin wrapper over ``sales_ingest.run_ingest_once`` for manual / cron use. The
-bot polls the same function in-process every 30 min via APScheduler, so a
+bot polls the same function in-process every 15 min via APScheduler, so a
 separate Render cron job is intentionally NOT created ($0 extra).
 
   Manual run:

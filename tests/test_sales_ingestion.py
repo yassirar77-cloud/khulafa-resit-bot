@@ -364,6 +364,29 @@ class SelfHealingTests(unittest.TestCase):
         self.assertEqual(store.logs, [])  # suppressed — no per-poll spam
         self.assertNotIn(b"1", mailbox.seen)
 
+    def test_dead_letter_caps_skipped_unknown_spam_too(self):
+        # An unregistered outlet's email stays UNREAD forever (by design, so it
+        # ingests once registered) — but past the threshold it must stop
+        # writing a fresh sales_ingest_log row every 15-min poll.
+        unknown = make_email("S-FOO  SHIFTCLOSE (1)", _klang_content(),
+                             message_id="<unreg>")
+        mailbox = FakeMailbox([(b"1", unknown)])
+        store = FakeStore(error_counts={"<unreg>": DEAD_LETTER_THRESHOLD})
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["dead_letter"], 1)
+        self.assertEqual(summary["skipped_unknown"], 0)
+        self.assertEqual(store.logs, [])           # suppressed — no per-poll spam
+        self.assertNotIn(b"1", mailbox.seen)       # still unread for recovery
+
+    def test_below_threshold_skipped_unknown_still_logs(self):
+        unknown = make_email("S-FOO  SHIFTCLOSE (1)", _klang_content(),
+                             message_id="<unreg2>")
+        mailbox = FakeMailbox([(b"1", unknown)])
+        store = FakeStore(error_counts={"<unreg2>": DEAD_LETTER_THRESHOLD - 1})
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["skipped_unknown"], 1)
+        self.assertTrue(any(e["status"] == "skipped_unknown" for e in store.logs))
+
     def test_below_threshold_still_logs_error(self):
         bad = make_email("S-JAKEL SHIFTCLOSE (1)", "garbage with no sales total",
                          message_id="<warming>")

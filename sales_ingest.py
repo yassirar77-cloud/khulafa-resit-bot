@@ -364,17 +364,19 @@ class SupabaseSalesStore:
             logger.warning("Could not write sales_ingest_log row", exc_info=True)
 
     def load_error_counts(self) -> dict:
-        """Count prior ``error`` rows per ``source_message_id`` (one query,
-        reused for the whole batch). Drives the dead-letter cap: once a
-        message-id has failed ``DEAD_LETTER_THRESHOLD`` times we stop re-logging
-        it (no per-poll log spam) and surface it in the nightly digest instead.
-        No migration needed — we count existing ``sales_ingest_log`` rows."""
+        """Count prior ``error``/``skipped_unknown`` rows per
+        ``source_message_id`` (one query, reused for the whole batch). Drives
+        the dead-letter cap: once a message-id has failed/been-unknown
+        ``DEAD_LETTER_THRESHOLD`` times we stop re-logging it (no per-poll log
+        spam — an unregistered outlet otherwise writes ~96 rows/day forever)
+        and surface errors in the nightly digest instead. No migration needed —
+        we count existing ``sales_ingest_log`` rows."""
         from collections import Counter
         try:
             resp = (
                 self.client.table(SALES_INGEST_LOG_TABLE)
                 .select("source_message_id")
-                .eq("status", "error")
+                .in_("status", ["error", "skipped_unknown"])
                 .execute()
             )
         except Exception:  # noqa: BLE001 - degrade gracefully if the log is unavailable
@@ -513,6 +515,11 @@ DEAD_LETTER_THRESHOLD = 3
 # Statuses whose email we flag \Seen (terminal decisions). skipped_unknown and
 # error are left UNREAD so they retry once the outlet is registered / fixed.
 _MARK_SEEN_STATUSES = frozenset({"inserted", "skipped", "skipped_inactive"})
+
+# Statuses subject to the dead-letter log cap: both re-occur every poll while
+# unresolved (a broken attachment / an unregistered outlet), so past the
+# threshold they are counted but no longer re-logged.
+_DEAD_LETTER_STATUSES = frozenset({"error", "skipped_unknown"})
 _COUNTER_BY_STATUS = {
     "inserted": "inserted",
     "skipped": "skipped",
@@ -560,11 +567,12 @@ def run(*, store, mailbox, now_my, since=None) -> dict:
             logger.exception("Ingest failed for %r", email_dict.get("subject"))
             status, detail = "error", f"exception: {exc}"
 
-        # Part 4: dead-letter cap. Once a message-id has already failed
-        # DEAD_LETTER_THRESHOLD times, stop re-logging the error every poll —
-        # the nightly digest surfaces it instead. The email is still left UNREAD
-        # (error is not a mark-seen status), so a code fix recovers it next poll.
-        if status == "error":
+        # Part 4: dead-letter cap. Once a message-id has already failed (or been
+        # skipped_unknown) DEAD_LETTER_THRESHOLD times, stop re-logging it every
+        # poll — the nightly digest surfaces errors instead. The email is still
+        # left UNREAD (neither is a mark-seen status), so a code fix / outlet
+        # registration recovers it next poll.
+        if status in _DEAD_LETTER_STATUSES:
             mid = email_dict.get("message_id")
             if mid and error_counts.get(mid, 0) >= DEAD_LETTER_THRESHOLD:
                 summary["dead_letter"] += 1

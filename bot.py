@@ -4527,7 +4527,7 @@ async def top_items_yesterday_command(update: Update, context: ContextTypes.DEFA
 
 
 async def poll_sales_emails() -> None:
-    """APScheduler job: ingest unread shift-close emails (every 30 min, 24/7)."""
+    """APScheduler job: ingest unread shift-close emails (every 15 min, 24/7)."""
     if not os.environ.get("GMAIL_INBOX") or not os.environ.get("GMAIL_APP_PASSWORD"):
         logger.info("Sales ingest poll skipped: GMAIL_INBOX/GMAIL_APP_PASSWORD not set")
         return
