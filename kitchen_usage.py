@@ -2003,6 +2003,38 @@ async def post_left_forms(application) -> None:
 RECONCILE_LOOKBACK_DAYS = 3
 
 
+async def _send_group_message(bot, chat_id, text, *, what: str) -> bool:
+    """Send one group message, retrying once after a Telegram flood-wait
+    (RetryAfter) or timeout. Never raises — a failed send must not abort the
+    group fan-out loop — but every failure is LOGGED and reported through the
+    return value so callers count only real deliveries."""
+    from telegram.error import RetryAfter, TimedOut
+
+    for attempt in (1, 2):
+        try:
+            await bot.send_message(chat_id=chat_id, text=text)
+            return True
+        except RetryAfter as exc:
+            if attempt == 2:
+                logger.warning(
+                    "kitchen: %s to chat %s dropped after flood-wait retry: %s",
+                    what, chat_id, exc,
+                )
+                return False
+            await asyncio.sleep(float(getattr(exc, "retry_after", 3)) + 1)
+        except TimedOut:
+            if attempt == 2:
+                logger.warning(
+                    "kitchen: %s to chat %s dropped after timeout retry", what, chat_id
+                )
+                return False
+            await asyncio.sleep(2)
+        except Exception as exc:  # Forbidden (bot removed), bad chat id, ...
+            logger.warning("kitchen: %s to chat %s failed: %s", what, chat_id, exc)
+            return False
+    return False
+
+
 async def post_comparison_digests(
     application, *, notify_missing: bool = True, alert_missing_shift: bool = False
 ) -> None:
@@ -2076,9 +2108,10 @@ async def post_comparison_digests(
                 )
                 if evaluations:
                     summary = render_mini_summary(outlet_label, d, evaluations)
-                    with contextlib.suppress(Exception):
-                        await application.bot.send_message(chat_id=chat_id, text=summary)
-                    posted += 1
+                    if await _send_group_message(
+                        application.bot, chat_id, summary, what=f"comparison {d}"
+                    ):
+                        posted += 1
             pending = targets["pending"]  # newest first
             if alert_missing_shift:
                 # Final (14:00) pass: any still-incomplete day is an ingestion gap.
@@ -2087,12 +2120,12 @@ async def post_comparison_digests(
                         "kitchen STAGE2 missing-shift gap %s %s — coverage %s",
                         outlet_code, d, cov,
                     )
-                    with contextlib.suppress(Exception):
-                        await application.bot.send_message(
-                            chat_id=chat_id,
-                            text=render_pos_missing_shift(outlet_label, d, cov),
-                        )
-                    alerted += 1
+                    if await _send_group_message(
+                        application.bot, chat_id,
+                        render_pos_missing_shift(outlet_label, d, cov),
+                        what=f"missing-shift alert {d}",
+                    ):
+                        alerted += 1
             elif notify_missing and pending:
                 # 09:00: gentle "belum lengkap" for the most-recent pending day only.
                 d, cov = pending[0]
@@ -2100,12 +2133,12 @@ async def post_comparison_digests(
                     "kitchen STAGE2 defer %s %s — POS incomplete %s",
                     outlet_code, d, cov,
                 )
-                with contextlib.suppress(Exception):
-                    await application.bot.send_message(
-                        chat_id=chat_id,
-                        text=render_pos_incomplete(outlet_label, d, cov),
-                    )
-                deferred += 1
+                if await _send_group_message(
+                    application.bot, chat_id,
+                    render_pos_incomplete(outlet_label, d, cov),
+                    what=f"pos-incomplete note {d}",
+                ):
+                    deferred += 1
             # 11:00 (notify_missing False, alert_missing_shift False): silent.
         except Exception as exc:
             if _is_missing_table_error(exc):
