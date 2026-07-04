@@ -401,6 +401,52 @@ def test_night_cook_creates_row_when_no_6pm_entry(monkeypatch):
     assert rows[0]["cooked_qty"] == 8  # starts at the night value
 
 
+def test_late_cooked_after_night_adds_instead_of_overwriting(monkeypatch):
+    """Out-of-order guard: night form submitted first (00:00), evening COOKED
+    submitted late (00:30). The late COOKED must ADD to the night quantities,
+    not overwrite them — and untouched items must not reset night values to 0."""
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    # Night form already submitted: ayam_goreng=20, ikan_kari=8 are on the row.
+    fake._store["kitchen_daily_usage"] = [
+        {"id": 1, "outlet_code": "BISTRO7", "business_date": "2026-06-24",
+         "item_code": "ayam_goreng", "item_label": "Ayam Goreng", "unit": "pcs",
+         "cooked_qty": 20, "left_qty": None},
+        {"id": 2, "outlet_code": "BISTRO7", "business_date": "2026-06-24",
+         "item_code": "ikan_kari", "item_label": "Ikan Kari", "unit": "pcs",
+         "cooked_qty": 8, "left_qty": None},
+    ]
+    night = dict(_night_session({"ayam_goreng": 20, "ikan_kari": 8}), status="submitted")
+    cooked = {
+        "id": "c1", "chat_id": -1, "outlet_code": "BISTRO7",
+        "business_date": "2026-06-24", "phase": "cooked", "status": "open",
+        "entries": {"ayam_goreng": 50},  # evening count keyed late; ikan_kari untouched
+    }
+    fake._store["kitchen_log_session"] = [night, cooked]
+
+    ku.finalize_submission(fake, dict(cooked), submitter="Chef")
+
+    rows = {r["item_code"]: r for r in fake.rows("kitchen_daily_usage")}
+    assert rows["ayam_goreng"]["cooked_qty"] == 70   # 20 (night) + 50 (evening), not 50
+    assert rows["ikan_kari"]["cooked_qty"] == 8      # untouched: night value preserved, not 0
+
+
+def test_cooked_before_night_still_overwrites_nothing_special(monkeypatch):
+    """Normal order (COOKED first, no submitted night session) keeps the plain
+    write semantics: keyed value, untouched -> 0."""
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store["kitchen_log_session"] = [_bistro_cooked_session()]
+    session = dict(fake._store["kitchen_log_session"][0])
+
+    ku.finalize_submission(fake, session, submitter="Chef")
+
+    rows = {r["item_code"]: r for r in fake.rows("kitchen_daily_usage")}
+    assert rows["ayam_goreng"]["cooked_qty"] == 50
+
+
 def test_night_cook_double_submit_guard(monkeypatch):
     # The session-submitted status is the guard: a submitted night session is a
     # no-op, so the additive add can't be applied twice via the handler.

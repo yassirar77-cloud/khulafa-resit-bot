@@ -1224,12 +1224,41 @@ def finalize_submission(client, session: dict, submitter: str):
         len(pending), outlet_code, business_date, phase,
     )
 
+    # Out-of-order guard: normally COOKED (18:00) lands before the additive
+    # NIGHT (00:00) form. But a chef can submit the night form first and the
+    # evening COOKED form late (00:30). A plain overwrite would then DISCARD
+    # the night addition — and reset untouched items' night values to 0 —
+    # understating Used and corrupting the STAGE 2 comparison. When a
+    # submitted night session already exists for this chat+day, the late
+    # COOKED submission becomes additive on top of the existing cooked_qty.
+    night_already_submitted = False
+    if phase == PHASE_COOKED:
+        try:
+            night_already_submitted = bool(_rows(
+                client.table(SESSION_TABLE)
+                .select("id")
+                .eq("chat_id", session.get("chat_id"))
+                .eq("business_date", business_date)
+                .eq("phase", PHASE_COOKED_NIGHT)
+                .eq("status", "submitted")
+                .limit(1)
+                .execute()
+            ))
+        except Exception:
+            logger.warning("kitchen: could not check for submitted night session", exc_info=True)
+        if night_already_submitted:
+            logger.info(
+                "kitchen: night form already submitted for %s %s — late COOKED "
+                "will ADD to existing cooked_qty instead of overwriting",
+                outlet_code, business_date,
+            )
+
     # The night phase ADDS to the existing cooked_qty, so pre-load the current
     # cooked_qty per item (base 0 when no 6PM row exists yet). The double-add
     # guard is the session itself: a cooked_night session is marked submitted at
     # the end, and the handler/scheduler never re-run a submitted session.
     existing_cooked = {}
-    if phase == PHASE_COOKED_NIGHT:
+    if phase == PHASE_COOKED_NIGHT or night_already_submitted:
         try:
             for r in _rows(
                 client.table(USAGE_TABLE)
@@ -1255,8 +1284,14 @@ def finalize_submission(client, session: dict, submitter: str):
             "unit": unit,
         }
         if phase == PHASE_COOKED:
-            # Untouched items default to 0 (staff key only what they cooked).
-            row["cooked_qty"] = value if value is not None else 0
+            if night_already_submitted:
+                # Late COOKED after the night form: add on top so the night
+                # quantities survive (untouched items add 0, keeping them).
+                base = existing_cooked.get(code) or 0
+                row["cooked_qty"] = base + (value if value is not None else 0)
+            else:
+                # Untouched items default to 0 (staff key only what they cooked).
+                row["cooked_qty"] = value if value is not None else 0
             row["cooked_by"] = submitter
             row["cooked_at"] = now_iso
         elif phase == PHASE_COOKED_NIGHT:
