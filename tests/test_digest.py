@@ -399,6 +399,46 @@ class DedupeGuard(unittest.TestCase):
         self.assertFalse(digest_data.digest_already_sent(_NoSelectClient(), 123, NOW))
 
 
+class SendRetries(unittest.TestCase):
+    def _run_with(self, side_effects):
+        calls = []
+
+        def fake_once(recipient, text, parse_mode):
+            calls.append(recipient)
+            effect = side_effects[len(calls) - 1]
+            if effect is not None:
+                raise effect
+
+        orig_once, orig_sleep = send_daily_digest._telegram_send_once, send_daily_digest.time.sleep
+        send_daily_digest._telegram_send_once = fake_once
+        send_daily_digest.time.sleep = lambda s: None
+        try:
+            send_daily_digest._telegram_send(123, "hi", None)
+        finally:
+            send_daily_digest._telegram_send_once = orig_once
+            send_daily_digest.time.sleep = orig_sleep
+        return calls
+
+    def test_retries_timeout_then_succeeds(self):
+        import urllib.error
+        calls = self._run_with([urllib.error.URLError("timed out"), None])
+        self.assertEqual(len(calls), 2)
+
+    def test_permanent_400_raises_immediately(self):
+        import io
+        import urllib.error
+        err = urllib.error.HTTPError("u", 400, "Bad Request", {}, io.BytesIO(b""))
+        with self.assertRaises(urllib.error.HTTPError):
+            self._run_with([err, None])
+
+    def test_429_retried(self):
+        import io
+        import urllib.error
+        err = urllib.error.HTTPError("u", 429, "Too Many Requests", {}, io.BytesIO(b""))
+        calls = self._run_with([err, None])
+        self.assertEqual(len(calls), 2)
+
+
 class Migration(unittest.TestCase):
     def test_digest_log_table(self):
         with open(os.path.join(REPO_ROOT, "migrations", "0013_digest_log.sql")) as f:

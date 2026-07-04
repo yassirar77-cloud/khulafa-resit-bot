@@ -18,6 +18,8 @@ import json
 import logging
 import os
 import sys
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
@@ -61,9 +63,7 @@ def _recipients() -> list:
     return ids
 
 
-def _telegram_send(recipient, text, parse_mode) -> None:
-    """Send one message with the given parse_mode (None = plain text). Raises on
-    a non-200 Telegram response so the caller can fall back / record failure."""
+def _telegram_send_once(recipient, text, parse_mode) -> None:
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     fields = {
         "chat_id": recipient,
@@ -78,6 +78,45 @@ def _telegram_send(recipient, text, parse_mode) -> None:
         body = json.loads(resp.read().decode())
     if not body.get("ok"):
         raise RuntimeError(f"Telegram error: {body.get('description')}")
+
+
+_SEND_RETRIES = 3
+
+
+def _telegram_send(recipient, text, parse_mode) -> None:
+    """Send one message with the given parse_mode (None = plain text), retrying
+    TRANSIENT failures — network errors/timeouts, HTTP 429 (honouring
+    Retry-After) and 5xx — with backoff. There is exactly one 23:00 cron fire a
+    night, so a 20-second Telegram blip must not cost the whole digest.
+    Permanent errors (400 parse errors etc.) raise immediately so the caller's
+    HTML→plain fallback still engages."""
+    for attempt in range(_SEND_RETRIES + 1):
+        try:
+            _telegram_send_once(recipient, text, parse_mode)
+            return
+        except urllib.error.HTTPError as exc:
+            transient = exc.code == 429 or exc.code >= 500
+            if not transient or attempt == _SEND_RETRIES:
+                raise
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            try:
+                delay = float(retry_after)
+            except (TypeError, ValueError):
+                delay = 2.0 * (attempt + 1)
+            logger.warning(
+                "digest send to %s got HTTP %s — retrying in %.0fs (%d/%d)",
+                recipient, exc.code, min(delay, 60), attempt + 1, _SEND_RETRIES,
+            )
+            time.sleep(min(delay, 60))
+        except OSError as exc:  # URLError / timeout / connection reset
+            if attempt == _SEND_RETRIES:
+                raise
+            delay = 2.0 * (attempt + 1)
+            logger.warning(
+                "digest send to %s failed (%s) — retrying in %.0fs (%d/%d)",
+                recipient, exc, delay, attempt + 1, _SEND_RETRIES,
+            )
+            time.sleep(delay)
 
 
 def _deliver_message(send_fn, recipient, message, plain):
