@@ -1250,12 +1250,12 @@ def test_outlet_code_from_text_titles():
 
 
 def test_kl_sg_besi_resolves_to_klrazak_not_sbesi():
-    # Regression: group -5163000846 "Kl Sg Besi" is K.L Razak.
+    # Regression: group -100999001 "Kl Sg Besi" is K.L Razak.
     kg = _fresh_kitchen_groups()
     fake = FakeSupabase()
-    fake._store["receipts"] = [{"chat_id": -5163000846, "outlet": "Kl Sg Besi"}]
+    fake._store["receipts"] = [{"chat_id": -100999001, "outlet": "Kl Sg Besi"}]
     groups = dict(kg.configured_groups(fake))
-    assert groups == {-5163000846: "KLRAZAK"}
+    assert groups == {-100999001: "KLRAZAK"}
     assert "SBESI" not in groups.values()
 
 

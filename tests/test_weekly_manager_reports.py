@@ -95,7 +95,7 @@ class Content(unittest.TestCase):
 
 
 class Routing(unittest.TestCase):
-    OWNER = 543674519
+    OWNER = 111111111
 
     def test_flag_off_routes_to_owner_with_test_prefix(self):
         d = wmr.route_message(False, "SEK 20", 111, self.OWNER)
