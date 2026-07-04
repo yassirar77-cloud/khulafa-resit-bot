@@ -11,6 +11,8 @@ the SQL carries the same clauses).
 
 from datetime import date, timedelta
 
+from date_utils import today_my
+
 PRICE_MOVEMENTS_VIEW = "price_movements"
 REFRESH_FUNCTION = "refresh_price_movements"
 
@@ -58,7 +60,7 @@ def row_passes_filters(receipt, resolution, today=None) -> bool:
     d = _date_str(receipt.get("receipt_date"))
     if d is None:
         return False
-    today = today or date.today()
+    today = today or today_my()
     upper = (today + timedelta(days=FUTURE_GRACE_DAYS)).isoformat()
     return MIN_RECEIPT_DATE <= d <= upper
 

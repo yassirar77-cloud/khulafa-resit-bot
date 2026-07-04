@@ -34,6 +34,13 @@ DEFAULT_MAX_DRIFT_DAYS = 60
 DEFAULT_YEAR_FIX_TOLERANCE_DAYS = 14
 
 
+def today_my() -> date:
+    """Malaysia-local calendar date. The bot runs on a UTC server, where
+    ``date.today()`` is the PREVIOUS day between 00:00 and 08:00 MYT — every
+    'what day is it' default must use this instead."""
+    return datetime.now(_MY_TZ).date()
+
+
 _ISO_RE = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})$")
 _DMY_RE = re.compile(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$")
 
@@ -192,7 +199,7 @@ def effective_purchase_date(receipt_date, ingested_at, *, today=None,
     Pure: used by BOTH the read path (cadence/forecast) and the one-time repair,
     so they always agree on what "corrupt" means and what the fix is.
     """
-    today = today or date.today()
+    today = today or today_my()
     rd = _parse_local_date(receipt_date)
     ud = _parse_upload_date(ingested_at)
 

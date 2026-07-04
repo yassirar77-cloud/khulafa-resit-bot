@@ -26,6 +26,8 @@ from __future__ import annotations
 import logging
 import re
 from datetime import date, timedelta
+
+from date_utils import today_my
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -434,7 +436,7 @@ def validate_date(
     """
     if not isinstance(raw_text, str) or not raw_text.strip():
         return None, False
-    today = today or date.today()
+    today = today or today_my()
 
     label_candidates: list[date] = []
     for m in _LABEL_DATE_RE.finditer(raw_text):

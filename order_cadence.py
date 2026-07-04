@@ -22,6 +22,8 @@ from __future__ import annotations
 import statistics
 from datetime import date, datetime, timedelta
 
+from date_utils import today_my
+
 # Cadence labels.
 DAILY = "DAILY"
 TWICE_WEEKLY = "TWICE_WEEKLY"
@@ -145,7 +147,7 @@ def detect_cadence(raw_dates, *, today=None, lookback_days=90) -> dict:
       needs_review       bool
       reason             short human string explaining the classification
     """
-    today = today or date.today()
+    today = today or today_my()
     dates = _distinct_sorted_dates(raw_dates, lookback_days=lookback_days, today=today)
     sample_count = len(dates)
     last = dates[-1] if dates else None
@@ -214,7 +216,7 @@ def is_due(cadence_info: dict, *, today=None, tomorrow=None) -> dict:
 
     Returns ``{'due': bool, 'reason': str}``.
     """
-    today = today or date.today()
+    today = today or today_my()
     tomorrow = tomorrow or (today + timedelta(days=1))
     cadence = cadence_info.get("cadence")
 

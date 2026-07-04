@@ -336,7 +336,8 @@ def gather_order_drafts(supabase, *, today: date | None = None,
     the code). Returns ``{'target_day', 'outlets': [ {outlet_code, display,
     message, line_count, review_count} ], 'has_data'}``.
     """
-    today = today or date.today()
+    # MY-local, not date.today(): on the UTC server they differ 00:00-08:00 MYT.
+    today = today or date_utils.today_my()
     target_day = today + timedelta(days=1)
     display_for = display_for or (lambda code: code)
 
