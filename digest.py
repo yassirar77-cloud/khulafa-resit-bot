@@ -612,12 +612,39 @@ def render_blocks(data, now_my):
     return [b for b in blocks if b is not None]
 
 
+def _split_oversized_block(block, limit):
+    """Line-boundary split for a single block that alone exceeds the Telegram
+    limit (e.g. a huge cash-alert or kitchen-usage day). Without this the whole
+    message 400s ('message is too long') and the section is silently lost."""
+    pieces, current = [], ""
+    for line in block.split("\n"):
+        candidate = line if not current else current + "\n" + line
+        if current and len(candidate) > limit:
+            pieces.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        pieces.append(current)
+    # A single line longer than the limit still needs a hard cut.
+    return [p[i:i + limit] for p in pieces for i in range(0, len(p), limit)]
+
+
 def pack_messages(blocks, limit=TG_LIMIT):
-    """Pack section blocks into messages, splitting only at block (section)
-    boundaries so no section is torn in half."""
+    """Pack section blocks into messages, splitting at block (section)
+    boundaries; a block that alone exceeds the limit is split on line
+    boundaries as a last resort so it still gets delivered."""
     messages = []
     current = ""
     for block in blocks:
+        if len(block) > limit:
+            if current:
+                messages.append(current)
+                current = ""
+            parts = _split_oversized_block(block, limit)
+            messages.extend(parts[:-1])
+            current = parts[-1] if parts else ""
+            continue
         candidate = block if not current else current + "\n\n" + block
         if current and len(candidate) > limit:
             messages.append(current)

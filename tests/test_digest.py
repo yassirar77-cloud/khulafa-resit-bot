@@ -399,6 +399,25 @@ class DedupeGuard(unittest.TestCase):
         self.assertFalse(digest_data.digest_already_sent(_NoSelectClient(), 123, NOW))
 
 
+class OversizedBlock(unittest.TestCase):
+    def test_single_block_over_limit_is_split_on_lines(self):
+        big = "\n".join(f"- line {i} " + "x" * 60 for i in range(200))  # ~14k chars
+        self.assertGreater(len(big), digest.TG_LIMIT)
+        messages = digest.pack_messages(["HEADER", big, "FOOTER"])
+        self.assertTrue(all(len(m) <= digest.TG_LIMIT for m in messages))
+        # Nothing lost: every line survives across the splits.
+        joined = "\n".join(messages)
+        self.assertIn("- line 0 ", joined)
+        self.assertIn("- line 199 ", joined)
+        self.assertIn("FOOTER", joined)
+
+    def test_single_line_over_limit_is_hard_cut(self):
+        monster = "y" * (digest.TG_LIMIT * 2 + 10)
+        messages = digest.pack_messages([monster])
+        self.assertTrue(all(len(m) <= digest.TG_LIMIT for m in messages))
+        self.assertEqual(sum(len(m) for m in messages), len(monster))
+
+
 class SendRetries(unittest.TestCase):
     def _run_with(self, side_effects):
         calls = []
