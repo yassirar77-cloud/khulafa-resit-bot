@@ -142,7 +142,10 @@ IMAGE_MAX_DIM = int(os.environ.get("IMAGE_MAX_DIM", "1600"))
 # sit in the heavy region (download -> decode -> OCR -> verify -> archive) at
 # once, bounding peak RSS regardless of how many photos arrive together. Numpad
 # taps and text commands are unaffected — they never take this lock.
-OCR_MAX_CONCURRENCY = max(1, int(os.environ.get("OCR_MAX_CONCURRENCY", "2")))
+# Default 1: on the 512MB Render Starter even two parallel decodes (~100MB each
+# transient) plus the bot's baseline is OOM territory — raise via env only on a
+# bigger instance.
+OCR_MAX_CONCURRENCY = max(1, int(os.environ.get("OCR_MAX_CONCURRENCY", "1")))
 _ocr_semaphore = asyncio.Semaphore(OCR_MAX_CONCURRENCY)
 
 
