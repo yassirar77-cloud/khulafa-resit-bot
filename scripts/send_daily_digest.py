@@ -163,7 +163,17 @@ def main() -> None:
     client = _build_client()
     now_my = datetime.now(MALAYSIA_TZ)
     _reconcile_before_digest(client, now_my)
-    summary = run(client, recipients=recipients, now_my=now_my, send_fn=_telegram_send, plain=args.plain)
+    try:
+        summary = run(client, recipients=recipients, now_my=now_my, send_fn=_telegram_send, plain=args.plain)
+    except Exception as exc:  # noqa: BLE001
+        # A build/deliver crash must not vanish into the cron log: record a
+        # failed digest_log row per recipient (best-effort — the DB itself may
+        # be the thing that's down) and exit non-zero so Render shows the run
+        # as failed.
+        logger.exception("Digest run crashed before delivery")
+        for recipient in recipients:
+            log_digest(client, recipient, "", "failed", f"digest crashed: {exc}")
+        sys.exit(1)
     logger.info("Digest delivery: %s", summary)
 
 

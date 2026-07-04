@@ -211,6 +211,20 @@ def _header_block(now_my):
     ])
 
 
+def _degraded_block(degraded):
+    """Explicit warning when one or more section gatherers failed (DB error /
+    missing migration). Without this, the degraded defaults (zero receipts,
+    empty lists) would read as real numbers. Returns None when nothing failed."""
+    if not degraded:
+        return None
+    return "\n".join([
+        "⚠️ <b>DATA TAK LENGKAP</b> — sections below failed to load and show "
+        "zeros/empties, NOT real numbers:",
+        f"- {_html(', '.join(degraded))}",
+        "- Check Render logs, then /test_digest to re-send once fixed.",
+    ])
+
+
 def _today_block(today):
     return "\n".join([
         SECTION_HEADERS[0],
@@ -576,6 +590,7 @@ def render_blocks(data, now_my):
 
     blocks = [
         _header_block(now_my),
+        _degraded_block(data.get("degraded_sections", [])),
         _today_block(data.get("today", {})),
         _suppliers_block(suppliers),
         _sales_today_block(data.get("sales_today", {})),

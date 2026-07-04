@@ -510,30 +510,46 @@ def _dead_letter_emails(client, now_my) -> list:
     return dead_letter_emails(error_rows, inserted_ids, DEAD_LETTER_THRESHOLD)
 
 
-def _safe(fn, default, client, now_my):
-    """Run a new-section gatherer; on any failure (e.g. a migration not yet
-    applied) degrade to ``default`` rather than breaking the whole digest."""
+def _safe(fn, default, *args, failures=None):
+    """Run a section gatherer; on any failure (a migration not yet applied, a
+    transient Supabase error) degrade to ``default`` rather than breaking the
+    whole digest. When ``failures`` is given, the failed section name is
+    appended so the digest can SAY it is degraded instead of presenting the
+    default (usually zero/empty) as a real number."""
     try:
-        return fn(client, now_my)
+        return fn(*args)
     except Exception:
-        logger.warning("digest: %s failed", getattr(fn, "__name__", fn), exc_info=True)
+        name = getattr(fn, "__name__", str(fn)).lstrip("_")
+        logger.warning("digest: %s failed", name, exc_info=True)
+        if failures is not None:
+            failures.append(name)
         return default
 
 
 def gather_digest_data(client, now_my) -> dict:
+    # Every gatherer is wrapped: a single failing query (or an unreachable
+    # Supabase) must never take down the whole 23:00 digest with no message and
+    # no digest_log row. Failed section names land in degraded_sections, which
+    # the digest renders as an explicit warning so degraded zeros are never
+    # mistaken for real numbers.
+    failures: list = []
     data = {
-        "today": _today_receipts(client, now_my),
-        "pm_window_rows": _pm_window(client, now_my),
-        "data_quality": _data_quality(client),
-        "outliers": {"count": _outlier_count(client), "threshold": OUTLIER_TOTAL_MAX},
-        "new_suppliers": _new_suppliers(client, now_my),
-        "today_suppliers": _safe(_today_suppliers, [], client, now_my),
-        "outlet_spending": _safe(_outlet_spending_week, [], client, now_my),
-        "top_items_yesterday": _safe(_top_items_yesterday, {}, client, now_my),
-        "dead_letter_emails": _safe(_dead_letter_emails, [], client, now_my),
-        "kitchen_usage": _safe(_kitchen_usage, [], client, now_my),
+        "today": _safe(_today_receipts, {}, client, now_my, failures=failures),
+        "pm_window_rows": _safe(_pm_window, [], client, now_my, failures=failures),
+        "data_quality": _safe(_data_quality, {}, client, failures=failures),
+        "outliers": {
+            "count": _safe(_outlier_count, 0, client, failures=failures),
+            "threshold": OUTLIER_TOTAL_MAX,
+        },
+        "new_suppliers": _safe(_new_suppliers, [], client, now_my, failures=failures),
+        "today_suppliers": _safe(_today_suppliers, [], client, now_my, failures=failures),
+        "outlet_spending": _safe(_outlet_spending_week, [], client, now_my, failures=failures),
+        "top_items_yesterday": _safe(_top_items_yesterday, {}, client, now_my, failures=failures),
+        "dead_letter_emails": _safe(_dead_letter_emails, [], client, now_my, failures=failures),
+        "kitchen_usage": _safe(_kitchen_usage, [], client, now_my, failures=failures),
     }
-    data.update(_food_cost_sections(client, now_my))
+    data.update(_safe(_food_cost_sections, {}, client, now_my, failures=failures))
+    data["degraded_sections"] = failures
     return data
 
 

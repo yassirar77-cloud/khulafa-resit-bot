@@ -301,6 +301,37 @@ class SendDigest(unittest.TestCase):
         self.assertIn("chat not found", logs[0]["error_msg"])
 
 
+class _BrokenClient:
+    """Every query raises — simulates Supabase being unreachable at 23:00."""
+
+    def table(self, name):
+        raise RuntimeError("connection refused")
+
+
+class DegradedGather(unittest.TestCase):
+    def test_gather_survives_total_db_outage(self):
+        import digest_data
+        data = digest_data.gather_digest_data(_BrokenClient(), NOW)
+        # Every section degrades to its default instead of raising.
+        self.assertEqual(data["today"], {})
+        self.assertEqual(data["pm_window_rows"], [])
+        self.assertEqual(data["outliers"]["count"], 0)
+        # The failures are named so the digest can say it is degraded.
+        self.assertIn("today_receipts", data["degraded_sections"])
+        self.assertIn("pm_window", data["degraded_sections"])
+
+    def test_degraded_sections_render_warning_block(self):
+        data = dict(EMPTY_DATA, degraded_sections=["today_receipts", "pm_window"])
+        messages = digest.build_digest_messages(data, NOW)
+        joined = "\n\n".join(messages)
+        self.assertIn("DATA TAK LENGKAP", joined)
+        self.assertIn("today_receipts", joined)
+
+    def test_no_warning_block_when_nothing_degraded(self):
+        messages = digest.build_digest_messages(dict(EMPTY_DATA), NOW)
+        self.assertNotIn("DATA TAK LENGKAP", "\n\n".join(messages))
+
+
 class Migration(unittest.TestCase):
     def test_digest_log_table(self):
         with open(os.path.join(REPO_ROOT, "migrations", "0013_digest_log.sql")) as f:
