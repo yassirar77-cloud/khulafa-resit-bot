@@ -44,6 +44,11 @@ from image_utils import resize_for_ocr  # noqa: E402
 from qwen_ocr_shadow import extract_with_qwen_ocr, shadow_enabled  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# _download_photo puts the bot token IN THE URL (Telegram getFile API shape),
+# and httpx logs every request URL at INFO — silence it so the token never
+# reaches the log stream.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("qwen_shadow_backfill")
 
 RECEIPTS_TABLE = "receipts"
@@ -124,23 +129,35 @@ def download_telegram_photo(file_id: str) -> bytes:
     """Re-download a photo from Telegram by file_id using the bot token.
 
     Telegram file_ids stay valid for the issuing bot indefinitely, so historical
-    receipt photos remain fetchable. Raises on any HTTP/API error.
+    receipt photos remain fetchable. Raises on any HTTP/API error — with the
+    token-bearing URL REDACTED: httpx's HTTPStatusError embeds the full request
+    URL in its message, and the caller logs failures with exc_info=True, which
+    would otherwise print the bot token into the log stream.
     """
     import httpx
 
     token = os.environ["TELEGRAM_BOT_TOKEN"]
+
+    def _raise_sanitized(resp, what):
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(
+                f"Telegram {what} failed: HTTP {exc.response.status_code}"
+            ) from None
+
     with httpx.Client(timeout=30) as http:
         meta = http.get(
             f"https://api.telegram.org/bot{token}/getFile",
             params={"file_id": file_id},
         )
-        meta.raise_for_status()
+        _raise_sanitized(meta, "getFile")
         body = meta.json()
         if not body.get("ok"):
             raise RuntimeError(f"Telegram getFile failed: {body}")
         file_path = body["result"]["file_path"]
         data = http.get(f"https://api.telegram.org/file/bot{token}/{file_path}")
-        data.raise_for_status()
+        _raise_sanitized(data, "file download")
         return data.content
 
 

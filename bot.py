@@ -112,6 +112,14 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
+# SECRET-LEAK GUARD: httpx logs every request at INFO as
+#   HTTP Request: POST https://api.telegram.org/bot<TOKEN>/getUpdates ...
+# — the FULL bot token, on every poll, straight into Render's log stream.
+# Silence httpx (and its transport, httpcore) below WARNING; PTB's own loggers
+# never print the token. Supabase/OpenAI calls also ride httpx, but their
+# secrets travel in headers — this just drops their per-request noise too.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
