@@ -10,7 +10,10 @@ Environment variables:
   ARIFFIN_CHAT_ID  -- optional; add once the flow is proven.
 """
 
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 _REVIEWER_ENV_VARS = ("YASSIR_CHAT_ID", "ARIFFIN_CHAT_ID")
 
@@ -24,7 +27,16 @@ def _load_reviewer_ids() -> frozenset:
         try:
             ids.add(int(raw.strip()))
         except ValueError:
+            logger.warning("Reviewer env var %s is set but not a numeric chat id — ignored", var)
             continue
+    if not ids:
+        # Silent-lockout guard: with no reviewers resolved, every admin command
+        # and review button is ignored with NO feedback — the bot looks dead to
+        # the owner. Make the misconfiguration loud at import time.
+        logger.warning(
+            "No reviewer chat ids resolved (set YASSIR_CHAT_ID / ARIFFIN_CHAT_ID) — "
+            "ALL admin commands and review buttons will be silently ignored."
+        )
     return frozenset(ids)
 
 

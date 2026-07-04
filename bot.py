@@ -4548,7 +4548,19 @@ async def _ingest_then_compare(app, compare_coro) -> None:
         await poll_sales_emails()
     except Exception:
         logger.exception("pre-comparison sales ingest failed (continuing)")
-    await compare_coro(app)
+    try:
+        await compare_coro(app)
+    except Exception:
+        # A systemic failure BEFORE the per-group loop (group resolution, a
+        # kitchen table gone missing) would otherwise only reach the APScheduler
+        # log — invisible to the owner while every comparison pass silently
+        # skips. Mirror post_order_drafts: log AND alert the owner.
+        logger.exception("kitchen comparison pass failed")
+        with contextlib.suppress(Exception):
+            await app.bot.send_message(
+                chat_id=ALERT_CHAT_ID,
+                text="⚠️ Kitchen Guna-vs-POS comparison pass CRASHED — check Render logs.",
+            )
 
 
 async def post_kitchen_comparison_0900(app) -> None:
@@ -4668,6 +4680,19 @@ async def run_bot() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop.set)
+
+    async def on_handler_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        # Central net under every command/callback handler: PTB would otherwise
+        # only pass unhandled exceptions to its default logger with no chat
+        # context. Never raises; never messages the user (handlers that want
+        # user-facing errors already send their own).
+        logger.error(
+            "Unhandled exception in handler (update=%s)",
+            getattr(update, "update_id", update),
+            exc_info=context.error,
+        )
+
+    app.add_error_handler(on_handler_error)
 
     def on_polling_error(error: TelegramError) -> None:
         if isinstance(error, Conflict):
