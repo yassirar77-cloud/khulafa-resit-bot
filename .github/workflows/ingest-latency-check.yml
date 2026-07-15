@@ -19,6 +19,8 @@ on:
         required: false
         default: "5"
 
+permissions: {}
+
 jobs:
   latency:
     runs-on: ubuntu-latest
@@ -33,10 +35,12 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          OUTLET: ${{ inputs.outlet }}
+          DAYS: ${{ inputs.days }}
         run: |
           if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ]; then
             echo "::error::SUPABASE_URL / SUPABASE_KEY repo Actions secrets are not set."
             echo "Add them under Settings → Secrets and variables → Actions, then re-run."
             exit 1
           fi
-          python scripts/report_ingest_latency.py --outlet "${{ inputs.outlet }}" --days "${{ inputs.days }}"
+          python scripts/report_ingest_latency.py --outlet "$OUTLET" --days "$DAYS"

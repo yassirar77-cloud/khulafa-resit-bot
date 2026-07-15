@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 import food_cost_analytics as fca
 from date_utils import clamp_business_date
+from db_pagination import fetch_all_pages
 from merchant_resolver import compute_coverage, load_snapshot, match_merchant
 from outlet_resolver import canonical_outlet
 
@@ -77,21 +78,25 @@ def _today_receipts(client, now_my) -> dict:
 def _pm_window(client, now_my) -> list:
     start = (now_my.date() - timedelta(days=WINDOW_DAYS)).isoformat()
     end = (now_my.date() + timedelta(days=1)).isoformat()
-    return _rows(
-        client.table(PRICE_MOVEMENTS_VIEW)
+    # Paginated: a 14-day window of per-line rows exceeds the PostgREST
+    # 1000-row cap on busy weeks, silently shrinking every section built on it.
+    return fetch_all_pages(
+        lambda: client.table(PRICE_MOVEMENTS_VIEW)
         .select(_PM_COLUMNS)
         .gte("receipt_date", start)
         .lte("receipt_date", end)
-        .execute()
+        .order("receipt_id", desc=False)
     )
 
 
 def _data_quality(client) -> dict:
-    low_conf = _rows(
-        client.table(RECEIPTS_TABLE).select("id").lt("confidence", LOW_CONFIDENCE_FLOOR).execute()
+    low_conf = fetch_all_pages(
+        lambda: client.table(RECEIPTS_TABLE)
+        .select("id").lt("confidence", LOW_CONFIDENCE_FLOOR).order("id", desc=False)
     )
-    reparse_pending = _rows(
-        client.table(REPARSE_AUDIT_TABLE).select("id").eq("applied", False).execute()
+    reparse_pending = fetch_all_pages(
+        lambda: client.table(REPARSE_AUDIT_TABLE)
+        .select("id").eq("applied", False).order("id", desc=False)
     )
     unresolved = _unresolved_merchant_count(client)
     return {
@@ -104,7 +109,9 @@ def _data_quality(client) -> dict:
 def _unresolved_merchant_count(client) -> int:
     """Same notion as /merchant_coverage: distinct receipt merchant strings that
     don't resolve to a canonical."""
-    rows = _rows(client.table(RECEIPTS_TABLE).select("merchant").execute())
+    rows = fetch_all_pages(
+        lambda: client.table(RECEIPTS_TABLE).select("merchant").order("id", desc=False)
+    )
     counts: Counter = Counter()
     for r in rows:
         name = (r.get("merchant") or "").strip()
@@ -490,18 +497,17 @@ def dead_letter_emails(error_rows, inserted_ids, threshold) -> list:
 def _dead_letter_emails(client, now_my) -> list:
     from sales_ingest import DEAD_LETTER_THRESHOLD
     try:
-        error_rows = _rows(
-            client.table(SALES_INGEST_LOG_TABLE)
+        error_rows = fetch_all_pages(
+            lambda: client.table(SALES_INGEST_LOG_TABLE)
             .select("source_message_id, source_subject, detail")
             .eq("status", "error")
             .order("ran_at", desc=True)
-            .execute()
         )
-        inserted = _rows(
-            client.table(SALES_INGEST_LOG_TABLE)
+        inserted = fetch_all_pages(
+            lambda: client.table(SALES_INGEST_LOG_TABLE)
             .select("source_message_id")
             .eq("status", "inserted")
-            .execute()
+            .order("id", desc=False)
         )
     except Exception:
         logger.warning("digest: dead-letter emails unavailable", exc_info=True)

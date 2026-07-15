@@ -13,6 +13,8 @@ into the live upload path and backfilling historical receipts is PR #31.
 import logging
 import re
 
+from db_pagination import fetch_all_pages
+
 logger = logging.getLogger(__name__)
 
 CANONICAL_TABLE = "merchant_canonical"
@@ -214,12 +216,16 @@ def tier_for_confidence(confidence) -> str:
 
 
 def load_snapshot(client):
-    aliases = (
-        client.table(ALIAS_TABLE).select("id, alias_text, canonical_id").execute().data
-        or []
+    # Paginated: aliases grow automatically (fuzzy_auto/backfill inserts), and
+    # past the PostgREST 1000-row cap an exact alias falling out of the
+    # snapshot would re-resolve through fuzzier tiers to a different canonical.
+    aliases = fetch_all_pages(
+        lambda: client.table(ALIAS_TABLE)
+        .select("id, alias_text, canonical_id").order("id", desc=False)
     )
-    canonicals = (
-        client.table(CANONICAL_TABLE).select("id, display_name").execute().data or []
+    canonicals = fetch_all_pages(
+        lambda: client.table(CANONICAL_TABLE)
+        .select("id, display_name").order("id", desc=False)
     )
     return aliases, canonicals
 

@@ -179,6 +179,12 @@ class _FakeQuery:
     def eq(self, *a, **k):
         return self
 
+    def order(self, *a, **k):
+        return self
+
+    def range(self, *a, **k):
+        return self
+
     def insert(self, payload):
         self.op = "insert"
         self.payload = payload

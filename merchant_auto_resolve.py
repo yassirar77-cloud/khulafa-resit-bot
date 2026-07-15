@@ -40,6 +40,7 @@ import re
 from datetime import datetime, timezone
 
 from date_utils import clamp_business_date
+from db_pagination import fetch_all_pages
 from merchant_resolver import ALIAS_TABLE, CANONICAL_TABLE, load_snapshot
 
 logger = logging.getLogger(__name__)
@@ -278,13 +279,13 @@ def fetch_unresolved_merchants(client) -> dict:
     Receipts with no merchant text are unrecoverable and skipped. This is the
     idempotency gate — once a receipt is tagged it drops out of the backlog, so
     the pass is safely re-runnable."""
-    rows = (
-        client.table(RECEIPTS_TABLE)
+    # Paginated: past the PostgREST 1000-row cap a truncated backlog would
+    # under-count RM-at-stake and silently defer merchants that should escalate.
+    rows = fetch_all_pages(
+        lambda: client.table(RECEIPTS_TABLE)
         .select(_CANDIDATE_COLUMNS)
         .is_("merchant_canonical_id", "null")
-        .execute()
-        .data
-        or []
+        .order("id", desc=False)
     )
     backlog: dict = {}
     for r in rows:

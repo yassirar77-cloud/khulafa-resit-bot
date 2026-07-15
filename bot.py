@@ -36,6 +36,7 @@ from telegram.ext import (
 from audit_messages import build_big_purchase_message
 from config.reviewers import REVIEWER_CHAT_IDS, is_reviewer
 from date_utils import normalize_date
+from db_pagination import fetch_all_pages
 from image_store import probe_cloudinary, upload_receipt_image
 from image_utils import resize_for_ocr
 from items_utils import normalize_items
@@ -653,6 +654,29 @@ def update_pending_review(
     supabase.table(PENDING_REVIEW_TABLE).update(payload).eq("id", review_id).execute()
 
 
+def claim_pending_review(
+    review_id, status: str, reviewer_chat_id, edited_data: dict | None = None
+) -> bool:
+    """Compare-and-swap the row from 'pending' to `status`. Returns False if
+    another reviewer got there first — the same item is DM'd to every
+    reviewer, so two near-simultaneous taps are a real possibility."""
+    payload = {
+        "status": status,
+        "reviewer_chat_id": reviewer_chat_id,
+        "reviewed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if edited_data is not None:
+        payload["edited_data"] = edited_data
+    result = (
+        supabase.table(PENDING_REVIEW_TABLE)
+        .update(payload)
+        .eq("id", review_id)
+        .eq("status", "pending")
+        .execute()
+    )
+    return bool(result.data)
+
+
 def promote_pending_to_receipt(pending: dict, edits: dict | None = None) -> dict:
     """Copy an approved/edited ``pending_review`` row into ``receipts``.
 
@@ -706,6 +730,33 @@ def derive_outlet(chat_id: int | None, chat_title: str | None) -> str | None:
     if any(ch.isdigit() for ch in remainder):
         return remainder.upper()
     return remainder.title()
+
+
+TELEGRAM_MAX_MESSAGE = 4096
+
+
+def chunk_message(text: str, limit: int = TELEGRAM_MAX_MESSAGE) -> list[str]:
+    """Split text into <=limit pieces, preferring newline boundaries, so a
+    receipt with very many items can't push a reply past Telegram's 4096-char
+    cap (BadRequest would kill the handler mid-pipeline)."""
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > limit:
+        cut = remaining.rfind("\n", 1, limit)
+        if cut == -1:
+            cut = limit
+        chunks.append(remaining[:cut].rstrip("\n"))
+        remaining = remaining[cut:].lstrip("\n")
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+async def _reply_chunked(message, text: str) -> None:
+    for chunk in chunk_message(text):
+        await message.reply_text(chunk)
 
 
 def format_alert(record: dict, parsed: dict, outlet: str | None = None) -> str:
@@ -765,16 +816,21 @@ def _today_my() -> str:
     return datetime.now(MALAYSIA_TZ).date().isoformat()
 
 
-def _check_big_purchase(chat_id: int, total: float) -> str | None:
+def _check_big_purchase(chat_id: int, total: float, current_id=None) -> str | None:
     since = (datetime.now(MALAYSIA_TZ).date() - timedelta(days=BIG_PURCHASE_LOOKBACK_DAYS)).isoformat()
-    res = (
+    q = (
         supabase.table(RECEIPTS_TABLE)
-        .select("total")
+        .select("id, total")
         .eq("chat_id", chat_id)
         .gte("receipt_date", since)
-        .execute()
     )
-    totals = [t for r in (res.data or []) if (t := _to_float(r.get("total"))) is not None]
+    res = q.execute()
+    rows = res.data or []
+    # The receipt under audit is already inserted — exclude it so it doesn't
+    # inflate the baseline it's being compared against.
+    if current_id is not None:
+        rows = [r for r in rows if r.get("id") != current_id]
+    totals = [t for r in rows if (t := _to_float(r.get("total"))) is not None]
     if len(totals) < 3:
         return None
     avg = sum(totals) / len(totals)
@@ -934,7 +990,7 @@ def run_audit_checks(stored: dict, parsed: dict) -> list[tuple[str, str]]:
         logger.exception("new_supplier check failed")
 
     try:
-        if (q := _check_big_purchase(chat_id, total)):
+        if (q := _check_big_purchase(chat_id, total, current_id)):
             findings.append(("big_purchase", q))
     except Exception:
         logger.exception("big_purchase check failed")
@@ -1039,6 +1095,11 @@ def _apply_corrections(parsed: dict, corrections: dict) -> list[str]:
         if new_val == old_val:
             continue
         parsed[key] = new_val
+        if key == "date":
+            # handle_photo copies date→receipt_date BEFORE verification runs,
+            # and the stored record prefers receipt_date — keep them in sync or
+            # the correction is silently discarded at insert time.
+            parsed["receipt_date"] = new_val
         if key == "items":
             changes.append("items updated")
         elif key == "total":
@@ -1239,11 +1300,24 @@ async def _finalize_review(
     pending = await asyncio.to_thread(fetch_pending_review, review_id)
     if not pending or pending.get("status") != "pending":
         return None
-    stored = await asyncio.to_thread(promote_pending_to_receipt, pending, edits)
-    await asyncio.to_thread(
-        update_pending_review, review_id, status, reviewer_chat_id, edits
+    # Claim the row BEFORE promoting: every reviewer gets a DM for the same
+    # item, so two near-simultaneous taps would otherwise both pass the check
+    # above and insert duplicate receipts.
+    claimed = await asyncio.to_thread(
+        claim_pending_review, review_id, status, reviewer_chat_id, edits
     )
-    return stored
+    if not claimed:
+        return None
+    try:
+        return await asyncio.to_thread(promote_pending_to_receipt, pending, edits)
+    except Exception:
+        # Release the claim so the item stays retryable instead of being
+        # marked approved with no receipt row.
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(
+                update_pending_review, review_id, "pending", reviewer_chat_id
+            )
+        raise
 
 
 async def handle_review_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1561,9 +1635,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if verify_prefix:
         user_alert = f"{verify_prefix}\n\n{user_alert}"
     ops_alert = format_alert(stored, parsed, outlet=outlet)
-    await message.reply_text(user_alert)
     try:
-        await context.bot.send_message(chat_id=ALERT_CHAT_ID, text=ops_alert)
+        await _reply_chunked(message, user_alert)
+    except Exception:
+        # The receipt is already stored — never let a reply failure abort the
+        # downstream routing (side tables, price aggregation, audit checks).
+        logger.exception("Failed to send receipt confirmation reply")
+    try:
+        for chunk in chunk_message(ops_alert):
+            await context.bot.send_message(chat_id=ALERT_CHAT_ID, text=chunk)
     except Exception:
         logger.exception("Failed to send alert to ALERT_CHAT_ID")
 
@@ -2205,7 +2285,7 @@ def _format_staff_history(staff_name: str, rows: list[dict]) -> str:
 
 async def advances_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
-    if not message:
+    if not message or not is_reviewer(_command_owner_id(update)):
         return
 
     args = context.args or []
@@ -2218,7 +2298,7 @@ async def advances_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             logger.exception("Failed to fetch advances")
             await message.reply_text("Gagal ambil data advances.")
             return
-        await message.reply_text(_format_advances_by_outlet(rows))
+        await _reply_chunked(message, _format_advances_by_outlet(rows))
         return
 
     first = args[0]
@@ -2273,7 +2353,11 @@ async def advances_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         }
         return
 
-    # /advances <outlet>  vs  /advances <staff_name>
+    # /advances <outlet>  vs  /advances <staff_name>. Outlet codes and short
+    # staff names can both be 2-5 plain letters (KLANG vs DINA), so an
+    # outlet-shaped token only wins when advance rows actually carry that
+    # outlet — otherwise fall through to staff history instead of wrongly
+    # replying "tiada advance outstanding" for a staff member who owes.
     token = first.upper()
     if _OUTLET_TOKEN_RE.match(token):
         try:
@@ -2282,8 +2366,9 @@ async def advances_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             logger.exception("Failed to fetch advances by outlet")
             await message.reply_text("Gagal ambil data advances.")
             return
-        await message.reply_text(_format_advances_by_outlet(rows))
-        return
+        if rows:
+            await _reply_chunked(message, _format_advances_by_outlet(rows))
+            return
 
     # /advances <staff_name>  → full history
     try:
@@ -2292,7 +2377,7 @@ async def advances_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         logger.exception("Failed to fetch staff history")
         await message.reply_text("Gagal ambil history.")
         return
-    await message.reply_text(_format_staff_history(first, rows))
+    await _reply_chunked(message, _format_staff_history(first, rows))
 
 
 async def handle_advances_confirmation(
@@ -2311,6 +2396,10 @@ async def handle_advances_confirmation(
     pending = context.chat_data.get("pending_advance_repayments") or {}
     action = pending.get(reply_to.message_id)
     if not action:
+        return False
+    # Only a reviewer may confirm/cancel — otherwise anyone in the group
+    # could reply "Y" to a reviewer's pending repayment prompt.
+    if not is_reviewer(_command_owner_id(update)):
         return False
 
     answer = message.text.strip().lower()
@@ -2613,15 +2702,21 @@ def _fetch_audit_rows_for_status() -> list:
     return result.data or []
 
 
-def _fetch_pending_audit_rows(limit: int) -> list:
-    result = (
-        supabase.table(REPARSE_AUDIT_TABLE)
-        .select("*")
-        .eq("applied", False)
-        .order("id", desc=False)
-        .limit(limit)
-        .execute()
-    )
+def _fetch_pending_audit_rows(limit: int | None) -> list:
+    """Pending reparse-audit rows, oldest first. ``limit=None`` means ALL
+    rows, paginated past the PostgREST per-request cap — a bare huge .limit()
+    is clamped server-side to ~1000, which made /reparse_apply_all report
+    "applied ALL" after applying only the first page."""
+    def q():
+        return (
+            supabase.table(REPARSE_AUDIT_TABLE)
+            .select("*")
+            .eq("applied", False)
+            .order("id", desc=False)
+        )
+    if limit is None:
+        return fetch_all_pages(q)
+    result = q().limit(limit).execute()
     return result.data or []
 
 
@@ -2731,7 +2826,7 @@ async def reparse_apply_all_callback(update: Update, context: ContextTypes.DEFAU
         await query.message.reply_text("Cancelled — no changes applied.")
         return
     try:
-        rows = await asyncio.to_thread(_fetch_pending_audit_rows, 1_000_000)
+        rows = await asyncio.to_thread(_fetch_pending_audit_rows, None)
         applied = await asyncio.to_thread(_apply_pending_audit_rows, rows, chat_id)
     except Exception:
         logger.exception("reparse_apply_all failed")
@@ -3029,11 +3124,16 @@ def _backfill_status_counts() -> dict:
     }
 
 
-def _fetch_pending_backfill_rows(limit: int) -> list:
-    return (
-        supabase.table(BACKFILL_AUDIT_TABLE).select("*")
-        .eq("applied", False).order("id", desc=False).limit(limit).execute().data or []
-    )
+def _fetch_pending_backfill_rows(limit: int | None) -> list:
+    """``limit=None`` = ALL rows, paginated (see _fetch_pending_audit_rows)."""
+    def q():
+        return (
+            supabase.table(BACKFILL_AUDIT_TABLE).select("*")
+            .eq("applied", False).order("id", desc=False)
+        )
+    if limit is None:
+        return fetch_all_pages(q)
+    return q().limit(limit).execute().data or []
 
 
 def _count_applicable_pending_backfill() -> int:
@@ -3149,7 +3249,7 @@ async def backfill_apply_all_callback(update: Update, context: ContextTypes.DEFA
         await query.message.reply_text("Cancelled — no receipts tagged.")
         return
     try:
-        rows = await asyncio.to_thread(_fetch_pending_backfill_rows, 1_000_000)
+        rows = await asyncio.to_thread(_fetch_pending_backfill_rows, None)
         applied = await asyncio.to_thread(_apply_pending_backfill_rows, rows)
     except Exception:
         logger.exception("backfill_apply_all failed")

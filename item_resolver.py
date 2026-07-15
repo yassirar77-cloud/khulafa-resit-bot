@@ -13,6 +13,7 @@ Scope (PR #32): resolves names and manages the alias tables. Populating
 
 import logging
 
+from db_pagination import fetch_all_pages
 from merchant_resolver import (
     CONF_EXACT,
     compute_coverage,
@@ -39,11 +40,14 @@ def match_item(raw_text, aliases, canonicals):
 
 
 def load_snapshot(client):
-    aliases = (
-        client.table(ALIAS_TABLE).select("id, alias_text, canonical_id").execute().data or []
+    # Paginated past the PostgREST 1000-row cap (see merchant_resolver).
+    aliases = fetch_all_pages(
+        lambda: client.table(ALIAS_TABLE)
+        .select("id, alias_text, canonical_id").order("id", desc=False)
     )
-    canonicals = (
-        client.table(CANONICAL_TABLE).select("id, display_name").execute().data or []
+    canonicals = fetch_all_pages(
+        lambda: client.table(CANONICAL_TABLE)
+        .select("id, display_name").order("id", desc=False)
     )
     return aliases, canonicals
 

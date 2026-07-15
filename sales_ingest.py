@@ -371,17 +371,18 @@ class SupabaseSalesStore:
         No migration needed — we count existing ``sales_ingest_log`` rows."""
         from collections import Counter
         try:
-            resp = (
-                self.client.table(SALES_INGEST_LOG_TABLE)
+            from db_pagination import fetch_all_pages
+            rows = fetch_all_pages(
+                lambda: self.client.table(SALES_INGEST_LOG_TABLE)
                 .select("source_message_id")
                 .eq("status", "error")
-                .execute()
+                .order("id", desc=False)
             )
         except Exception:  # noqa: BLE001 - degrade gracefully if the log is unavailable
             logger.warning("Could not load sales_ingest_log error counts", exc_info=True)
             return {}
         counts: Counter = Counter()
-        for r in (resp.data or []):
+        for r in rows:
             mid = r.get("source_message_id")
             if mid:
                 counts[mid] += 1

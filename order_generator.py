@@ -28,6 +28,7 @@ from datetime import date, datetime, timedelta
 import date_utils
 import order_cadence as oc
 import order_draft
+from db_pagination import fetch_all_pages
 import order_items
 import standing_orders
 
@@ -93,14 +94,16 @@ def fetch_item_price_rows(supabase, *, today: date, lookback: int) -> list[dict]
     Returns ``[]`` on any failure — a draft run must never crash the bot."""
     cutoff = (today - timedelta(days=lookback)).isoformat()
     try:
-        resp = (
-            supabase.table(_ITEM_PRICES_TABLE)
+        # Paginated: a 90-day window of line-level rows across all outlets
+        # easily exceeds the PostgREST 1000-row cap, and a truncated slice
+        # silently produces wrong cadences and forecast quantities.
+        return fetch_all_pages(
+            lambda: supabase.table(_ITEM_PRICES_TABLE)
             .select("outlet_code, canonical_item, qty, unit_price, merchant, "
                     "raw_item_name, receipt_date, created_at")
             .gte("receipt_date", cutoff)
-            .execute()
+            .order("id", desc=False)
         )
-        return resp.data or []
     except Exception:
         logger.exception("order_generator: fetch_item_price_rows failed")
         return []

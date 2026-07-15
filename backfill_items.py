@@ -14,6 +14,7 @@ item_index).
 
 import logging
 
+from db_pagination import fetch_all_pages
 from item_resolver import (
     ALIAS_TABLE,
     load_snapshot,
@@ -86,20 +87,26 @@ def plan_item(receipt_id, item_index, raw_name, aliases, canonicals) -> dict | N
 # --- DB access --------------------------------------------------------------
 
 def fetch_receipts_with_items(client, limit=None) -> list:
-    query = (
-        client.table(RECEIPTS_TABLE)
-        .select("id, items")
-        .not_.is_("items", "null")
-        .order("id", desc=False)
-    )
+    # Paginated when unbounded: PostgREST caps each request at ~1000 rows, so
+    # a bare "select all" re-reads the same first page forever and receipts
+    # with higher ids never get item resolutions.
+    def q():
+        return (
+            client.table(RECEIPTS_TABLE)
+            .select("id, items")
+            .not_.is_("items", "null")
+            .order("id", desc=False)
+        )
     if limit is not None:
-        query = query.limit(limit)
-    return query.execute().data or []
+        return q().limit(limit).execute().data or []
+    return fetch_all_pages(q)
 
 
 def _existing_keys(client) -> set:
-    rows = (
-        client.table(ITEM_RESOLUTIONS_TABLE).select("receipt_id, item_index").execute().data or []
+    rows = fetch_all_pages(
+        lambda: client.table(ITEM_RESOLUTIONS_TABLE)
+        .select("receipt_id, item_index")
+        .order("id", desc=False)
     )
     return {(r.get("receipt_id"), r.get("item_index")) for r in rows}
 
