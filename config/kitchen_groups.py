@@ -117,16 +117,21 @@ def resolve_groups(client, force: bool = False) -> dict[int, str]:
 
     # chat_id -> {code -> receipt_count}, so we can pick the busiest chat per code.
     counts: dict[int, dict[str, int]] = {}
+    read_ok = True
     try:
-        rows = (
-            client.table(_RECEIPTS_TABLE)
+        from db_pagination import fetch_all_pages
+
+        # Paginated: past the PostgREST 1000-row cap a plain select builds the
+        # map from an arbitrary subset and busy outlets can fail to resolve.
+        data = fetch_all_pages(
+            lambda: client.table(_RECEIPTS_TABLE)
             .select("chat_id, outlet")
-            .execute()
+            .order("id", desc=False)
         )
-        data = getattr(rows, "data", None) or []
     except Exception:
         logger.warning("kitchen_groups: receipts lookup failed", exc_info=True)
         data = []
+        read_ok = False
 
     for r in data:
         chat_id = r.get("chat_id")
@@ -158,7 +163,10 @@ def resolve_groups(client, force: bool = False) -> dict[int, str]:
 
     # Manual override wins.
     resolved.update(KITCHEN_GROUPS)
-    _resolved_cache = resolved
+    # Only cache a build backed by a successful read — caching a transient
+    # failure as {} would silence every kitchen form until the next restart.
+    if read_ok:
+        _resolved_cache = resolved
     if resolved:
         logger.info("kitchen_groups: resolved %d group(s) from receipts", len(resolved))
     else:

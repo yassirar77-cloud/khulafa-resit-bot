@@ -401,6 +401,42 @@ def test_night_cook_creates_row_when_no_6pm_entry(monkeypatch):
     assert rows[0]["cooked_qty"] == 8  # starts at the night value
 
 
+def test_claim_session_for_submit_only_first_tap_wins():
+    # Double-tap of Hantar: both callbacks read status == "open", but only the
+    # tap that wins the open->submitting CAS may finalize — otherwise the
+    # additive night phase double-adds cooked quantities.
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store["kitchen_log_session"] = [_night_session({"ayam_goreng": 20})]
+    sid = fake.rows("kitchen_log_session")[0]["id"]
+
+    assert ku.claim_session_for_submit(fake, sid) is True
+    assert fake.rows("kitchen_log_session")[0]["status"] == "submitting"
+    # The second (concurrent) tap loses the CAS.
+    assert ku.claim_session_for_submit(fake, sid) is False
+
+
+def test_claim_session_for_submit_reclaims_stale_claim():
+    # A submit that crashed between claim and finalize must not strand the
+    # session in "submitting" forever — an old claim becomes reclaimable.
+    from datetime import datetime, timedelta
+
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    stuck = _night_session({"ayam_goreng": 20})
+    stuck["status"] = "submitting"
+    stuck["updated_at"] = (datetime.now(ku.MY_TZ) - timedelta(minutes=30)).isoformat()
+    fake._store["kitchen_log_session"] = [stuck]
+    sid = fake.rows("kitchen_log_session")[0]["id"]
+
+    assert ku.claim_session_for_submit(fake, sid) is True
+    # A FRESH in-flight claim is respected.
+    fake._store["kitchen_log_session"][0]["updated_at"] = datetime.now(ku.MY_TZ).isoformat()
+    assert ku.claim_session_for_submit(fake, sid) is False
+
+
 def test_night_cook_double_submit_guard(monkeypatch):
     # The session-submitted status is the guard: a submitted night session is a
     # no-op, so the additive add can't be applied twice via the handler.

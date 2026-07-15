@@ -759,6 +759,23 @@ async def _reply_chunked(message, text: str) -> None:
         await message.reply_text(chunk)
 
 
+async def _callback_reply(query, context, text: str) -> None:
+    """Reply in a callback's chat. Buttons tapped on messages older than 48h
+    arrive with an InaccessibleMessage (no reply_text) — the DB action has
+    usually already run by the time we reply, so falling back to a plain
+    send_message keeps the reviewer informed instead of raising."""
+    message = query.message
+    if message is not None and hasattr(message, "reply_text"):
+        await message.reply_text(text)
+        return
+    chat = getattr(message, "chat", None)
+    chat_id = chat.id if chat is not None else (
+        query.from_user.id if query.from_user else None
+    )
+    if chat_id is not None:
+        await context.bot.send_message(chat_id=chat_id, text=text)
+
+
 def format_alert(record: dict, parsed: dict, outlet: str | None = None) -> str:
     merchant = parsed.get("merchant") or "Unknown merchant"
     total = parsed.get("total")
@@ -1343,7 +1360,7 @@ async def handle_review_action(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         with contextlib.suppress(Exception):
             await query.edit_message_reply_markup(reply_markup=None)
-        await query.message.reply_text("❌ Discarded — nothing saved to receipts.")
+        await _callback_reply(query, context, "❌ Discarded — nothing saved to receipts.")
         return
 
     if action == "save":
@@ -1351,15 +1368,15 @@ async def handle_review_action(update: Update, context: ContextTypes.DEFAULT_TYP
             stored = await _finalize_review(review_id, reviewer_chat_id, "approved")
         except Exception:
             logger.exception("Failed to approve pending review %s", review_id)
-            await query.message.reply_text("Failed to save — please retry.")
+            await _callback_reply(query, context, "Failed to save — please retry.")
             return
         with contextlib.suppress(Exception):
             await query.edit_message_reply_markup(reply_markup=None)
         if stored is None:
-            await query.message.reply_text("Already handled.")
+            await _callback_reply(query, context, "Already handled.")
         else:
-            await query.message.reply_text(
-                f"✅ Saved receipt #{stored.get('id')} as-is."
+            await _callback_reply(
+                query, context, f"✅ Saved receipt #{stored.get('id')} as-is."
             )
 
 
@@ -1379,13 +1396,14 @@ async def review_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return ConversationHandler.END
     pending = await asyncio.to_thread(fetch_pending_review, review_id)
     if not pending or pending.get("status") != "pending":
-        await query.message.reply_text("This item was already handled.")
+        await _callback_reply(query, context, "This item was already handled.")
         return ConversationHandler.END
     context.user_data["review_id"] = review_id
     context.user_data["review_edits"] = {}
     with contextlib.suppress(Exception):
         await query.edit_message_reply_markup(reply_markup=None)
-    await query.message.reply_text(
+    await _callback_reply(
+        query, context,
         f"Editing. Current total: RM{pending.get('parsed_total')}.\n"
         "Send the corrected total, or 'skip' to keep it."
     )
@@ -2823,16 +2841,16 @@ async def reparse_apply_all_callback(update: Update, context: ContextTypes.DEFAU
     with contextlib.suppress(Exception):
         await query.edit_message_reply_markup(reply_markup=None)
     if choice != "yes":
-        await query.message.reply_text("Cancelled — no changes applied.")
+        await _callback_reply(query, context, "Cancelled — no changes applied.")
         return
     try:
         rows = await asyncio.to_thread(_fetch_pending_audit_rows, None)
         applied = await asyncio.to_thread(_apply_pending_audit_rows, rows, chat_id)
     except Exception:
         logger.exception("reparse_apply_all failed")
-        await query.message.reply_text("Failed to apply changes.")
+        await _callback_reply(query, context, "Failed to apply changes.")
         return
-    await query.message.reply_text(f"✅ Applied ALL {applied} pending correction(s).")
+    await _callback_reply(query, context, f"✅ Applied ALL {applied} pending correction(s).")
 
 
 # === PR #30: merchant canonical review commands (owner-only) =================
@@ -3246,16 +3264,16 @@ async def backfill_apply_all_callback(update: Update, context: ContextTypes.DEFA
     with contextlib.suppress(Exception):
         await query.edit_message_reply_markup(reply_markup=None)
     if choice != "yes":
-        await query.message.reply_text("Cancelled — no receipts tagged.")
+        await _callback_reply(query, context, "Cancelled — no receipts tagged.")
         return
     try:
         rows = await asyncio.to_thread(_fetch_pending_backfill_rows, None)
         applied = await asyncio.to_thread(_apply_pending_backfill_rows, rows)
     except Exception:
         logger.exception("backfill_apply_all failed")
-        await query.message.reply_text("Failed to apply backfill rows.")
+        await _callback_reply(query, context, "Failed to apply backfill rows.")
         return
-    await query.message.reply_text(f"✅ Tagged ALL {applied} pending receipt(s).")
+    await _callback_reply(query, context, f"✅ Tagged ALL {applied} pending receipt(s).")
 
 
 async def backfill_unmatched_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

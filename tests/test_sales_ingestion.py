@@ -145,11 +145,11 @@ class FakeStore:
 
 class FakeConn:
     def __init__(self, result=b"1 2"):
-        self.search_args = None
+        self.uid_args = None
         self._result = result
 
-    def search(self, charset, *criteria):
-        self.search_args = (charset, criteria)
+    def uid(self, command, *args):
+        self.uid_args = (command, args)
         return "OK", [self._result]
 
 
@@ -159,7 +159,10 @@ class ImapSearchTests(unittest.TestCase):
         mailbox = Mailbox(conn)
         ids = mailbox.search()
         self.assertEqual(ids, [b"1", b"2"])
-        _, criteria = conn.search_args
+        command, criteria = conn.uid_args
+        # UID SEARCH, not sequence-number SEARCH: sequence numbers shift when
+        # another client expunges from the shared inbox mid-batch.
+        self.assertEqual(command, "SEARCH")
         self.assertIn("UNSEEN", criteria)
         self.assertTrue(any(c.startswith("FROM ") for c in criteria))
         self.assertIn('SUBJECT "SHIFTCLOSE"', criteria)
@@ -284,7 +287,8 @@ class SelfHealingTests(unittest.TestCase):
                 self._raw = raw
                 self.fetch_args = None
 
-            def fetch(self, msg_id, spec):
+            def uid(self, command, msg_id, spec):
+                assert command == "FETCH"
                 self.fetch_args = (msg_id, spec)
                 return "OK", [(b"1 (BODY[] {N}", self._raw)]
 

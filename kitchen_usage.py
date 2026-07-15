@@ -939,6 +939,48 @@ def _save_session(client, session_id, **fields) -> None:
     client.table(SESSION_TABLE).update(fields).eq("id", session_id).execute()
 
 
+def claim_session_for_submit(client, session_id) -> bool:
+    """Compare-and-swap the session from open -> submitting. A double-tap of
+    Hantar runs two concurrent callbacks that both read status == "open"; the
+    night phase ADDS to cooked_qty, so letting both through double-adds the
+    night quantities. Only the tap that wins this CAS may finalize."""
+    now_iso = datetime.now(MY_TZ).isoformat()
+    result = (
+        client.table(SESSION_TABLE)
+        .update({"status": "submitting", "updated_at": now_iso})
+        .eq("id", session_id)
+        .eq("status", "open")
+        .execute()
+    )
+    if result.data:
+        return True
+    # Crash recovery: a submit that died between claim and finalize leaves the
+    # row stuck in "submitting" forever (no tap could reclaim it). Reclaim a
+    # claim old enough that the original submit is certainly dead.
+    row = get_session(client, session_id)
+    if not row or row.get("status") != "submitting":
+        return False
+    stale_before = datetime.now(MY_TZ) - timedelta(minutes=10)
+    try:
+        updated_at = datetime.fromisoformat(str(row.get("updated_at")))
+    except (TypeError, ValueError):
+        return False
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=MY_TZ)
+    if updated_at > stale_before:
+        return False
+    # CAS on the exact stale updated_at so two reclaimers can't both win.
+    result = (
+        client.table(SESSION_TABLE)
+        .update({"status": "submitting", "updated_at": now_iso})
+        .eq("id", session_id)
+        .eq("status", "submitting")
+        .eq("updated_at", row.get("updated_at"))
+        .execute()
+    )
+    return bool(result.data)
+
+
 def _matching_summary_ids(client, outlet_code, business_date) -> list:
     """sales_daily_summary ids for an outlet's business_date.
 
@@ -1803,13 +1845,20 @@ async def handle_kitchen_callback(update, context) -> None:
                 await query.answer("Isi semua item dulu sebelum Hantar.", show_alert=True)
             return
         submitter = _submitter_name(query.from_user)
+        claimed = await asyncio.to_thread(claim_session_for_submit, _supabase, session_id)
+        if not claimed:
+            # Another tap (double-tap on a slow connection) is already
+            # finalizing this session — let that one report the outcome.
+            return
         try:
             evaluations = await asyncio.to_thread(
                 finalize_submission, _supabase, session, submitter
             )
         except Exception as exc:
             # Promotion to kitchen_daily_usage failed (table/constraint/schema
-            # issue). Leave the form OPEN so they can retry once it's fixed.
+            # issue). Reopen the form so they can retry once it's fixed.
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(_save_session, _supabase, session_id, status="open")
             logger.exception("kitchen: finalize_submission failed for session %s", session_id)
             if _is_missing_table_error(exc):
                 note = ("Jadual kitchen belum siap dalam DB (PGRST205). "
