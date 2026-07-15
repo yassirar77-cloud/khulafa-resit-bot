@@ -14,6 +14,7 @@ NULL, and ``backfill_audit`` has UNIQUE(receipt_id).
 import logging
 from datetime import datetime, timezone
 
+from db_pagination import fetch_all_pages
 from merchant_resolver import (
     ALIAS_TABLE,
     CANONICAL_TABLE,
@@ -300,20 +301,28 @@ SELECT_COLUMNS = "id, merchant, total, raw_text, items, receipt_type, merchant_c
 
 
 def fetch_candidates(client, limit=None) -> list:
-    """Receipts still missing a canonical (the idempotency gate)."""
-    query = (
-        client.table(RECEIPTS_TABLE)
-        .select(SELECT_COLUMNS)
-        .is_("merchant_canonical_id", "null")
-        .order("id", desc=False)
-    )
+    """Receipts still missing a canonical (the idempotency gate). Paginated
+    when unbounded — PostgREST caps each request at ~1000 rows, so a bare
+    "select all" would keep re-reading the same first page and never reach
+    newer unresolved receipts."""
+    def q():
+        return (
+            client.table(RECEIPTS_TABLE)
+            .select(SELECT_COLUMNS)
+            .is_("merchant_canonical_id", "null")
+            .order("id", desc=False)
+        )
     if limit is not None:
-        query = query.limit(limit)
-    return query.execute().data or []
+        return q().limit(limit).execute().data or []
+    return fetch_all_pages(q)
 
 
 def _existing_audit_receipt_ids(client) -> set:
-    rows = client.table(BACKFILL_AUDIT_TABLE).select("receipt_id").execute().data or []
+    rows = fetch_all_pages(
+        lambda: client.table(BACKFILL_AUDIT_TABLE)
+        .select("receipt_id")
+        .order("id", desc=False)
+    )
     return {r["receipt_id"] for r in rows if r.get("receipt_id") is not None}
 
 

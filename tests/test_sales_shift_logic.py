@@ -36,6 +36,18 @@ class ShiftLogicTests(unittest.TestCase):
         self.assertEqual(stype, "unknown")
         self.assertEqual(bdate, datetime(2026, 5, 26).date())
 
+    def test_just_after_midnight_close_is_previous_days_overnight(self):
+        # Production: "SHIFT :2 ON 26/May/2026 00:09:19" is booked by the
+        # D-file to 25 May — the S-file must agree, not store "unknown"/+1 day.
+        stype, bdate = determine_shift_type_and_business_date(datetime(2026, 5, 26, 0, 9, 19))
+        self.assertEqual(stype, "overnight")
+        self.assertEqual(bdate, datetime(2026, 5, 25).date())
+
+    def test_late_evening_close_is_same_days_day_shift(self):
+        stype, bdate = determine_shift_type_and_business_date(datetime(2026, 5, 26, 23, 30, 0))
+        self.assertEqual(stype, "day")
+        self.assertEqual(bdate, datetime(2026, 5, 26).date())
+
 
 if __name__ == "__main__":
     unittest.main()

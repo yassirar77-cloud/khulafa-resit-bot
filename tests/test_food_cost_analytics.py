@@ -111,10 +111,25 @@ class Rolling(unittest.TestCase):
         self.assertEqual(v["pct"], 124.0)   # 6200/5000, NOT the 153.4 mean of dailies
         self.assertEqual(v["days"], 2)
 
-    def test_rolling_none_pct_when_no_sales(self):
-        v = fca.rolling_food_cost_by_outlet([_recon("SBESI", None, 500.0, None)])["SBESI"]
-        self.assertIsNone(v["pct"])
-        self.assertEqual(v["purchases"], 500.0)
+    def test_rolling_skips_days_with_no_sales_ingested(self):
+        # 2026-07 audit: a NULL-sales day (e.g. the digest day at 23:00, whose
+        # D-file lands next morning) must not contribute purchases against
+        # zero sales — that inflated every nightly rolling % by ~7/6. The day
+        # contributes once its sales arrive; an outlet with no sales-known
+        # days is omitted from the rolling section entirely.
+        out = fca.rolling_food_cost_by_outlet([_recon("SBESI", None, 500.0, None)])
+        self.assertNotIn("SBESI", out)
+
+    def test_rolling_mixed_null_sales_day_excluded_from_both_sides(self):
+        rows = [
+            _recon("SBESI", 1000.0, 300.0, None),   # complete day
+            _recon("SBESI", None, 600.0, None),      # sales not ingested yet
+        ]
+        v = fca.rolling_food_cost_by_outlet(rows)["SBESI"]
+        self.assertEqual(v["purchases"], 300.0)      # NULL-sales day's purchases excluded
+        self.assertEqual(v["sales"], 1000.0)
+        self.assertEqual(v["days"], 1)
+        self.assertEqual(v["pct"], 30.0)
 
 
 class SalesSummary(unittest.TestCase):

@@ -191,13 +191,16 @@ def determine_shift_type_and_business_date(shift_close_datetime: datetime):
     """Classify a shift close into (shift_type, business_date).
 
     24/7 outlets close around 19:00 (the "day" shift) and 07:00 (the "overnight"
-    shift that started the previous evening). Anything outside those windows is
+    shift that started the previous evening). A day shift can run late (23:xx
+    close, same date) and an overnight shift can close any time from just after
+    midnight (production shows 00:09 closes that the D-file books to the
+    previous day) through mid-morning. Anything outside those windows is
     ``unknown`` and keeps its own date so it is never silently merged.
     """
     hour = shift_close_datetime.hour
-    if 17 <= hour <= 22:
+    if 17 <= hour <= 23:
         return "day", shift_close_datetime.date()
-    if 5 <= hour <= 10:
+    if hour <= 10:
         return "overnight", (shift_close_datetime - timedelta(days=1)).date()
     return "unknown", shift_close_datetime.date()
 
@@ -245,6 +248,10 @@ _DATETIME_FORMATS = (
     "%d/%m/%Y %H:%M:%S",
     "%d/%m/%Y %H:%M",
     "%d/%b/%Y %H:%M:%S",      # 25/May/2026 19:00:04  (report header line)
+    # Full month name too: %b only accepts abbreviations, and every fixture
+    # happens to be May (the one month whose full name equals its
+    # abbreviation) — "26/June/2026 07:00:03" must not fall back to "today".
+    "%d/%B/%Y %H:%M:%S",
     "%Y-%m-%d %H:%M:%S",
     "%Y-%m-%d %H:%M",
 )
@@ -259,6 +266,10 @@ def parse_datetime(value) -> datetime | None:
     s = str(value).strip()
     if not s:
         return None
+    # The MOBILE CASH row regex deliberately tolerates "7:00:04PM" (no space
+    # before AM/PM), but strptime's %p needs the space — normalize it here so
+    # the tolerated shape doesn't silently store a NULL timestamp.
+    s = re.sub(r"(?i)(\d)([ap]m)$", r"\1 \2", s)
     for fmt in _DATETIME_FORMATS:
         try:
             return datetime.strptime(s, fmt)

@@ -82,6 +82,11 @@ class _FakeQuery:
         self._limit = n
         return self
 
+    def range(self, start, end):
+        # PostgREST range is inclusive on both ends.
+        self._range = (start, end)
+        return self
+
     def _match(self, row):
         for kind, col, val, neg in self.filters:
             if kind == "eq":
@@ -128,6 +133,9 @@ class _FakeQuery:
         if self._order:
             col, desc = self._order
             sel = sorted(sel, key=lambda r: (r.get(col) is None, r.get(col)), reverse=desc)
+        if getattr(self, "_range", None) is not None:
+            start, end = self._range
+            sel = sel[start:end + 1]
         if self._limit is not None:
             sel = sel[: self._limit]
         return types.SimpleNamespace(data=[dict(r) for r in sel])

@@ -209,6 +209,21 @@ class Splitting(unittest.TestCase):
     def test_short_digest_is_one_message(self):
         self.assertEqual(len(digest.build_digest_messages(EMPTY_DATA, NOW)), 1)
 
+    def test_single_oversized_block_is_hard_split(self):
+        # One busy section (e.g. many cash payouts) must not produce a >limit
+        # message — Telegram rejects it and every later section is dropped.
+        lines = "\n".join(f"- payout row {i}" for i in range(400))
+        blocks = ["HEader", lines, "FOoter"]
+        msgs = digest.pack_messages(blocks, limit=1000)
+        self.assertGreater(len(msgs), 1)
+        for m in msgs:
+            self.assertLessEqual(len(m), 1000)
+        # Nothing after the big block is lost.
+        self.assertIn("FOoter", msgs[-1])
+        joined = "\n".join(msgs)
+        self.assertIn("- payout row 0", joined)
+        self.assertIn("- payout row 399", joined)
+
 
 # --- send orchestration -----------------------------------------------------
 

@@ -220,13 +220,13 @@ def _today_block(today):
     ])
 
 
-def _suppliers_block(suppliers):
+def _suppliers_block(suppliers, unit="items"):
     lines = [f"{SECTION_HEADERS[1]} (top {TOP_N})"]
     if not suppliers:
         lines.append("- (no supplier purchases recorded today)")
     else:
         for s in suppliers:
-            lines.append(f"- {_name(s['name'])}: {format_rm(s['amount'])} ({s['line_count']} items)")
+            lines.append(f"- {_name(s['name'])}: {format_rm(s['amount'])} ({s['line_count']} {unit})")
     return "\n".join(lines)
 
 
@@ -557,17 +557,22 @@ def render_blocks(data, now_my):
     d = now_my.date()
     iso = d.isoformat()
     week_start = (d - timedelta(days=6)).isoformat()
-    recent_start = (d - timedelta(days=7)).isoformat()
-    prior_start = (d - timedelta(days=14)).isoformat()
-    prior_end = (d - timedelta(days=8)).isoformat()
+    # "last 7 days vs prior 7 days": d-6..d inclusive is 7 days (mirrors
+    # week_start above); prior window is the adjacent 7 days before it.
+    recent_start = (d - timedelta(days=6)).isoformat()
+    prior_start = (d - timedelta(days=13)).isoformat()
+    prior_end = (d - timedelta(days=7)).isoformat()
 
     pm = data.get("pm_window_rows", []) or []
     suppliers = aggregate_suppliers(_slice(pm, iso, iso))
     # Bug 1: price_movements only carries receipts with fully-resolved item
     # lines, so "top suppliers today" came up empty despite dozens of receipts.
-    # Fall back to the receipts-derived suppliers gathered in digest_data.
+    # Fall back to the receipts-derived suppliers gathered in digest_data —
+    # whose line_count counts whole receipts, not item lines, so label honestly.
+    supplier_unit = "items"
     if not suppliers:
         suppliers = data.get("today_suppliers", []) or []
+        supplier_unit = "receipts"
     items = aggregate_items(_slice(pm, week_start, iso))
     # Bug 3: prefer the receipts-derived weekly outlet spend (true totals, not
     # just resolved line items) when digest_data supplies it.
@@ -577,7 +582,7 @@ def render_blocks(data, now_my):
     blocks = [
         _header_block(now_my),
         _today_block(data.get("today", {})),
-        _suppliers_block(suppliers),
+        _suppliers_block(suppliers, unit=supplier_unit),
         _sales_today_block(data.get("sales_today", {})),
         _food_cost_block(data.get("food_cost", {})),
         _food_cost_trends_block(data.get("food_cost_anomalies", [])),
@@ -597,12 +602,37 @@ def render_blocks(data, now_my):
     return [b for b in blocks if b is not None]
 
 
+def _split_oversized_block(block, limit):
+    """Hard-split a single block that alone exceeds the Telegram limit,
+    preferring newline boundaries. Without this, one busy section (e.g. many
+    cash payouts or dead letters) is emitted >4096 chars, Telegram rejects it,
+    and every section after it is dropped."""
+    pieces = []
+    remaining = block
+    while len(remaining) > limit:
+        cut = remaining.rfind("\n", 1, limit)
+        if cut == -1:
+            cut = limit
+        pieces.append(remaining[:cut].rstrip("\n"))
+        remaining = remaining[cut:].lstrip("\n")
+    if remaining:
+        pieces.append(remaining)
+    return pieces
+
+
 def pack_messages(blocks, limit=TG_LIMIT):
-    """Pack section blocks into messages, splitting only at block (section)
-    boundaries so no section is torn in half."""
+    """Pack section blocks into messages, splitting at block (section)
+    boundaries so no section is torn in half — except blocks that alone
+    exceed the limit, which are hard-split to stay sendable."""
     messages = []
     current = ""
+    split_blocks = []
     for block in blocks:
+        if len(block) > limit:
+            split_blocks.extend(_split_oversized_block(block, limit))
+        else:
+            split_blocks.append(block)
+    for block in split_blocks:
         candidate = block if not current else current + "\n\n" + block
         if current and len(candidate) > limit:
             messages.append(current)

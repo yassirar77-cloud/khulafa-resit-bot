@@ -94,6 +94,17 @@ class MatchMerchant(unittest.TestCase):
         # 1-edit from display "MEWAH" but no close alias -> 60 via display tier.
         self.assertEqual(match_merchant("MEWAHH", ALIASES, CANONICALS), (3, 60))
 
+    def test_fuzzy_canonical_budget_is_length_aware(self):
+        # 2026-07 audit: a flat Levenshtein<=5 matched complete strangers on
+        # short names (SHELL->SAIDA d=4). The budget scales with length, so
+        # short unrelated names return no match instead of a wrong canonical.
+        cans = [{"id": 1, "display_name": "SAIDA"}, {"id": 2, "display_name": "BABAS"}]
+        self.assertEqual(match_merchant("SHELL", [], cans), (None, 0))
+        self.assertEqual(match_merchant("MR DIY", [], cans), (None, 0))
+        self.assertEqual(match_merchant("LOTUS", [], cans), (None, 0))
+        # A genuine 1-char typo on the same short name still matches.
+        self.assertEqual(match_merchant("SAIDAA", [], cans), (1, 60))
+
     def test_empty_input(self):
         self.assertEqual(match_merchant("", ALIASES, CANONICALS), (None, 0))
         self.assertEqual(match_merchant("   ", ALIASES, CANONICALS), (None, 0))
@@ -177,6 +188,12 @@ class _FakeQuery:
         return self
 
     def eq(self, *a, **k):
+        return self
+
+    def order(self, *a, **k):
+        return self
+
+    def range(self, *a, **k):
         return self
 
     def insert(self, payload):

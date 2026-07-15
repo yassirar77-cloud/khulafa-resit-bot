@@ -145,11 +145,11 @@ class FakeStore:
 
 class FakeConn:
     def __init__(self, result=b"1 2"):
-        self.search_args = None
+        self.uid_args = None
         self._result = result
 
-    def search(self, charset, *criteria):
-        self.search_args = (charset, criteria)
+    def uid(self, command, *args):
+        self.uid_args = (command, args)
         return "OK", [self._result]
 
 
@@ -159,7 +159,10 @@ class ImapSearchTests(unittest.TestCase):
         mailbox = Mailbox(conn)
         ids = mailbox.search()
         self.assertEqual(ids, [b"1", b"2"])
-        _, criteria = conn.search_args
+        command, criteria = conn.uid_args
+        # UID SEARCH, not sequence-number SEARCH: sequence numbers shift when
+        # another client expunges from the shared inbox mid-batch.
+        self.assertEqual(command, "SEARCH")
         self.assertIn("UNSEEN", criteria)
         self.assertTrue(any(c.startswith("FROM ") for c in criteria))
         self.assertIn('SUBJECT "SHIFTCLOSE"', criteria)
@@ -284,7 +287,8 @@ class SelfHealingTests(unittest.TestCase):
                 self._raw = raw
                 self.fetch_args = None
 
-            def fetch(self, msg_id, spec):
+            def uid(self, command, msg_id, spec):
+                assert command == "FETCH"
                 self.fetch_args = (msg_id, spec)
                 return "OK", [(b"1 (BODY[] {N}", self._raw)]
 
@@ -414,6 +418,72 @@ class DailyRoutingTests(unittest.TestCase):
         self.assertEqual(summary["skipped_inactive"], 1)
         self.assertEqual(len(store.daily), 0)
         self.assertIn(b"1", mailbox.seen)
+
+
+class PartialIngestRepairTests(unittest.TestCase):
+    """2026-07 audit: a crash between the parent insert and a child insert
+    used to be permanent — the next poll's message-id dedup saw the parent and
+    skipped, leaving the summary childless forever. The store now backfills
+    empty child tables under the existing parent."""
+
+    def test_repair_daily_children_backfills_missing(self):
+        from tests.fake_supabase import FakeSupabase
+
+        from sales_ingest import DAILY_CHILD_TABLES, SupabaseSalesStore
+
+        fake = FakeSupabase()
+        fake._store["sales_daily_summary"] = [{"id": 10, "source_message_id": "<d1>"}]
+        store = SupabaseSalesStore(fake)
+        itemwise = DAILY_CHILD_TABLES[0]
+        record = {"children": {itemwise: [{"item_name": "AYAM", "qty": 2}]}}
+
+        repaired = store.repair_daily_children("<d1>", record)
+        self.assertEqual(repaired, [itemwise])
+        rows = fake.rows(itemwise)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["summary_id"], 10)
+        # Idempotent: children already present -> nothing re-inserted.
+        self.assertEqual(store.repair_daily_children("<d1>", record), [])
+        self.assertEqual(len(fake.rows(itemwise)), 1)
+
+    def test_repair_children_no_parent_is_noop(self):
+        from tests.fake_supabase import FakeSupabase
+
+        from sales_ingest import CHILD_TABLES, SupabaseSalesStore
+
+        store = SupabaseSalesStore(FakeSupabase())
+        record = {"children": {CHILD_TABLES[0]: [{"x": 1}]}}
+        self.assertEqual(store.repair_children("<missing>", record), [])
+
+    def test_duplicate_with_repair_hook_reports_repaired(self):
+        # process-level: duplicate message whose store repairs children is
+        # reported as inserted/children_repaired, not silently skipped.
+        mailbox = FakeMailbox([(b"1", make_email("S-KLANG SHIFTCLOSE (1499)",
+                                                  _klang_content(), message_id="<dup>"))])
+        store = FakeStore()
+        store._mids.add("<dup>")
+        store.repair_children = lambda mid, record: ["sales_items"]
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["inserted"], 1)
+        self.assertTrue(any(
+            (e.get("detail") or "").startswith("children_repaired") for e in store.logs
+        ))
+        self.assertIn(b"1", mailbox.seen)
+
+
+class SkippedUnknownCapTests(unittest.TestCase):
+    def test_skipped_unknown_stops_relogging_past_threshold(self):
+        # An unregistered outlet's email is refetched every poll (never marked
+        # seen); past the threshold it must stop adding log rows.
+        from sales_ingest import DEAD_LETTER_THRESHOLD
+
+        email = make_email("S-NEWSHOP SHIFTCLOSE (1)", _klang_content(), message_id="<unk>")
+        mailbox = FakeMailbox([(b"1", email)])
+        store = FakeStore(error_counts={"<unk>": DEAD_LETTER_THRESHOLD})
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["dead_letter"], 1)
+        self.assertEqual(store.logs, [])
+        self.assertNotIn(b"1", mailbox.seen)  # still unread -> recoverable
 
 
 if __name__ == "__main__":

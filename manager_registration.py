@@ -185,6 +185,21 @@ def register_manager(supabase, code, manager_name, chat_id) -> dict:
     outlet_code = row.get("outlet_code")
     display = display_name(supabase, outlet_code)
 
+    # Burn the code FIRST, as a compare-and-swap on used=False: two concurrent
+    # redemptions of the same code both passed the read-then-check above, so
+    # the burn must be the arbiter of "one-time". The loser gets the generic
+    # used-code message.
+    burned = (
+        supabase.table(CODES_TABLE)
+        .update({"used": True, "used_by_chat_id": chat_id, "used_at": _now_iso()})
+        .eq("code", norm)
+        .eq("used", False)
+        .execute()
+        .data
+    )
+    if not burned:
+        return {"ok": False, "error": USED_CODE_MESSAGE}
+
     # Staff turnover: a fresh registration REPLACES the prior manager for the
     # outlet rather than stacking, so an outlet always has exactly one manager.
     supabase.table(MANAGERS_TABLE).delete().eq("outlet_code", outlet_code).execute()
@@ -196,11 +211,6 @@ def register_manager(supabase, code, manager_name, chat_id) -> dict:
             "registered_at": _now_iso(),
         }
     ).execute()
-
-    # Burn the code so it can't be reused.
-    supabase.table(CODES_TABLE).update(
-        {"used": True, "used_by_chat_id": chat_id, "used_at": _now_iso()}
-    ).eq("code", norm).execute()
 
     return {"ok": True, "outlet_code": outlet_code, "outlet_display": display}
 

@@ -15,12 +15,22 @@ _TODAY = __import__("datetime").date(2026, 6, 17)
 
 class RepairCorruptDatesTests(unittest.TestCase):
     def setUp(self):
+        import tempfile
         self.fake = FakeSupabase()
         self._orig_today = rcd._today_my
         rcd._today_my = lambda: _TODAY  # type: ignore[assignment]
+        # Keep apply-mode journals out of the repo working tree — without an
+        # explicit path every apply=True run drops a
+        # date_repair_journal_*.jsonl file in CWD.
+        self._journal = os.path.join(tempfile.mkdtemp(), "journal.jsonl")
 
     def tearDown(self):
         rcd._today_my = self._orig_today  # type: ignore[assignment]
+
+    def _run(self, **kwargs):
+        if kwargs.get("apply"):
+            kwargs.setdefault("journal_path", self._journal)
+        return rcd.run(self.fake, **kwargs)
 
     def _seed(self, table, rows):
         for r in rows:
@@ -50,7 +60,7 @@ class RepairCorruptDatesTests(unittest.TestCase):
             {"merchant": "INBOIS", "canonical_item": "gas", "receipt_date": "2026-12-16",
              "created_at": "2026-06-10T02:00:00+00:00"},
         ])
-        totals = rcd.run(self.fake, apply=True, max_drift_days=60)
+        totals = self._run(apply=True, max_drift_days=60)
         self.assertEqual(totals["written"], 3)
 
         recs = {r["merchant"]: r["receipt_date"] for r in self.fake.rows("receipts")}
@@ -62,14 +72,14 @@ class RepairCorruptDatesTests(unittest.TestCase):
         self.assertEqual(totals["ingest_fallback"], 2)   # INBOIS future x2
 
         # Idempotent: nothing left to repair.
-        again = rcd.run(self.fake, apply=True, max_drift_days=60)
+        again = self._run(apply=True, max_drift_days=60)
         self.assertEqual(again["written"], 0)
 
     def test_unfixable_without_created_at_is_flagged_not_changed(self):
         self._seed("receipts", [
             {"merchant": "VICTORY", "receipt_date": "2026-06-26", "created_at": None},
         ])
-        totals = rcd.run(self.fake, apply=True, max_drift_days=60)
+        totals = self._run(apply=True, max_drift_days=60)
         self.assertEqual(totals["written"], 0)
         self.assertEqual(totals["flagged"], 1)
         self.assertEqual(self.fake.rows("receipts")[0]["receipt_date"], "2026-06-26")
@@ -80,7 +90,7 @@ class RepairCorruptDatesTests(unittest.TestCase):
             {"merchant": "EVEREST", "canonical_item": "ais_batu",
              "receipt_date": "2026-03-15", "created_at": "2026-05-31T02:00:00+00:00"},
         ])
-        totals = rcd.run(self.fake, apply=True, max_drift_days=60)
+        totals = self._run(apply=True, max_drift_days=60)
         self.assertEqual(totals["written"], 0)
         self.assertEqual(totals["flagged"], 1)
         self.assertEqual(self.fake.rows("item_prices")[0]["receipt_date"], "2026-03-15")

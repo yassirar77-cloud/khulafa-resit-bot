@@ -13,6 +13,8 @@ into the live upload path and backfilling historical receipts is PR #31.
 import logging
 import re
 
+from db_pagination import fetch_all_pages
+
 logger = logging.getLogger(__name__)
 
 CANONICAL_TABLE = "merchant_canonical"
@@ -183,11 +185,19 @@ def match_merchant(raw_text, aliases, canonicals):
     if best is not None:
         return best[0], CONF_FUZZY_ALIAS
 
-    # 5. Fuzzy vs canonical display names (Levenshtein <= 5).
+    # 5. Fuzzy vs canonical display names. The budget is length-aware, capped
+    # at LEV_CANONICAL_MAX: a flat <=5 exceeded the length of several seeded
+    # short names and matched complete strangers ("SHELL"->SAIDA d=4,
+    # "LOTUS"->BABAS), which both persisted wrong fuzzy_auto aliases and hid
+    # genuinely new suppliers from the digest (any conf>0 counts as known).
     best = None
     for c in canonicals:
-        d = levenshtein(raw_norm, normalise_text(c.get("display_name") or ""))
-        if d <= LEV_CANONICAL_MAX and (best is None or d < best[1]):
+        name_norm = normalise_text(c.get("display_name") or "")
+        if not name_norm:
+            continue
+        budget = min(LEV_CANONICAL_MAX, max(1, max(len(raw_norm), len(name_norm)) // 3))
+        d = levenshtein(raw_norm, name_norm)
+        if d <= budget and (best is None or d < best[1]):
             best = (c["id"], d)
     if best is not None:
         return best[0], CONF_FUZZY_CANONICAL
@@ -214,12 +224,16 @@ def tier_for_confidence(confidence) -> str:
 
 
 def load_snapshot(client):
-    aliases = (
-        client.table(ALIAS_TABLE).select("id, alias_text, canonical_id").execute().data
-        or []
+    # Paginated: aliases grow automatically (fuzzy_auto/backfill inserts), and
+    # past the PostgREST 1000-row cap an exact alias falling out of the
+    # snapshot would re-resolve through fuzzier tiers to a different canonical.
+    aliases = fetch_all_pages(
+        lambda: client.table(ALIAS_TABLE)
+        .select("id, alias_text, canonical_id").order("id", desc=False)
     )
-    canonicals = (
-        client.table(CANONICAL_TABLE).select("id, display_name").execute().data or []
+    canonicals = fetch_all_pages(
+        lambda: client.table(CANONICAL_TABLE)
+        .select("id, display_name").order("id", desc=False)
     )
     return aliases, canonicals
 

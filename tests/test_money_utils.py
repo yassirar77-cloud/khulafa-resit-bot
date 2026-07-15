@@ -127,6 +127,28 @@ class NormalizeTotalRejectsInvalid(unittest.TestCase):
     def test_currency_with_garbage(self):
         self.assertIsNone(normalize_total("RM abc"))
 
+    def test_comma_as_decimal_separator(self):
+        # "13,5"/"13,50" is RM13.50 misread, not RM135/RM1350.
+        self.assertEqual(normalize_total("13,5"), 13.5)
+        self.assertEqual(normalize_total("RM13,50"), 13.5)
+
+    def test_valid_grouping_still_thousands(self):
+        self.assertEqual(normalize_total("1,234"), 1234.0)
+        self.assertEqual(normalize_total("12,345,678"), 12345678.0)
+        self.assertEqual(normalize_total("RM 1,234.50"), 1234.5)
+
+    def test_ambiguous_comma_shape_rejected(self):
+        # Neither valid grouping nor a decimal comma — route to review
+        # rather than storing a 10x-inflated total.
+        self.assertIsNone(normalize_total("1,23,45"))
+
+    def test_sign_outside_currency(self):
+        self.assertEqual(normalize_total("-RM13.00"), -13.0)
+
+    def test_accounting_parens_negative(self):
+        self.assertEqual(normalize_total("(13.00)"), -13.0)
+        self.assertEqual(normalize_total("(RM13.00)"), -13.0)
+
 
 if __name__ == "__main__":
     unittest.main()

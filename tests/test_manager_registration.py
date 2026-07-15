@@ -118,6 +118,43 @@ class Registration(unittest.TestCase):
         # The first manager still stands; the replay did not overwrite.
         self.assertEqual(mr.get_manager(self.sb, "VISTA")["chat_id"], 1)
 
+    def test_concurrent_redemption_only_first_wins(self):
+        # 2026-07 audit: the code burn is a compare-and-swap on used=False, so
+        # a redemption that read the code as unused but lost the burn race is
+        # rejected — simulate by pre-burning between the read and the burn.
+        code = self.codes["VISTA"]
+        norm = mr.normalize_code(code)
+
+        class RacingClient:
+            """Delegates to the fake, but marks the code used just before the
+            first CAS burn executes — as a concurrent winner would."""
+            def __init__(self, sb):
+                self._sb = sb
+                self._raced = False
+
+            def table(self, name):
+                q = self._sb.table(name)
+                if name == mr.CODES_TABLE and not self._raced:
+                    orig_update = q.update
+
+                    def update(payload):
+                        if payload.get("used") is True and not self._raced:
+                            self._raced = True
+                            # The concurrent winner burns first.
+                            self._sb.table(mr.CODES_TABLE).update(
+                                {"used": True, "used_by_chat_id": 999}
+                            ).eq("code", norm).execute()
+                        return orig_update(payload)
+
+                    q.update = update
+                return q
+
+        res = mr.register_manager(RacingClient(self.sb), code, "Loser", 111)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["error"], mr.USED_CODE_MESSAGE)
+        # The loser never wrote a manager row.
+        self.assertIsNone(mr.get_manager(self.sb, "VISTA"))
+
     def test_reregister_replaces_existing_manager(self):
         # Staff turnover: a NEW code for the same outlet swaps the manager out.
         first = self.codes["JAKEL"]

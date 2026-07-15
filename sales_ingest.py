@@ -320,6 +320,49 @@ class SupabaseSalesStore:
             self.client.table(table).insert(payload).execute()
         return daily_id
 
+    def repair_children(self, message_id, record) -> list:
+        """Backfill child tables that are EMPTY under an already-landed parent.
+
+        A crash between the parent insert and a child insert used to be
+        permanent: the next poll's message-id dedup saw the parent and skipped,
+        leaving the summary with no itemwise/payout rows forever. Returns the
+        list of child tables repaired ([] = parent complete or missing)."""
+        parent = (
+            self.client.table(SALES_DAILY_TABLE)
+            .select("id")
+            .eq("source_message_id", message_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if not parent:
+            return []
+        return self._repair_children_for(
+            parent[0]["id"], record, CHILD_TABLES, "sales_daily_id"
+        )
+
+    def _repair_children_for(self, parent_id, record, tables, fk_col) -> list:
+        repaired = []
+        for table in tables:
+            rows = record["children"].get(table) or []
+            if not rows:
+                continue
+            existing = (
+                self.client.table(table)
+                .select("id")
+                .eq(fk_col, parent_id)
+                .limit(1)
+                .execute()
+                .data
+            )
+            if existing:
+                continue
+            payload = [{**r, fk_col: parent_id} for r in rows]
+            self.client.table(table).insert(payload).execute()
+            repaired.append(table)
+        return repaired
+
     def exists_daily_message_id(self, message_id) -> bool:
         """As ``exists_message_id`` but for the D-file destination
         (``sales_daily_summary``). Dedup keyed on the destination's
@@ -357,6 +400,23 @@ class SupabaseSalesStore:
             self.client.table(table).insert(payload).execute()
         return summary_id
 
+    def repair_daily_children(self, message_id, record) -> list:
+        """As ``repair_children`` but for the D-file destination."""
+        parent = (
+            self.client.table(DAILY_SUMMARY_TABLE)
+            .select("id")
+            .eq("source_message_id", message_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if not parent:
+            return []
+        return self._repair_children_for(
+            parent[0]["id"], record, DAILY_CHILD_TABLES, "summary_id"
+        )
+
     def log(self, entry) -> None:
         try:
             self.client.table(SALES_INGEST_LOG_TABLE).insert(entry).execute()
@@ -371,17 +431,21 @@ class SupabaseSalesStore:
         No migration needed — we count existing ``sales_ingest_log`` rows."""
         from collections import Counter
         try:
-            resp = (
-                self.client.table(SALES_INGEST_LOG_TABLE)
+            from db_pagination import fetch_all_pages
+            # skipped_unknown counts toward the same cap: an unregistered
+            # outlet's email is refetched every poll forever, and without a
+            # cap it re-logs a row each time — unbounded log growth.
+            rows = fetch_all_pages(
+                lambda: self.client.table(SALES_INGEST_LOG_TABLE)
                 .select("source_message_id")
-                .eq("status", "error")
-                .execute()
+                .in_("status", ["error", "skipped_unknown"])
+                .order("id", desc=False)
             )
         except Exception:  # noqa: BLE001 - degrade gracefully if the log is unavailable
             logger.warning("Could not load sales_ingest_log error counts", exc_info=True)
             return {}
         counts: Counter = Counter()
-        for r in (resp.data or []):
+        for r in rows:
             mid = r.get("source_message_id")
             if mid:
                 counts[mid] += 1
@@ -399,12 +463,33 @@ def _canonical_code(outlet_code) -> str | None:
     return "S-" + code[2:]
 
 
+def _repair_partial(store, method_name, message_id, build_record) -> list:
+    """Run a store's child-repair method against a freshly rebuilt record.
+    Best-effort: [] when the store doesn't support repair (test fakes), the
+    rebuild fails, or nothing was missing."""
+    repair = getattr(store, method_name, None)
+    if not callable(repair) or not message_id:
+        return []
+    try:
+        return repair(message_id, build_record())
+    except Exception:
+        logger.warning("Child repair failed for %s", message_id, exc_info=True)
+        return []
+
+
 def _process_s_file(store, email_dict, canonical, now_my):
     message_id = email_dict.get("message_id")
     # Part 3: dedup against the DESTINATION by source_message_id. A message whose
     # row already landed (e.g. mark_seen failed last poll) is skipped; a
     # logged-but-missing one falls through and is reprocessed.
     if store.exists_message_id(message_id):
+        # The parent landed, but a crash between parent and child inserts may
+        # have left it childless — repair instead of skipping forever.
+        repaired = _repair_partial(store, "repair_children", message_id, lambda: (
+            build_sales_record(email_dict, parse_shift_close(email_dict["content"]), canonical, now_my)
+        ))
+        if repaired:
+            return "inserted", "children_repaired:%s" % ",".join(repaired)
         return "skipped", "duplicate"
     parsed = parse_shift_close(email_dict["content"])
     if parsed.get("total_sales") is None:
@@ -425,6 +510,13 @@ def _process_d_file(store, email_dict, canonical, now_my):
     message_id = email_dict.get("message_id")
     # Part 3: dedup against the DESTINATION (sales_daily_summary) by message_id.
     if store.exists_daily_message_id(message_id):
+        def _rebuild():
+            parsed = parse_daily_summary(email_dict["content"])
+            business_date = parsed.get("header", {}).get("business_date") or now_my.date()
+            return build_daily_record(email_dict, parsed, canonical, business_date)
+        repaired = _repair_partial(store, "repair_daily_children", message_id, _rebuild)
+        if repaired:
+            return "inserted", "children_repaired:%s" % ",".join(repaired)
         return "skipped", "duplicate"
     parsed = parse_daily_summary(email_dict["content"])
     if parsed.get("daily_aggregate", {}).get("day_sales") is None:
@@ -560,11 +652,13 @@ def run(*, store, mailbox, now_my, since=None) -> dict:
             logger.exception("Ingest failed for %r", email_dict.get("subject"))
             status, detail = "error", f"exception: {exc}"
 
-        # Part 4: dead-letter cap. Once a message-id has already failed
-        # DEAD_LETTER_THRESHOLD times, stop re-logging the error every poll —
-        # the nightly digest surfaces it instead. The email is still left UNREAD
-        # (error is not a mark-seen status), so a code fix recovers it next poll.
-        if status == "error":
+        # Part 4: dead-letter cap. Once a message-id has already failed (or
+        # been skipped as unknown-outlet) DEAD_LETTER_THRESHOLD times, stop
+        # re-logging it every poll — the nightly digest surfaces errors as
+        # dead letters instead. The email is still left UNREAD (neither status
+        # marks seen), so a code fix / outlet registration recovers it on the
+        # next poll without any log spam in between.
+        if status in ("error", "skipped_unknown"):
             mid = email_dict.get("message_id")
             if mid and error_counts.get(mid, 0) >= DEAD_LETTER_THRESHOLD:
                 summary["dead_letter"] += 1

@@ -83,9 +83,16 @@ class Mailbox:
 
     def search(self, *, sender: str = DEFAULT_SENDER, subject_token: str = DEFAULT_SUBJECT_TOKEN,
                unseen_only: bool = True, since: datetime | None = None) -> list[bytes]:
-        """Return matching message ids. Criteria are ANDed by IMAP: the POS
+        """Return matching message UIDs. Criteria are ANDed by IMAP: the POS
         sender, a SHIFTCLOSE subject, (optionally) unread only, and an optional
-        SINCE date."""
+        SINCE date.
+
+        UIDs, not sequence numbers: the master inbox is shared with humans and
+        other clients, and sequence numbers are renumbered whenever another
+        session expunges a message. A mid-batch expunge would make a
+        sequence-numbered ``mark_seen`` flag a DIFFERENT, never-processed POS
+        email as read — silently dropping that shift forever (the poll only
+        searches UNSEEN). UIDs are stable for the life of the mailbox."""
         criteria: list[str] = []
         if unseen_only:
             criteria.append("UNSEEN")
@@ -95,7 +102,7 @@ class Mailbox:
             criteria.append(f'SUBJECT "{subject_token}"')
         if since is not None:
             criteria.append(f'SINCE "{_imap_date(since)}"')
-        typ, data = self._conn.search(None, *criteria)
+        typ, data = self._conn.uid("SEARCH", *criteria)
         if typ != "OK" or not data or data[0] is None:
             return []
         return data[0].split()
@@ -109,14 +116,14 @@ class Mailbox:
         "read-before-confirmed" failure this module guards against. PEEK reads
         the full message without touching flags, so ``\\Seen`` is set only by an
         explicit ``mark_seen`` after a confirmed store."""
-        typ, msg_data = self._conn.fetch(msg_id, "(BODY.PEEK[])")
+        typ, msg_data = self._conn.uid("FETCH", msg_id, "(BODY.PEEK[])")
         if typ != "OK" or not msg_data or not msg_data[0]:
             raise RuntimeError(f"IMAP fetch failed for {msg_id!r}")
         raw = msg_data[0][1]
         return email.message_from_bytes(raw, policy=policy.default)
 
     def mark_seen(self, msg_id) -> None:
-        self._conn.store(msg_id, "+FLAGS", "\\Seen")
+        self._conn.uid("STORE", msg_id, "+FLAGS", "\\Seen")
 
     def close(self) -> None:
         for step in (self._conn.close, self._conn.logout):

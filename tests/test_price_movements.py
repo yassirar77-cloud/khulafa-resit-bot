@@ -83,8 +83,10 @@ class ViewFilters(unittest.TestCase):
 
 class LineComputation(unittest.TestCase):
     def test_line_total_computation_qty_x_price(self):
-        # items.price is the LINE TOTAL; unit_price = price/qty; invariant holds.
-        qty, unit_price, line_total = analytics.compute_line({"qty": 4, "price": 120})
+        # items.price is the UNIT price (2026-07 audit: ocr_quality reconciles
+        # Σ(qty × price) against the receipt total, and price_aggregation
+        # stores the same convention); line_total = qty * price.
+        qty, unit_price, line_total = analytics.compute_line({"qty": 4, "price": 30})
         self.assertEqual(qty, 4.0)
         self.assertEqual(unit_price, 30.0)
         self.assertEqual(line_total, 120.0)

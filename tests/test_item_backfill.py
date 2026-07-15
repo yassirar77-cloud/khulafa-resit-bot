@@ -68,6 +68,11 @@ class _FakeQuery:
         self._limit = n
         return self
 
+    def range(self, start, end):
+        # PostgREST range is inclusive on both ends.
+        self._range = (start, end)
+        return self
+
     def _match(self, row):
         for kind, col, val, neg in self.filters:
             if kind == "eq":
@@ -110,6 +115,9 @@ class _FakeQuery:
         if self._order:
             col, desc = self._order
             sel = sorted(sel, key=lambda r: (r.get(col) is None, r.get(col)), reverse=desc)
+        if getattr(self, "_range", None) is not None:
+            start, end = self._range
+            sel = sel[start:end + 1]
         if self._limit is not None:
             sel = sel[: self._limit]
         return types.SimpleNamespace(data=[dict(r) for r in sel])
@@ -172,9 +180,10 @@ class PureHelpers(unittest.TestCase):
         self.assertIsNone(plan_item(1, 0, None, [], []))
 
     def test_plan_item_low_confidence_has_null_canonical(self):
-        canon = [{"id": 9, "display_name": "kambing"}]
-        aliases = [{"alias_text": "KAMBING", "canonical_id": 9}]
-        plan = plan_item(5, 2, "kambxyz", aliases, canon)  # conf 60 -> fuzzy-canonical
+        # 2 edits from a 10-char canonical with no alias: misses every alias
+        # tier, lands in fuzzy-canonical (length-aware budget 3) -> conf 60.
+        canon = [{"id": 9, "display_name": "mozzarella"}]
+        plan = plan_item(5, 2, "mozzarelxy", [], canon)
         self.assertEqual(plan["match_confidence"], 60)
         self.assertIsNone(plan["canonical_id"])
         self.assertEqual(plan["match_tier"], "low_confidence")
@@ -216,9 +225,12 @@ class RunBackfill(unittest.TestCase):
         self.assertIsNone(_res(client, 200, 0))
 
     def test_backfill_records_unresolved_with_null_canonical(self):
+        # "mozzarelxy" is 2 edits from the alias-less canonical "mozzarella" —
+        # only the fuzzy-canonical tier can match it -> conf 60 low_confidence.
         client = make_client([
-            {"id": 300, "items": [{"name": "ZZZ MYSTERY ITEM"}, {"name": "kambxyz"}]},
+            {"id": 300, "items": [{"name": "ZZZ MYSTERY ITEM"}, {"name": "mozzarelxy"}]},
         ])
+        client.seed(CANONICAL_TABLE, [{"id": 55, "display_name": "mozzarella"}])
         run_item_backfill(client, dry_run=False)
         none_row = _res(client, 300, 0)
         low_row = _res(client, 300, 1)

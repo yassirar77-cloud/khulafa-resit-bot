@@ -21,7 +21,8 @@ class BotReviewFlow(unittest.TestCase):
     def test_low_confidence_routes_to_pending_review(self):
         # handle_photo gates on the stored verifier confidence and routes.
         self.assertIn('if should_queue(verification["confidence"]):', self.src)
-        self.assertIn("await route_to_review(message, context, parsed, verification", self.src)
+        self.assertIn("await route_to_review(", self.src)
+        self.assertIn("message, context, parsed, verification, image_url=image_url, outlet=outlet", self.src)
         # route_to_review writes to the queue, not to receipts.
         self.assertIn("store_pending_review(", self.src)
 
@@ -87,6 +88,67 @@ class BotReviewFlow(unittest.TestCase):
         conv_idx = self.src.index("build_review_edit_conversation()")
         audit_idx = self.src.index("handle_audit_reply)\n    )")
         self.assertLess(conv_idx, audit_idx)
+
+
+class AuditFixes(unittest.TestCase):
+    """Source-level regression checks for the 2026-07 audit fixes."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(REPO_ROOT, "bot.py")) as f:
+            cls.src = f.read()
+
+    def test_finalize_review_claims_before_promoting(self):
+        # Every reviewer is DM'd the same item; without a compare-and-swap two
+        # near-simultaneous Save taps both promote -> duplicate receipts.
+        fin_idx = self.src.index("async def _finalize_review(")
+        block = self.src[fin_idx:fin_idx + 1500]
+        claim_idx = block.index("claim_pending_review")
+        promote_idx = block.index("promote_pending_to_receipt")
+        self.assertLess(claim_idx, promote_idx, "must claim BEFORE promoting")
+        # The claim itself is a CAS on status='pending'.
+        claim_def = self.src.index("def claim_pending_review(")
+        claim_body = self.src[claim_def:claim_def + 800]
+        self.assertIn('.eq("status", "pending")', claim_body)
+
+    def test_advances_command_is_reviewer_gated(self):
+        idx = self.src.index("async def advances_command(")
+        head = self.src[idx:idx + 300]
+        self.assertIn("is_reviewer(_command_owner_id(update))", head)
+        # The Y/N confirmation reply is gated too — otherwise anyone in the
+        # group can confirm a reviewer's pending repayment.
+        conf_idx = self.src.index("async def handle_advances_confirmation(")
+        conf_block = self.src[conf_idx:self.src.index("answer = ", conf_idx)]
+        self.assertIn("is_reviewer(_command_owner_id(update))", conf_block)
+
+    def test_verifier_date_correction_syncs_receipt_date(self):
+        # handle_photo copies date->receipt_date BEFORE verification and the
+        # stored record prefers receipt_date; _apply_corrections must keep
+        # them in sync or the verifier's date fix is silently dropped.
+        idx = self.src.index("def _apply_corrections(")
+        block = self.src[idx:idx + 2000]
+        self.assertIn('parsed["receipt_date"] = new_val', block)
+
+    def test_big_purchase_excludes_current_receipt(self):
+        idx = self.src.index("def _check_big_purchase(")
+        block = self.src[idx:idx + 1000]
+        self.assertIn("current_id", block)
+        self.assertIn("_check_big_purchase(chat_id, total, current_id)", self.src)
+
+    def test_apply_all_paths_paginate_past_row_cap(self):
+        # .limit(1_000_000) is clamped server-side to ~1000; apply-all must
+        # fetch every page or it reports "applied ALL" after one page.
+        self.assertNotIn("1_000_000", self.src)
+        self.assertIn("_fetch_pending_audit_rows, None", self.src)
+        self.assertIn("_fetch_pending_backfill_rows, None", self.src)
+        self.assertIn("from db_pagination import fetch_all_pages", self.src)
+
+    def test_receipt_reply_is_chunked_and_non_fatal(self):
+        # A many-item receipt pushing the reply past 4096 chars must not abort
+        # the post-store pipeline (side tables, price aggregation, audit).
+        self.assertIn("await _reply_chunked(message, user_alert)", self.src)
+        idx = self.src.index("await _reply_chunked(message, user_alert)")
+        self.assertIn("except Exception", self.src[idx - 200:idx + 300])
 
 
 class MigrationFile(unittest.TestCase):

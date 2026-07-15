@@ -36,6 +36,8 @@ from telegram.ext import (
 from audit_messages import build_big_purchase_message
 from config.reviewers import REVIEWER_CHAT_IDS, is_reviewer
 from date_utils import normalize_date
+from db_pagination import fetch_all_pages
+from webapp_auth import verify_init_data
 from image_store import probe_cloudinary, upload_receipt_image
 from image_utils import resize_for_ocr
 from items_utils import normalize_items
@@ -119,7 +121,6 @@ ZAI_API_KEY = os.environ["ZAI_API_KEY"]
 ZAI_BASE_URL = os.environ.get("ZAI_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/")
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
-SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 ALERT_CHAT_ID = int(os.environ["ALERT_CHAT_ID"])
 HEALTH_PORT = int(os.environ.get("PORT", "10000"))
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "")
@@ -301,12 +302,36 @@ def health():
 
 @flask_app.get("/webapp")
 def webapp():
-    return render_template(
-        "dashboard.html",
-        supabase_url=SUPABASE_URL,
-        supabase_anon_key=SUPABASE_ANON_KEY,
-        receipts_table=RECEIPTS_TABLE,
-    )
+    # The page itself is a static shell — data comes from /webapp/data, which
+    # verifies Telegram WebApp initData server-side. No Supabase credentials
+    # (not even the anon key) are shipped to the browser.
+    return render_template("dashboard.html")
+
+
+@flask_app.get("/webapp/data")
+def webapp_data():
+    from flask import request
+
+    init_data = request.headers.get("X-Telegram-Init-Data", "")
+    user_id = verify_init_data(init_data, TELEGRAM_BOT_TOKEN)
+    if user_id is None:
+        return jsonify(error="unauthorized"), 401
+    if not is_reviewer(user_id):
+        return jsonify(error="forbidden"), 403
+    try:
+        rows = (
+            supabase.table(RECEIPTS_TABLE)
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(500)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        logger.exception("webapp: receipts fetch failed")
+        return jsonify(error="upstream"), 502
+    return jsonify(rows)
 
 
 def run_health_server() -> None:
@@ -623,6 +648,14 @@ def store_pending_review(record: dict) -> dict:
             _pending_image_column_available = False
             payload.pop("image_url", None)
             result = supabase.table(PENDING_REVIEW_TABLE).insert(payload).execute()
+        elif "outlet" in payload and "outlet" in str(exc).lower() and "column" in str(exc).lower():
+            # Same fallback for 0035's outlet column.
+            logger.warning(
+                "pending_review.outlet column missing — apply "
+                "migrations/0035_pending_review_outlet.sql. Queuing without outlet."
+            )
+            payload.pop("outlet", None)
+            result = supabase.table(PENDING_REVIEW_TABLE).insert(payload).execute()
         else:
             raise
     return result.data[0] if result.data else record
@@ -653,6 +686,29 @@ def update_pending_review(
     supabase.table(PENDING_REVIEW_TABLE).update(payload).eq("id", review_id).execute()
 
 
+def claim_pending_review(
+    review_id, status: str, reviewer_chat_id, edited_data: dict | None = None
+) -> bool:
+    """Compare-and-swap the row from 'pending' to `status`. Returns False if
+    another reviewer got there first — the same item is DM'd to every
+    reviewer, so two near-simultaneous taps are a real possibility."""
+    payload = {
+        "status": status,
+        "reviewer_chat_id": reviewer_chat_id,
+        "reviewed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if edited_data is not None:
+        payload["edited_data"] = edited_data
+    result = (
+        supabase.table(PENDING_REVIEW_TABLE)
+        .update(payload)
+        .eq("id", review_id)
+        .eq("status", "pending")
+        .execute()
+    )
+    return bool(result.data)
+
+
 def promote_pending_to_receipt(pending: dict, edits: dict | None = None) -> dict:
     """Copy an approved/edited ``pending_review`` row into ``receipts``.
 
@@ -672,7 +728,9 @@ def promote_pending_to_receipt(pending: dict, edits: dict | None = None) -> dict
         "chat_id": chat_id,
         "message_id": pending.get("telegram_message_id"),
         "merchant": merchant_raw.upper().strip() if isinstance(merchant_raw, str) else merchant_raw,
-        "outlet": derive_outlet(chat_id, None),
+        # Prefer the outlet captured at queue time (0035): derive_outlet with
+        # no chat title can only consult the (empty) static map -> NULL.
+        "outlet": pending.get("outlet") or derive_outlet(chat_id, None),
         "receipt_date": parsed.get("receipt_date"),
         "total": parsed.get("total"),
         "currency": "MYR",
@@ -706,6 +764,50 @@ def derive_outlet(chat_id: int | None, chat_title: str | None) -> str | None:
     if any(ch.isdigit() for ch in remainder):
         return remainder.upper()
     return remainder.title()
+
+
+TELEGRAM_MAX_MESSAGE = 4096
+
+
+def chunk_message(text: str, limit: int = TELEGRAM_MAX_MESSAGE) -> list[str]:
+    """Split text into <=limit pieces, preferring newline boundaries, so a
+    receipt with very many items can't push a reply past Telegram's 4096-char
+    cap (BadRequest would kill the handler mid-pipeline)."""
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > limit:
+        cut = remaining.rfind("\n", 1, limit)
+        if cut == -1:
+            cut = limit
+        chunks.append(remaining[:cut].rstrip("\n"))
+        remaining = remaining[cut:].lstrip("\n")
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+async def _reply_chunked(message, text: str) -> None:
+    for chunk in chunk_message(text):
+        await message.reply_text(chunk)
+
+
+async def _callback_reply(query, context, text: str) -> None:
+    """Reply in a callback's chat. Buttons tapped on messages older than 48h
+    arrive with an InaccessibleMessage (no reply_text) — the DB action has
+    usually already run by the time we reply, so falling back to a plain
+    send_message keeps the reviewer informed instead of raising."""
+    message = query.message
+    if message is not None and hasattr(message, "reply_text"):
+        await message.reply_text(text)
+        return
+    chat = getattr(message, "chat", None)
+    chat_id = chat.id if chat is not None else (
+        query.from_user.id if query.from_user else None
+    )
+    if chat_id is not None:
+        await context.bot.send_message(chat_id=chat_id, text=text)
 
 
 def format_alert(record: dict, parsed: dict, outlet: str | None = None) -> str:
@@ -765,16 +867,21 @@ def _today_my() -> str:
     return datetime.now(MALAYSIA_TZ).date().isoformat()
 
 
-def _check_big_purchase(chat_id: int, total: float) -> str | None:
+def _check_big_purchase(chat_id: int, total: float, current_id=None) -> str | None:
     since = (datetime.now(MALAYSIA_TZ).date() - timedelta(days=BIG_PURCHASE_LOOKBACK_DAYS)).isoformat()
-    res = (
+    q = (
         supabase.table(RECEIPTS_TABLE)
-        .select("total")
+        .select("id, total")
         .eq("chat_id", chat_id)
         .gte("receipt_date", since)
-        .execute()
     )
-    totals = [t for r in (res.data or []) if (t := _to_float(r.get("total"))) is not None]
+    res = q.execute()
+    rows = res.data or []
+    # The receipt under audit is already inserted — exclude it so it doesn't
+    # inflate the baseline it's being compared against.
+    if current_id is not None:
+        rows = [r for r in rows if r.get("id") != current_id]
+    totals = [t for r in rows if (t := _to_float(r.get("total"))) is not None]
     if len(totals) < 3:
         return None
     avg = sum(totals) / len(totals)
@@ -934,7 +1041,7 @@ def run_audit_checks(stored: dict, parsed: dict) -> list[tuple[str, str]]:
         logger.exception("new_supplier check failed")
 
     try:
-        if (q := _check_big_purchase(chat_id, total)):
+        if (q := _check_big_purchase(chat_id, total, current_id)):
             findings.append(("big_purchase", q))
     except Exception:
         logger.exception("big_purchase check failed")
@@ -1039,6 +1146,11 @@ def _apply_corrections(parsed: dict, corrections: dict) -> list[str]:
         if new_val == old_val:
             continue
         parsed[key] = new_val
+        if key == "date":
+            # handle_photo copies date→receipt_date BEFORE verification runs,
+            # and the stored record prefers receipt_date — keep them in sync or
+            # the correction is silently discarded at insert time.
+            parsed["receipt_date"] = new_val
         if key == "items":
             changes.append("items updated")
         elif key == "total":
@@ -1181,7 +1293,7 @@ def fetch_recent_pending_reviews(within_hours: int = 24) -> list:
 
 async def route_to_review(
     message, context: ContextTypes.DEFAULT_TYPE, parsed: dict, verification: dict,
-    image_url: str | None = None,
+    image_url: str | None = None, outlet: str | None = None,
 ) -> None:
     confidence = verification.get("confidence")
     # De-dup: if an equivalent receipt is already pending review from the last
@@ -1207,6 +1319,9 @@ async def route_to_review(
         "chat_id": message.chat_id,
         "photo_file_id": photo.file_id if photo else None,
         "image_url": image_url,
+        # Captured at queue time — the chat title isn't available at promotion
+        # time, so without this every promoted receipt stored outlet=NULL.
+        "outlet": outlet,
         "confidence": confidence,
         "reason": reason,
         "status": "pending",
@@ -1214,7 +1329,16 @@ async def route_to_review(
     }
     try:
         stored = await asyncio.to_thread(store_pending_review, pending_record)
-    except Exception:
+    except Exception as exc:
+        # 0035's partial unique index closes the check-then-act dedup race: a
+        # second copy of the same photo racing past is_duplicate_review loses
+        # the insert — treat it exactly like the pre-checked duplicate.
+        if "duplicate" in str(exc).lower() or "unique" in str(exc).lower():
+            logger.info("Duplicate review insert blocked by unique index")
+            await message.reply_text(
+                "🔎 This receipt is already in the review queue from earlier — not re-sending."
+            )
+            return
         logger.exception("Failed to queue receipt for manual review")
         await message.reply_text(
             "Couldn't queue this receipt for review — please try resending."
@@ -1239,11 +1363,24 @@ async def _finalize_review(
     pending = await asyncio.to_thread(fetch_pending_review, review_id)
     if not pending or pending.get("status") != "pending":
         return None
-    stored = await asyncio.to_thread(promote_pending_to_receipt, pending, edits)
-    await asyncio.to_thread(
-        update_pending_review, review_id, status, reviewer_chat_id, edits
+    # Claim the row BEFORE promoting: every reviewer gets a DM for the same
+    # item, so two near-simultaneous taps would otherwise both pass the check
+    # above and insert duplicate receipts.
+    claimed = await asyncio.to_thread(
+        claim_pending_review, review_id, status, reviewer_chat_id, edits
     )
-    return stored
+    if not claimed:
+        return None
+    try:
+        return await asyncio.to_thread(promote_pending_to_receipt, pending, edits)
+    except Exception:
+        # Release the claim so the item stays retryable instead of being
+        # marked approved with no receipt row.
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(
+                update_pending_review, review_id, "pending", reviewer_chat_id
+            )
+        raise
 
 
 async def handle_review_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1269,7 +1406,7 @@ async def handle_review_action(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         with contextlib.suppress(Exception):
             await query.edit_message_reply_markup(reply_markup=None)
-        await query.message.reply_text("❌ Discarded — nothing saved to receipts.")
+        await _callback_reply(query, context, "❌ Discarded — nothing saved to receipts.")
         return
 
     if action == "save":
@@ -1277,15 +1414,15 @@ async def handle_review_action(update: Update, context: ContextTypes.DEFAULT_TYP
             stored = await _finalize_review(review_id, reviewer_chat_id, "approved")
         except Exception:
             logger.exception("Failed to approve pending review %s", review_id)
-            await query.message.reply_text("Failed to save — please retry.")
+            await _callback_reply(query, context, "Failed to save — please retry.")
             return
         with contextlib.suppress(Exception):
             await query.edit_message_reply_markup(reply_markup=None)
         if stored is None:
-            await query.message.reply_text("Already handled.")
+            await _callback_reply(query, context, "Already handled.")
         else:
-            await query.message.reply_text(
-                f"✅ Saved receipt #{stored.get('id')} as-is."
+            await _callback_reply(
+                query, context, f"✅ Saved receipt #{stored.get('id')} as-is."
             )
 
 
@@ -1305,13 +1442,14 @@ async def review_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return ConversationHandler.END
     pending = await asyncio.to_thread(fetch_pending_review, review_id)
     if not pending or pending.get("status") != "pending":
-        await query.message.reply_text("This item was already handled.")
+        await _callback_reply(query, context, "This item was already handled.")
         return ConversationHandler.END
     context.user_data["review_id"] = review_id
     context.user_data["review_edits"] = {}
     with contextlib.suppress(Exception):
         await query.edit_message_reply_markup(reply_markup=None)
-    await query.message.reply_text(
+    await _callback_reply(
+        query, context,
         f"Editing. Current total: RM{pending.get('parsed_total')}.\n"
         "Send the corrected total, or 'skip' to keep it."
     )
@@ -1547,7 +1685,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # never reaches `receipts`/`item_prices` and poisons price intelligence.
     # We gate on the stored confidence — the second-pass verifier score.
     if should_queue(verification["confidence"]):
-        await route_to_review(message, context, parsed, verification, image_url=image_url)
+        await route_to_review(
+            message, context, parsed, verification, image_url=image_url, outlet=outlet
+        )
         return
 
     try:
@@ -1561,9 +1701,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if verify_prefix:
         user_alert = f"{verify_prefix}\n\n{user_alert}"
     ops_alert = format_alert(stored, parsed, outlet=outlet)
-    await message.reply_text(user_alert)
     try:
-        await context.bot.send_message(chat_id=ALERT_CHAT_ID, text=ops_alert)
+        await _reply_chunked(message, user_alert)
+    except Exception:
+        # The receipt is already stored — never let a reply failure abort the
+        # downstream routing (side tables, price aggregation, audit checks).
+        logger.exception("Failed to send receipt confirmation reply")
+    try:
+        for chunk in chunk_message(ops_alert):
+            await context.bot.send_message(chat_id=ALERT_CHAT_ID, text=chunk)
     except Exception:
         logger.exception("Failed to send alert to ALERT_CHAT_ID")
 
@@ -2205,7 +2351,7 @@ def _format_staff_history(staff_name: str, rows: list[dict]) -> str:
 
 async def advances_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
-    if not message:
+    if not message or not is_reviewer(_command_owner_id(update)):
         return
 
     args = context.args or []
@@ -2218,7 +2364,7 @@ async def advances_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             logger.exception("Failed to fetch advances")
             await message.reply_text("Gagal ambil data advances.")
             return
-        await message.reply_text(_format_advances_by_outlet(rows))
+        await _reply_chunked(message, _format_advances_by_outlet(rows))
         return
 
     first = args[0]
@@ -2273,7 +2419,11 @@ async def advances_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         }
         return
 
-    # /advances <outlet>  vs  /advances <staff_name>
+    # /advances <outlet>  vs  /advances <staff_name>. Outlet codes and short
+    # staff names can both be 2-5 plain letters (KLANG vs DINA), so an
+    # outlet-shaped token only wins when advance rows actually carry that
+    # outlet — otherwise fall through to staff history instead of wrongly
+    # replying "tiada advance outstanding" for a staff member who owes.
     token = first.upper()
     if _OUTLET_TOKEN_RE.match(token):
         try:
@@ -2282,8 +2432,9 @@ async def advances_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             logger.exception("Failed to fetch advances by outlet")
             await message.reply_text("Gagal ambil data advances.")
             return
-        await message.reply_text(_format_advances_by_outlet(rows))
-        return
+        if rows:
+            await _reply_chunked(message, _format_advances_by_outlet(rows))
+            return
 
     # /advances <staff_name>  → full history
     try:
@@ -2292,7 +2443,7 @@ async def advances_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         logger.exception("Failed to fetch staff history")
         await message.reply_text("Gagal ambil history.")
         return
-    await message.reply_text(_format_staff_history(first, rows))
+    await _reply_chunked(message, _format_staff_history(first, rows))
 
 
 async def handle_advances_confirmation(
@@ -2311,6 +2462,10 @@ async def handle_advances_confirmation(
     pending = context.chat_data.get("pending_advance_repayments") or {}
     action = pending.get(reply_to.message_id)
     if not action:
+        return False
+    # Only a reviewer may confirm/cancel — otherwise anyone in the group
+    # could reply "Y" to a reviewer's pending repayment prompt.
+    if not is_reviewer(_command_owner_id(update)):
         return False
 
     answer = message.text.strip().lower()
@@ -2613,15 +2768,21 @@ def _fetch_audit_rows_for_status() -> list:
     return result.data or []
 
 
-def _fetch_pending_audit_rows(limit: int) -> list:
-    result = (
-        supabase.table(REPARSE_AUDIT_TABLE)
-        .select("*")
-        .eq("applied", False)
-        .order("id", desc=False)
-        .limit(limit)
-        .execute()
-    )
+def _fetch_pending_audit_rows(limit: int | None) -> list:
+    """Pending reparse-audit rows, oldest first. ``limit=None`` means ALL
+    rows, paginated past the PostgREST per-request cap — a bare huge .limit()
+    is clamped server-side to ~1000, which made /reparse_apply_all report
+    "applied ALL" after applying only the first page."""
+    def q():
+        return (
+            supabase.table(REPARSE_AUDIT_TABLE)
+            .select("*")
+            .eq("applied", False)
+            .order("id", desc=False)
+        )
+    if limit is None:
+        return fetch_all_pages(q)
+    result = q().limit(limit).execute()
     return result.data or []
 
 
@@ -2728,16 +2889,16 @@ async def reparse_apply_all_callback(update: Update, context: ContextTypes.DEFAU
     with contextlib.suppress(Exception):
         await query.edit_message_reply_markup(reply_markup=None)
     if choice != "yes":
-        await query.message.reply_text("Cancelled — no changes applied.")
+        await _callback_reply(query, context, "Cancelled — no changes applied.")
         return
     try:
-        rows = await asyncio.to_thread(_fetch_pending_audit_rows, 1_000_000)
+        rows = await asyncio.to_thread(_fetch_pending_audit_rows, None)
         applied = await asyncio.to_thread(_apply_pending_audit_rows, rows, chat_id)
     except Exception:
         logger.exception("reparse_apply_all failed")
-        await query.message.reply_text("Failed to apply changes.")
+        await _callback_reply(query, context, "Failed to apply changes.")
         return
-    await query.message.reply_text(f"✅ Applied ALL {applied} pending correction(s).")
+    await _callback_reply(query, context, f"✅ Applied ALL {applied} pending correction(s).")
 
 
 # === PR #30: merchant canonical review commands (owner-only) =================
@@ -3029,11 +3190,16 @@ def _backfill_status_counts() -> dict:
     }
 
 
-def _fetch_pending_backfill_rows(limit: int) -> list:
-    return (
-        supabase.table(BACKFILL_AUDIT_TABLE).select("*")
-        .eq("applied", False).order("id", desc=False).limit(limit).execute().data or []
-    )
+def _fetch_pending_backfill_rows(limit: int | None) -> list:
+    """``limit=None`` = ALL rows, paginated (see _fetch_pending_audit_rows)."""
+    def q():
+        return (
+            supabase.table(BACKFILL_AUDIT_TABLE).select("*")
+            .eq("applied", False).order("id", desc=False)
+        )
+    if limit is None:
+        return fetch_all_pages(q)
+    return q().limit(limit).execute().data or []
 
 
 def _count_applicable_pending_backfill() -> int:
@@ -3146,16 +3312,16 @@ async def backfill_apply_all_callback(update: Update, context: ContextTypes.DEFA
     with contextlib.suppress(Exception):
         await query.edit_message_reply_markup(reply_markup=None)
     if choice != "yes":
-        await query.message.reply_text("Cancelled — no receipts tagged.")
+        await _callback_reply(query, context, "Cancelled — no receipts tagged.")
         return
     try:
-        rows = await asyncio.to_thread(_fetch_pending_backfill_rows, 1_000_000)
+        rows = await asyncio.to_thread(_fetch_pending_backfill_rows, None)
         applied = await asyncio.to_thread(_apply_pending_backfill_rows, rows)
     except Exception:
         logger.exception("backfill_apply_all failed")
-        await query.message.reply_text("Failed to apply backfill rows.")
+        await _callback_reply(query, context, "Failed to apply backfill rows.")
         return
-    await query.message.reply_text(f"✅ Tagged ALL {applied} pending receipt(s).")
+    await _callback_reply(query, context, f"✅ Tagged ALL {applied} pending receipt(s).")
 
 
 async def backfill_unmatched_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4016,13 +4182,26 @@ async def register_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     message = update.effective_message
     if not message:
         return
+    user = update.effective_user
+    chat = update.effective_chat
+    # DM-only: registration binds weekly food-cost delivery to THIS chat_id.
+    # Typed in the outlet's staff group it would (a) expose the one-time code
+    # to the whole group and (b) deliver the outlet's financials to the whole
+    # group instead of the manager.
+    if chat is not None and chat.type != "private":
+        with contextlib.suppress(Exception):
+            await message.delete()  # remove the exposed code from the group
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text="⚠️ /register hanya melalui DM — message bot ini secara private, "
+                 "jangan guna code dalam group.",
+        )
+        return
     if not context.args:
         await message.reply_text(
             "Usage: /register <CODE>\nExample: /register SEK20-7K2A"
         )
         return
-    user = update.effective_user
-    chat = update.effective_chat
     manager_name = None
     if user:
         manager_name = (user.full_name or user.username or "").strip() or None
@@ -4692,7 +4871,11 @@ async def run_bot() -> None:
         post_daily_summary,
         trigger="cron",
         hour=23,
-        minute=0,
+        # 23:59, not 23:00 — the summary window is the full MY calendar day,
+        # so receipts logged 23:00-24:00 (shift-close uploads) fell in a
+        # permanent daily blind spot: today's run had already fired and
+        # tomorrow's covers only tomorrow.
+        minute=59,
         args=[app],
         id="daily_summary",
         replace_existing=True,

@@ -5,9 +5,11 @@ Run with::
     python -m unittest tests.test_date_utils
 """
 
+import datetime as _dt
 import os
 import sys
 import unittest
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -152,17 +154,27 @@ class NormalizeDateAcceptedFormats(unittest.TestCase):
 
 
 class NormalizeDateTwoDigitYearRules(unittest.TestCase):
+    # 2026-07 audit: the defensive year bump now applies to the DD/MM path
+    # too — the identical real-world date must not normalize differently
+    # depending on which format OCR emitted. Implausibly old pivot results
+    # (19YY, early 20YY) are bumped to the current year like the ISO path.
     def test_yy_just_under_50_maps_to_2000s(self):
         self.assertEqual(normalize_date("25/4/49"), "2049-04-25")
 
-    def test_yy_50_maps_to_1900s(self):
-        self.assertEqual(normalize_date("25/4/50"), "1950-04-25")
+    def test_yy_50_pivots_to_1900s_then_bumps(self):
+        current = str(_dt.datetime.now(ZoneInfo("Asia/Kuala_Lumpur")).year)
+        self.assertEqual(normalize_date("25/4/50"), f"{current}-04-25")
 
-    def test_yy_99_maps_to_1999(self):
-        self.assertEqual(normalize_date("25/4/99"), "1999-04-25")
+    def test_yy_99_pivots_to_1999_then_bumps(self):
+        current = str(_dt.datetime.now(ZoneInfo("Asia/Kuala_Lumpur")).year)
+        self.assertEqual(normalize_date("25/4/99"), f"{current}-04-25")
 
-    def test_yy_00_maps_to_2000(self):
-        self.assertEqual(normalize_date("25/4/00"), "2000-04-25")
+    def test_yy_00_pivots_to_2000_then_bumps(self):
+        current = str(_dt.datetime.now(ZoneInfo("Asia/Kuala_Lumpur")).year)
+        self.assertEqual(normalize_date("25/4/00"), f"{current}-04-25")
+
+    def test_dmy_and_iso_agree_on_stale_year(self):
+        self.assertEqual(normalize_date("25/04/2023"), normalize_date("2023-04-25"))
 
 
 class NormalizeDateDefensiveYearBump(unittest.TestCase):

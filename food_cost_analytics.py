@@ -102,9 +102,14 @@ def group_food_cost(recon_rows):
     have_sales = False
     for r in recon_rows:
         s = _num(r.get("sales_total"))
-        if s is not None:
-            total_sales += s
-            have_sales = True
+        if s is None:
+            # Sales for this day haven't been ingested (e.g. the digest day at
+            # 23:00 — D-files land next morning). Counting its purchases with
+            # no matching sales structurally inflates the %; skip the row and
+            # let it contribute once its sales arrive.
+            continue
+        total_sales += s
+        have_sales = True
         total_purchases += _num(r.get("total_food_purchases")) or 0.0
     pct = (total_purchases / total_sales * 100.0) if (have_sales and total_sales > 0) else None
     return (
@@ -131,10 +136,14 @@ def rolling_food_cost_by_outlet(recon_rows) -> dict:
         outlet = r.get("outlet_canonical")
         if not outlet:
             continue
-        a = agg.setdefault(outlet, {"sales": 0.0, "purchases": 0.0, "days": 0})
         s = _num(r.get("sales_total"))
-        if s is not None:
-            a["sales"] += s
+        if s is None:
+            # No sales ingested for this day yet (typically the digest day
+            # itself at 23:00) — including its purchases against zero sales
+            # would inflate the rolling % by ~window/(window-1) every night.
+            continue
+        a = agg.setdefault(outlet, {"sales": 0.0, "purchases": 0.0, "days": 0})
+        a["sales"] += s
         a["purchases"] += _num(r.get("total_food_purchases")) or 0.0
         a["days"] += 1
     out: dict = {}
