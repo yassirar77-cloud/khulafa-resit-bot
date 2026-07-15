@@ -65,15 +65,15 @@ def row_passes_filters(receipt, resolution, today=None) -> bool:
 
 def compute_line(item):
     """Mirror of the view's qty/unit_price/line_total maths for one items[] entry.
-    ``item.price`` is the LINE TOTAL; unit_price = line_total / qty. Returns
-    ``(qty, unit_price, line_total)`` with line_total == qty * unit_price."""
+    ``item.price`` is the UNIT price (the convention ocr_quality reconciles
+    against the receipt total and price_aggregation stores); line_total =
+    qty * price. Returns ``(qty, unit_price, line_total)``."""
     qty = _num(item.get("qty"))
     if not qty or qty <= 0:
         qty = 1.0
-    line_price = _num(item.get("price"))
-    if line_price is None:
+    unit_price = _num(item.get("price"))
+    if unit_price is None:
         return qty, None, None
-    unit_price = line_price / qty
     line_total = qty * unit_price
     return qty, unit_price, line_total
 

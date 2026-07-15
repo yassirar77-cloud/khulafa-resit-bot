@@ -401,6 +401,103 @@ def test_night_cook_creates_row_when_no_6pm_entry(monkeypatch):
     assert rows[0]["cooked_qty"] == 8  # starts at the night value
 
 
+def test_late_cooked_form_adds_to_night_totals_instead_of_clobbering():
+    # Chef forgets the 18:00 form; night form lands first (ayam +20). The late
+    # evening submit (ayam 50) must produce 70, and a night-only item must NOT
+    # be zeroed by the evening form's untouched->0 default.
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store["kitchen_daily_usage"] = [
+        {"id": 1, "outlet_code": "SEK20", "business_date": "2026-06-24",
+         "item_code": "ayam_goreng", "item_label": "Ayam Goreng", "unit": "pcs",
+         "cooked_qty": 20},
+        {"id": 2, "outlet_code": "SEK20", "business_date": "2026-06-24",
+         "item_code": "kambing", "item_label": "Kambing", "unit": "pcs",
+         "cooked_qty": 5},  # night-only item
+    ]
+    fake._store["kitchen_log_session"] = [
+        {"id": "n1", "chat_id": -77, "outlet_code": "SEK20",
+         "business_date": "2026-06-24", "phase": "cooked_night",
+         "status": "submitted", "entries": {"ayam_goreng": 20, "kambing": 5}},
+        {"id": "c1", "chat_id": -77, "outlet_code": "SEK20",
+         "business_date": "2026-06-24", "phase": "cooked",
+         "status": "open", "entries": {"ayam_goreng": 50}},
+    ]
+    session = dict(fake._store["kitchen_log_session"][1])
+
+    ku.finalize_submission(fake, session, submitter="LateChef")
+
+    rows = {r["item_code"]: r for r in fake.rows("kitchen_daily_usage")}
+    assert rows["ayam_goreng"]["cooked_qty"] == 70  # 20 (night) + 50 (evening)
+    assert rows["kambing"]["cooked_qty"] == 5       # night-only item untouched
+
+
+def test_cooked_form_still_replaces_when_no_night_submitted():
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store["kitchen_log_session"] = [
+        {"id": "c1", "chat_id": -77, "outlet_code": "SEK20",
+         "business_date": "2026-06-24", "phase": "cooked",
+         "status": "open", "entries": {"ayam_goreng": 50}},
+    ]
+    session = dict(fake._store["kitchen_log_session"][0])
+
+    ku.finalize_submission(fake, session, submitter="Chef")
+
+    rows = {r["item_code"]: r for r in fake.rows("kitchen_daily_usage")}
+    assert rows["ayam_goreng"]["cooked_qty"] == 50
+
+
+def test_merge_entry_concurrent_commits_keep_both_items():
+    # Two staff commit different items from the same stale snapshot: the CAS
+    # merge re-reads before writing, so the later commit keeps the earlier one.
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store["kitchen_log_session"] = [{
+        "id": "s1", "chat_id": -77, "outlet_code": "SEK20",
+        "business_date": "2026-06-24", "phase": "cooked",
+        "status": "open", "entries": {},
+    }]
+    ku._merge_entry(fake, "s1", "ayam_goreng", 50)
+    ku._merge_entry(fake, "s1", "kambing", 3)
+    entries = fake.rows("kitchen_log_session")[0]["entries"]
+    assert entries == {"ayam_goreng": 50, "kambing": 3}
+    # And unset removes only its own item.
+    ku._merge_entry(fake, "s1", "ayam_goreng", None, unset=True)
+    entries = fake.rows("kitchen_log_session")[0]["entries"]
+    assert entries == {"kambing": 3}
+
+
+def test_commit_falls_back_to_other_users_buffer():
+    # Chef (user 7) types the digits; cashier (user 8) taps ✓ — the commit
+    # must find the chef's buffer instead of silently committing nothing.
+    ku._numpad_state.clear()
+    ku._numpad_state[ku._numpad_key(-77, 7, "s1", "ayam_goreng")] = {
+        "buffer": "50", "phase": "cooked",
+    }
+    st = ku._find_numpad_buffer(-77, 8, "s1", "ayam_goreng")
+    assert st is not None and st["buffer"] == "50"
+    # Different item -> no crossover.
+    assert ku._find_numpad_buffer(-77, 8, "s1", "kambing") is None
+    ku._numpad_state.clear()
+
+
+def test_clear_numpad_state_scoped_to_item():
+    ku._numpad_state.clear()
+    k1 = ku._numpad_key(-77, 7, "s1", "ayam_goreng")
+    k2 = ku._numpad_key(-77, 9, "s1", "kambing")
+    ku._numpad_state[k1] = {"buffer": "5", "phase": "cooked"}
+    ku._numpad_state[k2] = {"buffer": "12", "phase": "cooked"}
+    ku._clear_numpad_state("s1", "ayam_goreng")
+    assert k1 not in ku._numpad_state
+    assert k2 in ku._numpad_state  # colleague's half-typed OTHER item survives
+    ku._clear_numpad_state("s1")
+    assert ku._numpad_state == {}
+
+
 def test_claim_session_for_submit_only_first_tap_wins():
     # Double-tap of Hantar: both callbacks read status == "open", but only the
     # tap that wins the open->submitting CAS may finalize — otherwise the
@@ -1518,12 +1615,10 @@ def test_numpad_ok_commits_to_db_and_clears_memory(monkeypatch):
     monkeypatch.setattr(ku, "_supabase", fake)
     ku._numpad_state.clear()
     ku._numpad_state[ku._numpad_key(-77, 7, "s1", "ayam_goreng")] = {"buffer": "50", "phase": "cooked"}
-    saves = _spy(ku, monkeypatch, "_save_session")
 
     update, edits, _ = _cb_update("kdu:s1:ayam_goreng:ok")
     asyncio.run(ku.handle_kitchen_callback(update, _ctx()))
 
-    assert saves["n"] == 1  # commit writes once
     assert fake.rows("kitchen_log_session")[0]["entries"]["ayam_goreng"] == 50
     assert ku._numpad_state == {}  # memory cleared on commit
 

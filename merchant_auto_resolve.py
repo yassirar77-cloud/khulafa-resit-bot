@@ -125,6 +125,24 @@ def _tokens(norm: str) -> list[str]:
     return [t for t in norm.split() if t]
 
 
+# Generic Malay/trade words that cannot anchor a containment match on their
+# own: they appear in many unrelated business names ("PASARAYA MEWAH JAYA" is
+# not the MEWAH supplier). Compared on normalised lowercase tokens.
+_GENERIC_ANCHOR_TOKENS = frozenset({
+    "mewah", "jaya", "maju", "baru", "murah", "segar", "indah", "ria",
+    "restoran", "kedai", "pasaraya", "runcit", "enterprise", "trading",
+    "marketing", "supply", "services", "holdings", "resources", "group",
+    "food", "foods", "frozen", "seafood", "seafoods",
+})
+
+
+def _is_generic_phrase(phrase: str) -> bool:
+    """True when EVERY token of the normalised phrase is a generic trade word
+    — such a phrase can't anchor a confident single-supplier match."""
+    tokens = phrase.lower().split()
+    return bool(tokens) and all(t in _GENERIC_ANCHOR_TOKENS for t in tokens)
+
+
 def _phrase_contained(haystack: str, needle: str) -> bool:
     """True if ``needle`` appears in ``haystack`` on whole-word boundaries.
     Both must already be normalised. "EVEREST" matches inside "EVEREST AISVARAM"
@@ -166,8 +184,15 @@ def _pair_confidence(m: str, c: str) -> float:
     coverage = len(inter) / len(c_tok)  # share of the candidate that is present
     ratio = difflib.SequenceMatcher(None, m, c).ratio()
     if _phrase_contained(m, c) or _phrase_contained(c, m):
-        # Clean containment: lift into the high band, scaled by how much of the
-        # candidate the merchant actually covers.
+        contained = c if _phrase_contained(m, c) else m
+        if _is_generic_phrase(contained):
+            # A contained phrase made only of generic trade words (MEWAH,
+            # JAYA, ...) anchors nothing — "PASARAYA MEWAH JAYA" is NOT the
+            # MEWAH supplier. Keep it in the fuzzy band so the risk model
+            # (defer / owner queue) decides instead of a silent auto-resolve.
+            return min(max(jaccard, coverage, ratio, 0.5), _FUZZY_CONFIDENCE_CEILING)
+        # Clean containment on a distinctive anchor: lift into the high band,
+        # scaled by how much of the candidate the merchant actually covers.
         return min(1.0, 0.90 + 0.10 * coverage)
     return min(max(jaccard, coverage, ratio), _FUZZY_CONFIDENCE_CEILING)
 

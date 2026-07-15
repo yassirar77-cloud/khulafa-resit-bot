@@ -540,10 +540,6 @@
 </div>
 
 <script>
-const SUPABASE_URL = "{{ supabase_url }}";
-const SUPABASE_ANON_KEY = "{{ supabase_anon_key }}";
-const RECEIPTS_TABLE = "{{ receipts_table }}";
-
 const tg = window.Telegram && window.Telegram.WebApp;
 if (tg) {
   tg.ready();
@@ -607,16 +603,23 @@ function normaliseItemName(name) {
 }
 
 async function fetchReceipts() {
-  const url = `${SUPABASE_URL}/rest/v1/${RECEIPTS_TABLE}?select=*&order=created_at.desc&limit=500`;
-  const res = await fetch(url, {
-    headers: {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-    },
+  // Data comes from the bot's own /webapp/data endpoint, which verifies the
+  // Telegram WebApp initData signature server-side (HMAC against the bot
+  // token) and checks the viewer is an authorised reviewer. Opening this page
+  // outside Telegram yields no initData and a 401.
+  const initData = (tg && tg.initData) || "";
+  const res = await fetch("/webapp/data", {
+    headers: { "X-Telegram-Init-Data": initData },
   });
+  if (res.status === 401) {
+    throw new Error("Buka dashboard ini melalui butang dalam Telegram (bukan browser biasa).");
+  }
+  if (res.status === 403) {
+    throw new Error("Akaun Telegram ini tiada akses dashboard.");
+  }
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`Supabase ${res.status}: ${body.slice(0, 200)}`);
+    throw new Error(`Server ${res.status}: ${body.slice(0, 200)}`);
   }
   return res.json();
 }
@@ -1174,9 +1177,9 @@ function showError(msg) {
 }
 
 async function init() {
-  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-    showError("Dashboard not configured: missing Supabase credentials.");
-    document.getElementById("header-sub").textContent = "Konfigurasi diperlukan";
+  if (!tg || !tg.initData) {
+    showError("Buka dashboard ini melalui butang dalam Telegram (bukan browser biasa).");
+    document.getElementById("header-sub").textContent = "Akses melalui Telegram sahaja";
     return;
   }
   try {

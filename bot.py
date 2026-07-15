@@ -37,6 +37,7 @@ from audit_messages import build_big_purchase_message
 from config.reviewers import REVIEWER_CHAT_IDS, is_reviewer
 from date_utils import normalize_date
 from db_pagination import fetch_all_pages
+from webapp_auth import verify_init_data
 from image_store import probe_cloudinary, upload_receipt_image
 from image_utils import resize_for_ocr
 from items_utils import normalize_items
@@ -120,7 +121,6 @@ ZAI_API_KEY = os.environ["ZAI_API_KEY"]
 ZAI_BASE_URL = os.environ.get("ZAI_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/")
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
-SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 ALERT_CHAT_ID = int(os.environ["ALERT_CHAT_ID"])
 HEALTH_PORT = int(os.environ.get("PORT", "10000"))
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "")
@@ -302,12 +302,36 @@ def health():
 
 @flask_app.get("/webapp")
 def webapp():
-    return render_template(
-        "dashboard.html",
-        supabase_url=SUPABASE_URL,
-        supabase_anon_key=SUPABASE_ANON_KEY,
-        receipts_table=RECEIPTS_TABLE,
-    )
+    # The page itself is a static shell — data comes from /webapp/data, which
+    # verifies Telegram WebApp initData server-side. No Supabase credentials
+    # (not even the anon key) are shipped to the browser.
+    return render_template("dashboard.html")
+
+
+@flask_app.get("/webapp/data")
+def webapp_data():
+    from flask import request
+
+    init_data = request.headers.get("X-Telegram-Init-Data", "")
+    user_id = verify_init_data(init_data, TELEGRAM_BOT_TOKEN)
+    if user_id is None:
+        return jsonify(error="unauthorized"), 401
+    if not is_reviewer(user_id):
+        return jsonify(error="forbidden"), 403
+    try:
+        rows = (
+            supabase.table(RECEIPTS_TABLE)
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(500)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        logger.exception("webapp: receipts fetch failed")
+        return jsonify(error="upstream"), 502
+    return jsonify(rows)
 
 
 def run_health_server() -> None:
@@ -624,6 +648,14 @@ def store_pending_review(record: dict) -> dict:
             _pending_image_column_available = False
             payload.pop("image_url", None)
             result = supabase.table(PENDING_REVIEW_TABLE).insert(payload).execute()
+        elif "outlet" in payload and "outlet" in str(exc).lower() and "column" in str(exc).lower():
+            # Same fallback for 0035's outlet column.
+            logger.warning(
+                "pending_review.outlet column missing — apply "
+                "migrations/0035_pending_review_outlet.sql. Queuing without outlet."
+            )
+            payload.pop("outlet", None)
+            result = supabase.table(PENDING_REVIEW_TABLE).insert(payload).execute()
         else:
             raise
     return result.data[0] if result.data else record
@@ -696,7 +728,9 @@ def promote_pending_to_receipt(pending: dict, edits: dict | None = None) -> dict
         "chat_id": chat_id,
         "message_id": pending.get("telegram_message_id"),
         "merchant": merchant_raw.upper().strip() if isinstance(merchant_raw, str) else merchant_raw,
-        "outlet": derive_outlet(chat_id, None),
+        # Prefer the outlet captured at queue time (0035): derive_outlet with
+        # no chat title can only consult the (empty) static map -> NULL.
+        "outlet": pending.get("outlet") or derive_outlet(chat_id, None),
         "receipt_date": parsed.get("receipt_date"),
         "total": parsed.get("total"),
         "currency": "MYR",
@@ -1259,7 +1293,7 @@ def fetch_recent_pending_reviews(within_hours: int = 24) -> list:
 
 async def route_to_review(
     message, context: ContextTypes.DEFAULT_TYPE, parsed: dict, verification: dict,
-    image_url: str | None = None,
+    image_url: str | None = None, outlet: str | None = None,
 ) -> None:
     confidence = verification.get("confidence")
     # De-dup: if an equivalent receipt is already pending review from the last
@@ -1285,6 +1319,9 @@ async def route_to_review(
         "chat_id": message.chat_id,
         "photo_file_id": photo.file_id if photo else None,
         "image_url": image_url,
+        # Captured at queue time — the chat title isn't available at promotion
+        # time, so without this every promoted receipt stored outlet=NULL.
+        "outlet": outlet,
         "confidence": confidence,
         "reason": reason,
         "status": "pending",
@@ -1292,7 +1329,16 @@ async def route_to_review(
     }
     try:
         stored = await asyncio.to_thread(store_pending_review, pending_record)
-    except Exception:
+    except Exception as exc:
+        # 0035's partial unique index closes the check-then-act dedup race: a
+        # second copy of the same photo racing past is_duplicate_review loses
+        # the insert — treat it exactly like the pre-checked duplicate.
+        if "duplicate" in str(exc).lower() or "unique" in str(exc).lower():
+            logger.info("Duplicate review insert blocked by unique index")
+            await message.reply_text(
+                "🔎 This receipt is already in the review queue from earlier — not re-sending."
+            )
+            return
         logger.exception("Failed to queue receipt for manual review")
         await message.reply_text(
             "Couldn't queue this receipt for review — please try resending."
@@ -1639,7 +1685,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # never reaches `receipts`/`item_prices` and poisons price intelligence.
     # We gate on the stored confidence — the second-pass verifier score.
     if should_queue(verification["confidence"]):
-        await route_to_review(message, context, parsed, verification, image_url=image_url)
+        await route_to_review(
+            message, context, parsed, verification, image_url=image_url, outlet=outlet
+        )
         return
 
     try:
@@ -4134,13 +4182,26 @@ async def register_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     message = update.effective_message
     if not message:
         return
+    user = update.effective_user
+    chat = update.effective_chat
+    # DM-only: registration binds weekly food-cost delivery to THIS chat_id.
+    # Typed in the outlet's staff group it would (a) expose the one-time code
+    # to the whole group and (b) deliver the outlet's financials to the whole
+    # group instead of the manager.
+    if chat is not None and chat.type != "private":
+        with contextlib.suppress(Exception):
+            await message.delete()  # remove the exposed code from the group
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text="⚠️ /register hanya melalui DM — message bot ini secara private, "
+                 "jangan guna code dalam group.",
+        )
+        return
     if not context.args:
         await message.reply_text(
             "Usage: /register <CODE>\nExample: /register SEK20-7K2A"
         )
         return
-    user = update.effective_user
-    chat = update.effective_chat
     manager_name = None
     if user:
         manager_name = (user.full_name or user.username or "").strip() or None
@@ -4810,7 +4871,11 @@ async def run_bot() -> None:
         post_daily_summary,
         trigger="cron",
         hour=23,
-        minute=0,
+        # 23:59, not 23:00 — the summary window is the full MY calendar day,
+        # so receipts logged 23:00-24:00 (shift-close uploads) fell in a
+        # permanent daily blind spot: today's run had already fired and
+        # tomorrow's covers only tomorrow.
+        minute=59,
         args=[app],
         id="daily_summary",
         replace_existing=True,

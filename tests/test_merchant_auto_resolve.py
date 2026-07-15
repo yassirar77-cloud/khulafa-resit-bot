@@ -359,6 +359,20 @@ class Migration(unittest.TestCase):
         self.assertIn("merchant_alias_created_via_check", self.sql)
 
 
+class GenericAnchorGuard(unittest.TestCase):
+    """2026-07 audit: a single generic trade word must not auto-resolve."""
+
+    def test_generic_word_containment_stays_below_auto_cutoff(self):
+        # "PASARAYA MEWAH JAYA" is an unrelated grocer, not the MEWAH supplier.
+        conf = match_confidence("PASARAYA MEWAH JAYA", "MEWAH")
+        self.assertLess(conf, AUTO_RESOLVE_CONF_CUTOFF)
+        self.assertGreater(conf, 0.0)  # still surfaces for the risk model
+
+    def test_distinctive_word_containment_still_lifts(self):
+        conf = match_confidence("MD HANEE FROZEN AND SEAFOODS", "HANEE")
+        self.assertGreaterEqual(conf, AUTO_RESOLVE_CONF_CUTOFF)
+
+
 class BotWiring(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

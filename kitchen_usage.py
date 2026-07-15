@@ -1270,8 +1270,27 @@ def finalize_submission(client, session: dict, submitter: str):
     # cooked_qty per item (base 0 when no 6PM row exists yet). The double-add
     # guard is the session itself: a cooked_night session is marked submitted at
     # the end, and the handler/scheduler never re-run a submitted session.
+    #
+    # The evening COOKED form needs the same base when it is submitted LATE —
+    # after the night form already landed. Overwriting would clobber the night
+    # additions (50 replaces 20+50=70) and zero out night-only items.
+    night_already_submitted = False
+    if phase == PHASE_COOKED:
+        try:
+            night_already_submitted = bool(_rows(
+                client.table(SESSION_TABLE)
+                .select("id")
+                .eq("outlet_code", outlet_code)
+                .eq("business_date", business_date)
+                .eq("phase", PHASE_COOKED_NIGHT)
+                .eq("status", "submitted")
+                .limit(1)
+                .execute()
+            ))
+        except Exception:
+            logger.warning("kitchen: could not check for submitted night session", exc_info=True)
     existing_cooked = {}
-    if phase == PHASE_COOKED_NIGHT:
+    if phase == PHASE_COOKED_NIGHT or night_already_submitted:
         try:
             for r in _rows(
                 client.table(USAGE_TABLE)
@@ -1297,8 +1316,18 @@ def finalize_submission(client, session: dict, submitter: str):
             "unit": unit,
         }
         if phase == PHASE_COOKED:
-            # Untouched items default to 0 (staff key only what they cooked).
-            row["cooked_qty"] = value if value is not None else 0
+            if night_already_submitted:
+                # Late evening form: the night form already wrote its additive
+                # totals — add to them (evening + night), and leave night-only
+                # items untouched instead of zeroing them.
+                base = existing_cooked.get(code) or 0
+                if value is None and code in existing_cooked:
+                    row["cooked_qty"] = base
+                else:
+                    row["cooked_qty"] = base + (value or 0)
+            else:
+                # Untouched items default to 0 (staff key only what they cooked).
+                row["cooked_qty"] = value if value is not None else 0
             row["cooked_by"] = submitter
             row["cooked_at"] = now_iso
         elif phase == PHASE_COOKED_NIGHT:
@@ -1336,7 +1365,9 @@ def finalize_submission(client, session: dict, submitter: str):
             % (len(pending), outlet_code, business_date, phase, last_error)
         )
 
-    _save_session(client, session["id"], status="submitted", entries=entries)
+    # Status only — re-saving this function's entries snapshot would clobber
+    # any item a colleague committed while the submit was in flight.
+    _save_session(client, session["id"], status="submitted")
 
     if phase != PHASE_LEFT:
         return []
@@ -1780,12 +1811,68 @@ async def _handle_numpad_key(query, session_id, item_code, action) -> None:
     )
 
 
-def _clear_numpad_state(session_id) -> None:
-    """Drop any in-memory numpad buffers for a session (on commit / submit)."""
+def _clear_numpad_state(session_id, item_code=None) -> None:
+    """Drop in-memory numpad buffers for a session — all of them on submit,
+    or only one item's (every user's) on ✓/🗑, so committing one item can't
+    erase a colleague's half-typed digits for a DIFFERENT item."""
     sid = str(session_id)
-    for k in [k for k in _numpad_state if k[2] == sid]:
+    for k in [
+        k for k in _numpad_state
+        if k[2] == sid and (item_code is None or k[3] == item_code)
+    ]:
         _numpad_state.pop(k, None)
         _numpad_state_ts.pop(k, None)
+
+
+def _find_numpad_buffer(chat_id, user_id, session_id, item_code):
+    """The tapper's buffer for this item, falling back to ANY user's buffer in
+    the same chat/session for the same item. The form is one shared message in
+    the outlet group — the chef often types the digits and a colleague (or the
+    chef from a second device) taps ✓; without the fallback that commit reads
+    an empty buffer and silently discards the typed value."""
+    st = _numpad_state.get(_numpad_key(chat_id, user_id, session_id, item_code))
+    if st is not None:
+        return st
+    sid = str(session_id)
+    for k, other in _numpad_state.items():
+        if k[0] == chat_id and k[2] == sid and k[3] == item_code and other.get("buffer"):
+            return other
+    return None
+
+
+def _merge_entry(client, session_id, item_code, value, *, unset=False):
+    """Persist ONE item's value into the session ``entries`` with a
+    compare-and-swap on ``updated_at``: two staff committing different items
+    near-simultaneously each read-modify-write the whole JSON, and without the
+    CAS the later write silently erases the earlier item. ``unset=True``
+    removes the item. Returns the merged entries dict."""
+    entries: dict = {}
+    for _ in range(4):
+        row = get_session(client, session_id)
+        if row is None:
+            return {}
+        entries = _load_entries(row)
+        if unset:
+            entries.pop(item_code, None)
+        elif value is not None:
+            entries[item_code] = value
+        token = row.get("updated_at")
+        q = (
+            client.table(SESSION_TABLE)
+            .update({
+                "entries": entries, "editing_item": None, "buffer": "",
+                "updated_at": datetime.now(MY_TZ).isoformat(),
+            })
+            .eq("id", session_id)
+        )
+        if token is not None:
+            q = q.eq("updated_at", token)
+        if q.execute().data:
+            return entries
+    logger.warning(
+        "kitchen: entries merge for %s/%s lost the CAS repeatedly", session_id, item_code
+    )
+    return entries
 
 
 async def handle_kitchen_callback(update, context) -> None:
@@ -1908,11 +1995,9 @@ async def handle_kitchen_callback(update, context) -> None:
 
     # --- 🗑 Kosongkan: unset this item (wrong item tapped) and return to list ---
     if action == "clr":
-        entries.pop(item_code, None)
-        _clear_numpad_state(session_id)
-        await asyncio.to_thread(
-            _save_session, _supabase, session_id,
-            entries=entries, editing_item=None, buffer="",
+        _clear_numpad_state(session_id, item_code)
+        entries = await asyncio.to_thread(
+            _merge_entry, _supabase, session_id, item_code, None, unset=True
         )
         with contextlib.suppress(Exception):
             await query.edit_message_text(
@@ -1925,15 +2010,12 @@ async def handle_kitchen_callback(update, context) -> None:
     if action == "ok":
         chat_id = query.message.chat_id if query.message else None
         user_id = query.from_user.id if query.from_user else None
-        st = _numpad_state.get(_numpad_key(chat_id, user_id, session_id, item_code))
+        st = _find_numpad_buffer(chat_id, user_id, session_id, item_code)
         buffer = st["buffer"] if st else (session.get("buffer") or "")
         value = commit_value(buffer, unit)
-        if value is not None:
-            entries[item_code] = value
-        _clear_numpad_state(session_id)
-        await asyncio.to_thread(
-            _save_session, _supabase, session_id,
-            entries=entries, editing_item=None, buffer="",
+        _clear_numpad_state(session_id, item_code)
+        entries = await asyncio.to_thread(
+            _merge_entry, _supabase, session_id, item_code, value
         )
         # The ONLY message edit in the numpad flow — back to the item list.
         t_edit = time.monotonic()

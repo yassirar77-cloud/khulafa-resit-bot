@@ -8,12 +8,22 @@ import re
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-MIN_PLAUSIBLE_YEAR = 2024
-FALLBACK_YEAR = 2026
-
 # Receipt dates / business dates are Malaysia-local; created_at is a UTC
 # timestamptz, so it must be converted to MY-local before comparing days.
 _MY_TZ = ZoneInfo("Asia/Kuala_Lumpur")
+
+
+def _fallback_year() -> int:
+    """The year an implausibly-old OCR year is bumped to: the CURRENT MY year,
+    computed at call time — a hardcoded constant fabricated future dates and
+    went stale every January."""
+    return datetime.now(_MY_TZ).year
+
+
+def _min_plausible_year() -> int:
+    """Receipts are uploaded within days of purchase; a year more than ~2
+    behind the current one is an OCR misread, not a real purchase."""
+    return _fallback_year() - 2
 
 # OCR sometimes reads a wildly future receipt date (a transposed day, a bumped
 # year). If the OCR'd date lands more than this many days after the upload day
@@ -60,8 +70,8 @@ def normalize_date(value) -> str | None:
     iso = _ISO_RE.match(s)
     if iso:
         year, month, day = int(iso.group(1)), int(iso.group(2)), int(iso.group(3))
-        if year < MIN_PLAUSIBLE_YEAR:
-            year = FALLBACK_YEAR
+        if year < _min_plausible_year():
+            year = _fallback_year()
         try:
             return datetime(year, month, day).date().isoformat()
         except ValueError:
@@ -72,6 +82,10 @@ def normalize_date(value) -> str | None:
         day, month, year = int(dmy.group(1)), int(dmy.group(2)), int(dmy.group(3))
         if year < 100:
             year = 2000 + year if year < 50 else 1900 + year
+        # Same defensive bump as the ISO path — the identical real-world date
+        # must not normalize differently depending on which format OCR emitted.
+        if year < _min_plausible_year():
+            year = _fallback_year()
         try:
             return datetime(year, month, day).date().isoformat()
         except ValueError:

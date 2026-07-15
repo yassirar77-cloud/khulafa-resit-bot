@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import reconciliation_service  # noqa: E402
 
-from datetime import timedelta  # noqa: E402
+from datetime import timedelta, timezone  # noqa: E402
 
 import merchant_auto_resolve  # noqa: E402
 from digest import build_digest_messages, parse_mode_attempts  # noqa: E402
@@ -179,6 +179,12 @@ def _reconcile_before_digest(client, now_my) -> None:
     sales_total from sales_daily_summary for every day still on screen."""
     today = now_my.date()
     dates = [(today - timedelta(days=i)).isoformat() for i in range(FOOD_COST_LOOKBACK_DAYS)]
+    # Late uploads: a receipt photographed >LOOKBACK days after its
+    # receipt_date belongs to a business date the window above never revisits
+    # — without this its spend silently never reaches purchase_reconciliation.
+    # Re-reconcile the business dates of anything uploaded since yesterday
+    # that falls outside the rolling window.
+    dates += _late_upload_dates(client, now_my, set(dates))
     try:
         results = reconciliation_service.run_reconciliation_for_dates(client, dates)
         logger.info(
@@ -187,6 +193,33 @@ def _reconcile_before_digest(client, now_my) -> None:
         )
     except Exception:
         logger.warning("Reconciliation before digest failed", exc_info=True)
+
+
+def _late_upload_dates(client, now_my, window_dates: set) -> list:
+    """Business dates (effective, clamped) of receipts uploaded in the last
+    2 days that fall OUTSIDE the rolling window. Best-effort: [] on failure."""
+    from date_utils import clamp_business_date
+    try:
+        since = (now_my - timedelta(days=2)).astimezone(timezone.utc).isoformat()
+        rows = (
+            client.table("receipts")
+            .select("receipt_date, created_at")
+            .gte("created_at", since)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        logger.warning("Late-upload date scan failed", exc_info=True)
+        return []
+    extra = set()
+    for r in rows:
+        effective, _ = clamp_business_date(r.get("receipt_date"), r.get("created_at"))
+        if effective and str(effective) not in window_dates:
+            extra.add(str(effective))
+    if extra:
+        logger.info("Reconciling late-upload business dates: %s", sorted(extra))
+    return sorted(extra)
 
 
 if __name__ == "__main__":
