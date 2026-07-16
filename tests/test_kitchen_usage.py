@@ -534,6 +534,198 @@ def test_claim_session_for_submit_reclaims_stale_claim():
     assert ku.claim_session_for_submit(fake, sid) is False
 
 
+def _check_constraint_fake_cls():
+    """A FakeSupabase that enforces 0032's CHECK (status IN ('open','submitted'))
+    exactly like the live table before migration 0037 — the production state
+    that killed the Hantar button (the plain fake enforces no constraints,
+    which is how the regression slipped through)."""
+    from tests.fake_supabase import FakeSupabase
+
+    class _CheckConstraintFake(FakeSupabase):
+        def table(self, name):
+            q = super().table(name)
+            if name == "kitchen_log_session":
+                orig_execute = q.execute
+
+                def _execute():
+                    payload = q._payload
+                    if q._op in ("insert", "update", "upsert") and payload:
+                        rows = payload if isinstance(payload, list) else [payload]
+                        for p in rows:
+                            status = p.get("status")
+                            if status not in (None, "open", "submitted"):
+                                raise _PGRSTError(
+                                    code="23514",
+                                    message='new row for relation "kitchen_log_session" '
+                                            'violates check constraint '
+                                            '"kitchen_log_session_status_check"',
+                                )
+                    return orig_execute()
+
+                q.execute = _execute
+            return q
+
+    return _CheckConstraintFake
+
+
+def test_is_status_check_violation_detects_23514():
+    assert ku._is_status_check_violation(_PGRSTError(code="23514", message="x")) is True
+    assert ku._is_status_check_violation(
+        Exception('violates check constraint "kitchen_log_session_status_check"')
+    ) is True
+    assert ku._is_status_check_violation(_PGRSTError()) is False  # PGRST205
+    assert ku._is_status_check_violation(Exception("network timeout")) is False
+
+
+def test_claim_falls_back_when_check_constraint_rejects_submitting(caplog):
+    # Live table pre-0037: UPDATE status='submitting' raises 23514. The claim
+    # must fall back to a direct open->submitted CAS instead of letting the
+    # exception escape (the dead-Hantar production bug).
+    import logging
+
+    fake = _check_constraint_fake_cls()()
+    fake._store["kitchen_log_session"] = [_night_session({"ayam_goreng": 20})]
+    sid = fake.rows("kitchen_log_session")[0]["id"]
+
+    with caplog.at_level(logging.WARNING, logger="kitchen_usage"):
+        assert ku.claim_session_for_submit(fake, sid) is True
+    assert fake.rows("kitchen_log_session")[0]["status"] == "submitted"
+    # Double-tap still loses: the fallback CAS requires status == 'open'.
+    assert ku.claim_session_for_submit(fake, sid) is False
+    msgs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "0037" in msgs  # operator is told which migration to apply
+
+
+def test_hantar_end_to_end_with_live_check_constraint(monkeypatch):
+    """THE production bug, end-to-end: complete form + the live table's status
+    CHECK (no 'submitting' allowed). Hantar must still promote all rows and
+    show the success edit — not die silently."""
+    import asyncio
+    import types
+
+    fake = _check_constraint_fake_cls()()
+    sess = _bistro_cooked_session()
+    sess["id"] = "s1"
+    fake._store["kitchen_log_session"] = [sess]
+    monkeypatch.setattr(ku, "_supabase", fake)
+
+    edits, replies = [], []
+
+    class _Query:
+        data = "kdu:s1:_form:send"
+        from_user = types.SimpleNamespace(full_name="Chef", username=None, id=999)
+        message = types.SimpleNamespace(
+            reply_text=lambda *a, **k: _async_append(replies, a[0] if a else k.get("text"))
+        )
+        async def answer(self, *a, **k):
+            return None
+        async def edit_message_text(self, text, **k):
+            edits.append(text)
+
+    update = types.SimpleNamespace(callback_query=_Query())
+    context = types.SimpleNamespace(bot=types.SimpleNamespace())
+
+    asyncio.run(ku.handle_kitchen_callback(update, context))
+
+    assert len(fake.rows("kitchen_daily_usage")) == 11
+    assert fake.rows("kitchen_log_session")[0]["status"] == "submitted"
+    assert any("Tersimpan" in e for e in edits)
+    assert replies == []  # success — no error reply
+
+
+def test_hantar_replies_error_when_claim_raises_unexpectedly(monkeypatch):
+    # Any non-constraint failure of the claim write (network, schema) must
+    # reach the worker as an error reply — never a silent dead button.
+    import asyncio
+    import types
+
+    from tests.fake_supabase import FakeSupabase
+
+    class _UpdateBoom(FakeSupabase):
+        def table(self, name):
+            q = super().table(name)
+            if name == "kitchen_log_session":
+                orig_update = q.update
+
+                def _update(payload):
+                    orig_update(payload)
+                    q.execute = _raise
+                    return q
+
+                def _raise():
+                    raise Exception("network timeout")
+
+                q.update = _update
+            return q
+
+    fake = _UpdateBoom()
+    sess = _bistro_cooked_session()
+    sess["id"] = "s1"
+    fake._store["kitchen_log_session"] = [sess]
+    monkeypatch.setattr(ku, "_supabase", fake)
+
+    edits, replies = [], []
+
+    class _Query:
+        data = "kdu:s1:_form:send"
+        from_user = types.SimpleNamespace(full_name="Chef", username=None, id=999)
+        message = types.SimpleNamespace(
+            reply_text=lambda *a, **k: _async_append(replies, a[0] if a else k.get("text"))
+        )
+        async def answer(self, *a, **k):
+            return None
+        async def edit_message_text(self, text, **k):
+            edits.append(text)
+
+    update = types.SimpleNamespace(callback_query=_Query())
+    context = types.SimpleNamespace(bot=types.SimpleNamespace())
+
+    asyncio.run(ku.handle_kitchen_callback(update, context))
+
+    assert fake.rows("kitchen_daily_usage") == []
+    assert any("Gagal simpan" in r for r in replies)  # worker told, not silent
+    assert fake.rows("kitchen_log_session")[0]["status"] == "open"  # retryable
+
+
+def test_hantar_incomplete_form_alert_is_first_answer(monkeypatch):
+    # A callback query can only be answered once. The "Isi semua item dulu"
+    # alert must be the FIRST answer for the send action — a generic pre-answer
+    # would turn it into a no-op and the worker would see a dead button.
+    import asyncio
+    import types
+
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    sess = _bistro_cooked_session()
+    sess["id"] = "s1"
+    sess["entries"] = {}  # nothing filled -> can_submit is False
+    fake._store["kitchen_log_session"] = [sess]
+    monkeypatch.setattr(ku, "_supabase", fake)
+
+    answers = []
+
+    class _Query:
+        data = "kdu:s1:_form:send"
+        from_user = types.SimpleNamespace(full_name="Chef", username=None, id=999)
+        message = types.SimpleNamespace(reply_text=lambda *a, **k: _async_append([], None))
+        async def answer(self, *a, **k):
+            answers.append((a, k))
+        async def edit_message_text(self, text, **k):
+            pass
+
+    update = types.SimpleNamespace(callback_query=_Query())
+    context = types.SimpleNamespace(bot=types.SimpleNamespace())
+
+    asyncio.run(ku.handle_kitchen_callback(update, context))
+
+    assert answers, "the tap was never answered"
+    first_args, first_kwargs = answers[0]
+    assert first_kwargs.get("show_alert") is True
+    assert "Isi semua item" in (first_args[0] if first_args else first_kwargs.get("text", ""))
+    assert fake.rows("kitchen_daily_usage") == []
+
+
 def test_night_cook_double_submit_guard(monkeypatch):
     # The session-submitted status is the guard: a submitted night session is a
     # no-op, so the additive add can't be applied twice via the handler.
