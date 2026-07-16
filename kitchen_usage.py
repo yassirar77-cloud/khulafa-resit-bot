@@ -886,6 +886,21 @@ def _is_missing_table_error(exc: Exception) -> bool:
     )
 
 
+def _is_status_check_violation(exc: Exception) -> bool:
+    """True when a write was rejected by the kitchen_log_session status CHECK
+    constraint (Postgres 23514) — i.e. migration 0037 (which allows the
+    transient 'submitting' claim state) hasn't been applied yet. Detected by
+    code/message so it works whether the client raises APIError or a plain
+    Exception."""
+    code = getattr(exc, "code", None)
+    if code == "23514":
+        return True
+    text = str(getattr(exc, "message", "") or exc).lower()
+    return "23514" in text or (
+        "check constraint" in text and "status" in text
+    )
+
+
 def _load_entries(row: dict) -> dict:
     raw = row.get("entries")
     if isinstance(raw, dict):
@@ -945,13 +960,37 @@ def claim_session_for_submit(client, session_id) -> bool:
     night phase ADDS to cooked_qty, so letting both through double-adds the
     night quantities. Only the tap that wins this CAS may finalize."""
     now_iso = datetime.now(MY_TZ).isoformat()
-    result = (
-        client.table(SESSION_TABLE)
-        .update({"status": "submitting", "updated_at": now_iso})
-        .eq("id", session_id)
-        .eq("status", "open")
-        .execute()
-    )
+    try:
+        result = (
+            client.table(SESSION_TABLE)
+            .update({"status": "submitting", "updated_at": now_iso})
+            .eq("id", session_id)
+            .eq("status", "open")
+            .execute()
+        )
+    except Exception as exc:
+        if not _is_status_check_violation(exc):
+            raise
+        # The live table still has 0032's CHECK (status IN ('open','submitted'))
+        # — 'submitting' is rejected and the Hantar button dies. Until migration
+        # 0037 is applied, claim by jumping straight to 'submitted': the CAS on
+        # status='open' still makes double-taps lose, we just give up the
+        # 10-minute stale-claim recovery (a crash mid-finalize strands the form
+        # as submitted instead of being reclaimable).
+        logger.warning(
+            "kitchen: status CHECK rejects 'submitting' — apply migrations/"
+            "0037_kitchen_session_status_submitting.sql. Claiming session %s "
+            "via open->submitted fallback (no stale-claim recovery).",
+            session_id,
+        )
+        result = (
+            client.table(SESSION_TABLE)
+            .update({"status": "submitted", "updated_at": now_iso})
+            .eq("id", session_id)
+            .eq("status", "open")
+            .execute()
+        )
+        return bool(result.data)
     if result.data:
         return True
     # Crash recovery: a submit that died between claim and finalize leaves the
@@ -1900,17 +1939,26 @@ async def handle_kitchen_callback(update, context) -> None:
         await _handle_numpad_key(query, session_id, item_code, action)
         return
 
-    # Non-numpad (open / ✓ commit / Hantar): clear the spinner, then do the work.
-    with contextlib.suppress(Exception):
-        await query.answer()
+    # Non-numpad (open / ✓ commit / Hantar): clear the spinner, then do the
+    # work. Hantar is the exception — a callback query can only be answered
+    # ONCE, so answering here would turn its show_alert validation answers
+    # below into silent no-ops. For "send" the answer happens inside the
+    # Hantar branch instead.
+    is_send = item_code == FORM_TOKEN and action == "send"
+    if not is_send:
+        with contextlib.suppress(Exception):
+            await query.answer()
 
     session = await asyncio.to_thread(get_session, _supabase, session_id)
     if session is None:
         with contextlib.suppress(Exception):
+            await query.answer()
+        with contextlib.suppress(Exception):
             await query.edit_message_text("Sesi ini dah tamat. Tunggu borang baru.")
         return
     if session.get("status") == "submitted":
-        await query.answer()
+        with contextlib.suppress(Exception):
+            await query.answer("Borang ini dah dihantar.")
         return
 
     outlet_code = session["outlet_code"]
@@ -1924,15 +1972,31 @@ async def handle_kitchen_callback(update, context) -> None:
         outlet_label = outlet_code
 
     # --- Hantar (submit) ---
-    if item_code == FORM_TOKEN and action == "send":
+    if is_send:
         if not can_submit(entries, outlet_code, phase):
-            if phase == PHASE_COOKED_NIGHT:
-                await query.answer("Key sekurang-kurangnya 1 item tambahan dulu.", show_alert=True)
-            else:
-                await query.answer("Isi semua item dulu sebelum Hantar.", show_alert=True)
+            with contextlib.suppress(Exception):
+                if phase == PHASE_COOKED_NIGHT:
+                    await query.answer("Key sekurang-kurangnya 1 item tambahan dulu.", show_alert=True)
+                else:
+                    await query.answer("Isi semua item dulu sebelum Hantar.", show_alert=True)
             return
+        # Validation passed — clear the spinner before the slow finalize.
+        with contextlib.suppress(Exception):
+            await query.answer()
         submitter = _submitter_name(query.from_user)
-        claimed = await asyncio.to_thread(claim_session_for_submit, _supabase, session_id)
+        try:
+            claimed = await asyncio.to_thread(claim_session_for_submit, _supabase, session_id)
+        except Exception:
+            # The claim write itself failed (constraint/schema/network). This
+            # previously escaped the handler entirely — the worker saw a dead
+            # button. Always tell them something went wrong.
+            logger.exception("kitchen: claim_session_for_submit failed for session %s", session_id)
+            with contextlib.suppress(Exception):
+                await query.message.reply_text(
+                    "⚠️ Gagal simpan ke pangkalan data. "
+                    "Cuba tekan Hantar sekali lagi — kalau masih gagal, maklum boss."
+                )
+            return
         if not claimed:
             # Another tap (double-tap on a slow connection) is already
             # finalizing this session — let that one report the outcome.
