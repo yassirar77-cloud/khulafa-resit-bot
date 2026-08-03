@@ -1,0 +1,67 @@
+name: uom-worklist-oneshot
+
+# TEMPORARY. Fires the read-only seeding-worklist shadow run from this feature
+# branch, because `workflow_dispatch` only registers once a workflow is on the
+# default branch and this one is not there yet.
+#
+# Scoped hard: it runs ONLY on a push to this branch that touches
+# `.github/uom-run-mode`, so ordinary commits never fire it. The mode file
+# holds either `dry-run` (free — counts receipts, makes no OCR calls) or
+# `full` (one vision call per receipt).
+#
+# Delete this file once the branch is merged; `uom-seeding-worklist.yml` is the
+# permanent, manually-dispatched version.
+
+on:
+  push:
+    branches:
+      - claude/resit-bot-invoice-items-9w5yud
+    paths:
+      - .github/uom-run-mode
+
+permissions:
+  contents: read
+
+jobs:
+  worklist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install minimal deps
+        run: pip install --quiet supabase openai httpx Pillow tzdata
+      - name: Shadow-run the invoice extractor (read-only)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          ZAI_BASE_URL: ${{ secrets.ZAI_BASE_URL }}
+        run: |
+          MODE="$(tr -d '[:space:]' < .github/uom-run-mode)"
+          echo "mode=$MODE"
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ]; then
+            echo "::error::SUPABASE_URL / SUPABASE_KEY repo Actions secrets are not set."
+            exit 1
+          fi
+          ARGS="--days 60 --date-field receipt_date --out uom_seeding_worklist.csv"
+          if [ "$MODE" = "dry-run" ]; then
+            ARGS="$ARGS --dry-run"
+          elif [ -z "$ZAI_API_KEY" ]; then
+            echo "::error::ZAI_API_KEY is required for a full run."
+            exit 1
+          fi
+          python scripts/uom_seeding_worklist.py $ARGS
+      - name: Show the CSV in the job log
+        if: ${{ hashFiles('uom_seeding_worklist.csv') != '' }}
+        run: |
+          echo "----- BEGIN WORKLIST CSV -----"
+          cat uom_seeding_worklist.csv
+          echo "----- END WORKLIST CSV -----"
+      - name: Upload the worklist CSV
+        if: ${{ hashFiles('uom_seeding_worklist.csv') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: uom-seeding-worklist
+          path: uom_seeding_worklist.csv
