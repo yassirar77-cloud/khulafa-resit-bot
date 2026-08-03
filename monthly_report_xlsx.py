@@ -170,26 +170,34 @@ def build_hygiene_rows(hygiene: dict, outlet: str, period: str) -> list[list]:
 
 def build_wastage_rows(wastage: dict, outlet: str, period: str) -> list[list]:
     rows: list[list] = [
-        [f"Wastage variance — {outlet}, {period}", None, None, None, None, None],
-        [None, None, None, None, None, None],
-        ["Ingredient", "Theoretical", "Unit", "Purchased", "Variance %", "Verdict / reason"],
+        [f"Wastage variance — {outlet}, {period}", None, None, None, None, None, None],
+        [None, None, None, None, None, None, None],
+        ["Ingredient", "Theoretical", "Unit", "Purchased", "Variance %",
+         "Verdict / reason", "Rule breakdown"],
     ]
     for row in wastage.get("rows", []):
         variance = (
             f"{row['variance_pct']:+.1f}%" if row.get("variance_pct") is not None
             else (row.get("reason") or "—")
         )
+        breakdown = ", ".join(
+            f"{k} {v:g}" for k, v in sorted((row.get("ingredients") or {}).items())
+        )
         rows.append([
             row["canonical_item"], row.get("theoretical_qty"),
             row.get("theoretical_unit") or row.get("purchased_unit"),
-            row.get("purchased_qty"), variance, row.get("verdict"),
+            row.get("purchased_qty"), variance,
+            row.get("verdict") if row.get("variance_pct") is not None
+            else f"{row.get('verdict')} — {row.get('reason') or ''}",
+            breakdown,
         ])
     if wastage.get("flagged_rows"):
         rows += [
-            [None, None, None, None, None, None],
+            [None, None, None, None, None, None, None],
             [f"{wastage['flagged_rows']} purchase line(s) worth "
              f"RM{wastage['flagged_cost']:.2f} could not be converted to a base "
-             f"quantity — those ingredients show no %", None, None, None, None, None],
+             f"quantity — those ingredients show no %",
+             None, None, None, None, None, None],
         ]
     return rows
 

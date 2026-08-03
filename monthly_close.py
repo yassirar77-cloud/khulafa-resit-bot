@@ -520,10 +520,24 @@ def format_monthly_digest(
     flag_count = len(pl.get("flags") or []) + len(cash.get("flags") or [])
     unreliable = (wastage or {}).get("unreliable_count", 0)
     flagged_rows = (wastage or {}).get("flagged_rows", 0)
+    no_category = (wastage or {}).get("no_purchase_category") or []
+    no_portion = (wastage or {}).get("no_portion_rule") or []
     lines += ["", "🚩 Flags"]
     lines.append(f"• {flag_count} P&L / cash flag(s)")
     lines.append(f"• {unreliable} ingredient(s) with no reliable variance")
     lines.append(f"• {flagged_rows} purchase line(s) not convertible to a base unit")
+    # Named, not just counted: these two need different fixes, and neither is
+    # something the report can resolve on its own.
+    if no_category:
+        lines.append(
+            f"• {len(no_category)} modelled but uncomparable (no purchase "
+            f"category): {', '.join(no_category[:5])}"
+        )
+    if no_portion:
+        lines.append(
+            f"• {len(no_portion)} with no locked portion (shown in dishes): "
+            f"{', '.join(no_portion[:5])}"
+        )
     if hygiene:
         lines.append(
             f"• {hygiene.get('duplicate_count', 0)} duplicate SKU group(s), "

@@ -1,31 +1,35 @@
 """Monthly wastage: theoretical usage from POS sales vs actual purchases.
 
-Theoretical usage comes from ``monthly_itemwise`` through the locked v12
-framework in ``kitchen_usage`` — the same Thai-category exclusion, staff-meal
-exclusion, ayam cut rules and portion sizes the daily kitchen comparison uses.
-Reusing it matters: if the monthly report counted a dish the daily comparison
-excludes, the two would disagree about the same kitchen and nobody could tell
-which was right.
-
-Actual purchases come from ``receipt_items`` where ``qty_base IS NOT NULL`` for
-the same outlet and period.
+Theoretical usage comes from ``monthly_itemwise`` through the owner-locked v12
+rule set in ``wastage_rules_v12`` — portions, the Thai keyword list, the chicken
+cut rules, the egg rules, the drinks rules and the Thai/Mamak protein split.
+Actual purchases come from ``receipt_items`` for the same outlet and period.
 
     variance % = (purchased − theoretical) / theoretical
     > +15%        HIGH WASTAGE
     −5% … +15%    healthy
     < −5%         OVER-USED
 
-Two situations produce no percentage at all, by design:
+Rows are keyed ``(canonical_item, unit)``, not by item alone. That is what lets
+ayam be compared honestly: whole cuts are bought by the EKOR and consumed in
+pieces, fillet is bought by the KG and consumed in grams, and liver is neither.
+Collapsing them would force a MIXED verdict on the largest ingredient in the
+report — the one the whole exercise exists to measure.
 
-* **Unconvertible purchases.** If any of an ingredient's purchase rows is
-  flagged or has no ``qty_base``, the variance is UNRELIABLE. The flagged RM is
-  shown so the gap is visible, but no % is printed — a percentage computed over
-  a partial numerator reads as precision that isn't there.
-* **No locked portion size.** v12 locks grams-per-portion for kambing (180 g)
-  and daging (60 g) only. Ayam and ikan are sold and logged as whole pieces;
-  eggs and drinks have no portion rule in the repo at all. Where the units of
-  sale and purchase cannot be reconciled from a LOCKED rule, the ingredient is
-  reported NOT MODELLED rather than converted on an invented factor.
+A row without a percentage always carries the reason, and the reasons are kept
+distinct because they call for different actions:
+
+* ``NO PORTION RULE``      — udang, sotong, hati ayam. The rules identify the
+  demand but no portion is locked, so it is reported in DISHES and never
+  converted to a weight.
+* ``NO PURCHASE CATEGORY`` — telur, beras, minyak masak, susu, tulang. The
+  rules model them, but canonicalization v2 has no category, so no purchase
+  line can ever be matched. The fix is a category, not a portion.
+* ``UNRELIABLE``           — purchases exist but some could not be converted, or
+  arrived in a unit the theoretical figure is not in.
+* ``NOT MODELLED``         — purchases exist for something no rule mentions.
+
+Nothing is estimated to fill any of those gaps.
 
 Pure functions apart from :func:`fetch_purchases`.
 """
@@ -34,11 +38,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from kitchen_usage import (
-    AYAM_EXCLUDE_SUBSTRINGS,
-    ITEM_BY_CODE,
-    ITEM_POS_KEYWORDS,
-    KG_PORTION_GRAMS,
+from wastage_rules_v12 import (
+    CANONICAL_BY_INGREDIENT,
+    UNPORTIONED,
+    usage_for_dish,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,82 +56,59 @@ VERDICT_HEALTHY = "healthy"
 VERDICT_OVER_USED = "OVER-USED"
 VERDICT_UNRELIABLE = "UNRELIABLE"
 VERDICT_NOT_MODELLED = "NOT MODELLED"
+#: The rules DO model this ingredient, but canonicalization v2 has no category
+#: for it, so no purchase line can ever be matched against the theoretical
+#: figure. Distinct from NOT MODELLED, which means the reverse.
+VERDICT_NO_PURCHASE_CATEGORY = "NO PURCHASE CATEGORY"
+#: Identified by the rules but with no owner-locked portion (udang, sotong,
+#: hati ayam). Demand is reported in dishes; it is never converted to a weight.
+VERDICT_NO_PORTION_RULE = "NO PORTION RULE"
 
-#: v12 kitchen item code -> the ``receipt_items.canonical_item`` it is bought as.
-#: Several POS cuts map to one purchased ingredient (all ayam cuts come from the
-#: same bird), which is why theoretical usage is summed per canonical, not per cut.
-ITEM_TO_CANONICAL: dict[str, str] = {
-    "ayam_goreng": "ayam",
-    "ayam_bawang": "ayam",
-    "ayam_rempah": "ayam",
-    "ayam_kicap": "ayam",
-    "ayam_madu": "ayam",
-    "ayam_tandoori": "ayam",
-    "ikan_goreng": "ikan",
-    "ikan_kari": "ikan",
-    "kambing": "kambing",
-    "daging": "daging",
-}
+def _bucket_for(ingredient: str) -> str:
+    """The key an ingredient's THEORETICAL usage is reported under.
 
-#: The base unit each canonical's THEORETICAL usage is expressed in, derived
-#: from the v12 rules: 'g' where a portion size is locked, 'pcs' where the item
-#: is sold and logged by the piece. Anything absent here is NOT MODELLED.
-def _theoretical_unit(item_code: str) -> str | None:
-    unit = ITEM_BY_CODE.get(item_code, {}).get("unit")
-    if unit == "kg":
-        return "g" if KG_PORTION_GRAMS.get(item_code) else None
-    if unit == "pcs":
-        return "pcs"
-    return None
-
-
-def _dish_excluded(name: str, base: str) -> bool:
-    """v12 exclusions, applied without a category column.
-
-    ``monthly_itemwise`` has no category field, so the THAI FOOD category
-    exclusion is applied by keyword on the dish name instead. The keyword list
-    is the v12 one; staff meals and the ayam isi/rendang rules are unchanged.
+    The canonical purchase category when one exists, so several rule-level
+    ingredients that come out of the same stock are compared as one — MYSOOR and
+    MD HANI beef are both bought as `daging` and are only distinguishable on the
+    kitchen line, not on an invoice. Otherwise the ingredient's own key, so that
+    beras biasa, beras basmati and tulang (all `None`, all grams) never merge
+    into one meaningless total.
     """
-    if "staff" in name:
-        return True
-    if "thai" in name:
-        return True
-    if base == "ayam" and any(s in name for s in AYAM_EXCLUDE_SUBSTRINGS):
-        return True
-    return False
+    return CANONICAL_BY_INGREDIENT.get(ingredient) or ingredient
 
 
-def _dish_matches(spec: dict, name: str) -> bool:
-    if any(n in name for n in spec.get("not", ())):
+def _has_no_purchase_category(ingredients: dict) -> bool:
+    """True when EVERY rule-level ingredient in a bucket lacks a canonical item.
+
+    Checked across all of them, not just the first: a bucket can hold several
+    (daging_mysoor + daging_md_hani), and a bucket is only uncomparable when
+    none of its ingredients has anywhere for purchases to land.
+    """
+    keys = list(ingredients or {})
+    if not keys:
         return False
-    phrases = spec.get("phrases")
-    if phrases is not None:
-        return any(p in name for p in phrases)
-    styles = spec.get("styles")
-    if styles:
-        return any(s in name for s in styles)
-    return True
+    return all(CANONICAL_BY_INGREDIENT.get(k) is None for k in keys)
 
 
-def theoretical_usage(itemwise_rows: list[dict]) -> dict[str, dict]:
+def theoretical_usage(itemwise_rows: list[dict]) -> dict[tuple[str, str], dict]:
     """Theoretical ingredient usage implied by a month of POS sales.
 
-    Returns ``{canonical_item: {"qty", "unit", "dishes", "contributing"}}``.
-    ``contributing`` lists the dish names that fed the number, so a surprising
-    figure can be traced back to the buttons that produced it.
+    Keyed ``(bucket, unit)``. Ayam appears under three keys — fillet in grams,
+    whole cuts in pieces, liver in dishes — because they are bought, measured
+    and wasted differently and summing them would be arithmetic on
+    incompatible things.
 
-    A dish counted for two different cuts would double-count the bird, so each
-    itemwise row contributes to at most one item code — the first match in v12
-    order wins, and that choice is recorded.
+    Each value carries ``ingredients`` (the rule-level breakdown) and
+    ``contributing`` (the dish names that fed it), so a surprising figure can be
+    traced back to the buttons that produced it.
     """
-    out: dict[str, dict] = {}
+    out: dict[tuple[str, str], dict] = {}
     for row in itemwise_rows or []:
         if not isinstance(row, dict):
             continue
         raw = row.get("item_name")
         if not isinstance(raw, str) or not raw.strip():
             continue
-        name = raw.strip().lower()
         try:
             qty = float(row.get("qty") or 0)
         except (TypeError, ValueError):
@@ -136,37 +116,24 @@ def theoretical_usage(itemwise_rows: list[dict]) -> dict[str, dict]:
         if qty <= 0:
             continue
 
-        for item_code, spec in ITEM_POS_KEYWORDS.items():
-            base = spec["base"]
-            if base not in name:
-                continue
-            if _dish_excluded(name, base):
-                continue
-            if not _dish_matches(spec, name):
-                continue
-
-            canonical = ITEM_TO_CANONICAL.get(item_code)
-            unit = _theoretical_unit(item_code)
-            if canonical is None or unit is None:
-                break
-            grams = KG_PORTION_GRAMS.get(item_code)
-            contribution = qty * grams if (unit == "g" and grams) else qty
-
-            entry = out.setdefault(
-                canonical, {"qty": 0.0, "unit": unit, "dishes": 0, "contributing": []}
+        for ingredient, usage in usage_for_dish(raw, qty).items():
+            key = (_bucket_for(ingredient), usage["unit"])
+            entry = out.setdefault(key, {
+                "qty": 0.0, "unit": usage["unit"], "dishes": 0.0,
+                "portioned": usage["portioned"], "ingredients": {},
+                "contributing": [],
+            })
+            entry["qty"] += usage["amount"]
+            entry["dishes"] += usage["servings"]
+            entry["ingredients"][ingredient] = round(
+                entry["ingredients"].get(ingredient, 0.0) + usage["amount"], 3
             )
-            if entry["unit"] != unit:
-                # A canonical whose cuts disagree on unit cannot be summed.
-                entry["unit"] = "MIXED"
-            entry["qty"] += contribution
-            entry["dishes"] += qty
             if raw not in entry["contributing"]:
                 entry["contributing"].append(raw)
-            break
 
     for entry in out.values():
-        entry["qty"] = round(entry["qty"], 2)
-        entry["dishes"] = round(entry["dishes"], 2)
+        entry["qty"] = round(entry["qty"], 3)
+        entry["dishes"] = round(entry["dishes"], 3)
     return out
 
 
@@ -207,42 +174,50 @@ def _to_float(value: Any) -> float | None:
     return None
 
 
-def summarise_purchases(rows: list[dict]) -> dict[str, dict]:
-    """Group purchase rows by canonical item, tracking what could not convert.
+def summarise_purchases(rows: list[dict]) -> dict[tuple[str, str], dict]:
+    """Group purchase rows by ``(canonical_item, base_unit)``.
 
-    Returns ``{canonical: {"qty_base", "unit", "cost", "flagged_rows",
-    "flagged_cost", "units_seen"}}``.
+    Grouping by unit as well as item is what lets ayam bought by the EKOR be
+    compared with whole-cut demand while ayam bought by the KG is compared with
+    fillet demand — collapsing them to one row would force a MIXED verdict on
+    the single largest ingredient in the report.
+
+    Flagged and unconvertible rows are tracked per item (not per unit — they
+    have no unit) so an ingredient can be marked UNRELIABLE whichever unit its
+    good rows arrived in.
     """
     from wastage_export import line_cost
 
-    out: dict[str, dict] = {}
+    out: dict[tuple[str, str], dict] = {}
+    flagged_by_item: dict[str, dict] = {}
     for row in rows or []:
         if not isinstance(row, dict):
             continue
         canonical = row.get("canonical_item")
-        canonical = canonical.strip() if isinstance(canonical, str) and canonical.strip() else "UNCATEGORISED"
-        entry = out.setdefault(canonical, {
-            "qty_base": 0.0, "unit": None, "cost": 0.0,
-            "flagged_rows": 0, "flagged_cost": 0.0, "units_seen": set(),
-        })
+        canonical = (canonical.strip() if isinstance(canonical, str) and canonical.strip()
+                     else "UNCATEGORISED")
         cost = line_cost(row) or 0.0
-        entry["cost"] += cost
         qty_base = _to_float(row.get("qty_base"))
         base_unit = row.get("base_unit")
-        if row.get("needs_review") or qty_base is None or not base_unit:
-            entry["flagged_rows"] += 1
-            entry["flagged_cost"] += cost
-            continue
-        entry["qty_base"] += qty_base
-        entry["units_seen"].add(base_unit)
-        entry["unit"] = base_unit if entry["unit"] in (None, base_unit) else "MIXED"
 
-    for entry in out.values():
-        entry["qty_base"] = round(entry["qty_base"], 2)
+        if row.get("needs_review") or qty_base is None or not base_unit:
+            entry = flagged_by_item.setdefault(canonical, {"rows": 0, "cost": 0.0})
+            entry["rows"] += 1
+            entry["cost"] += cost
+            continue
+
+        bucket = out.setdefault((canonical, base_unit), {
+            "qty_base": 0.0, "unit": base_unit, "cost": 0.0,
+        })
+        bucket["qty_base"] += qty_base
+        bucket["cost"] += cost
+
+    for bucket in out.values():
+        bucket["qty_base"] = round(bucket["qty_base"], 3)
+        bucket["cost"] = round(bucket["cost"], 2)
+    for entry in flagged_by_item.values():
         entry["cost"] = round(entry["cost"], 2)
-        entry["flagged_cost"] = round(entry["flagged_cost"], 2)
-        entry["units_seen"] = sorted(entry["units_seen"])
-    return out
+    return {"buckets": out, "flagged": flagged_by_item}
 
 
 def classify_variance(pct: float | None) -> str:
@@ -258,28 +233,45 @@ def classify_variance(pct: float | None) -> str:
 def build_wastage(itemwise_rows: list[dict], purchase_rows: list[dict]) -> dict:
     """Compare theoretical usage against purchases, ingredient by ingredient.
 
-    Returns ``{"rows": [...], "unreliable_count", "flagged_cost",
-    "not_modelled": [...]}``. Each row carries theoretical qty, purchased qty,
-    variance %, verdict and the reason when there is no %.
+    Every row carries a verdict, and a row without a percentage always carries
+    the REASON it has none. There are four such reasons, and they are kept
+    distinct because they call for different actions:
+
+    * ``NO PORTION RULE``      — udang / sotong / hati ayam: demand shown in
+      dishes; the owner must supply a portion before a weight can exist.
+    * ``NO PURCHASE CATEGORY`` — the rules model it (telur, beras, minyak,
+      susu, tulang) but canonicalization v2 has no category, so purchases can
+      never be matched. Add the category, not a portion.
+    * ``UNRELIABLE``           — purchases exist but some could not be converted,
+      or arrived in a unit the theoretical figure is not in.
+    * ``NOT MODELLED``         — purchases exist for something the rules say
+      nothing about.
     """
     theoretical = theoretical_usage(itemwise_rows)
-    purchased = summarise_purchases(purchase_rows)
+    summary = summarise_purchases(purchase_rows)
+    buckets = summary["buckets"]
+    flagged = summary["flagged"]
 
     rows: list[dict] = []
-    for canonical in sorted(set(theoretical) | set(purchased)):
-        theory = theoretical.get(canonical)
-        actual = purchased.get(canonical, {})
-        flagged_rows = actual.get("flagged_rows", 0)
-        flagged_cost = actual.get("flagged_cost", 0.0)
+    seen_purchase_keys: set[tuple[str, str]] = set()
+
+    for (bucket, unit), theory in sorted(theoretical.items()):
+        purchase = buckets.get((bucket, unit))
+        if purchase is not None:
+            seen_purchase_keys.add((bucket, unit))
+        flag = flagged.get(bucket, {})
+        flagged_rows = flag.get("rows", 0)
+        flagged_cost = flag.get("cost", 0.0)
 
         entry = {
-            "canonical_item": canonical,
-            "theoretical_qty": theory["qty"] if theory else None,
-            "theoretical_unit": theory["unit"] if theory else None,
-            "dishes_sold": theory["dishes"] if theory else None,
-            "purchased_qty": actual.get("qty_base"),
-            "purchased_unit": actual.get("unit"),
-            "purchase_cost": actual.get("cost", 0.0),
+            "canonical_item": bucket,
+            "theoretical_qty": theory["qty"],
+            "theoretical_unit": unit,
+            "dishes_sold": theory["dishes"],
+            "ingredients": theory["ingredients"],
+            "purchased_qty": purchase["qty_base"] if purchase else None,
+            "purchased_unit": purchase["unit"] if purchase else None,
+            "purchase_cost": purchase["cost"] if purchase else 0.0,
             "flagged_rows": flagged_rows,
             "flagged_cost": flagged_cost,
             "variance_pct": None,
@@ -287,11 +279,19 @@ def build_wastage(itemwise_rows: list[dict], purchase_rows: list[dict]) -> dict:
             "reason": None,
         }
 
-        if theory is None:
-            entry["verdict"] = VERDICT_NOT_MODELLED
+        if not theory["portioned"]:
+            entry["verdict"] = VERDICT_NO_PORTION_RULE
             entry["reason"] = (
-                "no locked v12 portion rule for this ingredient — purchases "
-                "shown, no theoretical usage to compare against"
+                f"{theory['dishes']:g} dish(es) called for this, but no portion "
+                "size is locked for it — demand shown in dishes, never converted "
+                "to a weight"
+            )
+        elif _has_no_purchase_category(theory["ingredients"]):
+            entry["verdict"] = VERDICT_NO_PURCHASE_CATEGORY
+            entry["reason"] = (
+                "canonicalization v2 has no category for this ingredient, so no "
+                "purchase line can be matched against it — add the category to "
+                "data/canonical_items_v2.json to make the variance computable"
             )
         elif flagged_rows:
             entry["verdict"] = VERDICT_UNRELIABLE
@@ -299,30 +299,59 @@ def build_wastage(itemwise_rows: list[dict], purchase_rows: list[dict]) -> dict:
                 f"{flagged_rows} purchase line(s) worth RM{flagged_cost:.2f} could "
                 "not be converted to a base quantity — variance withheld"
             )
-        elif not actual or actual.get("qty_base") is None:
-            entry["verdict"] = VERDICT_UNRELIABLE
-            entry["reason"] = "no convertible purchases recorded for this ingredient"
-        elif actual.get("unit") == "MIXED" or theory["unit"] == "MIXED":
-            entry["verdict"] = VERDICT_UNRELIABLE
-            entry["reason"] = (
-                f"purchases arrived in mixed units {actual.get('units_seen')} — "
-                "cannot be summed against a single theoretical figure"
-            )
-        elif actual.get("unit") != theory["unit"]:
-            entry["verdict"] = VERDICT_UNRELIABLE
-            entry["reason"] = (
-                f"theoretical usage is in {theory['unit']} but purchases are in "
-                f"{actual.get('unit')}, and no locked rule converts between them"
-            )
+        elif purchase is None:
+            other_units = sorted({u for (b, u) in buckets if b == bucket})
+            if other_units:
+                entry["verdict"] = VERDICT_UNRELIABLE
+                entry["reason"] = (
+                    f"theoretical usage is in {unit} but purchases arrived only in "
+                    f"{', '.join(other_units)}, and no locked rule converts between them"
+                )
+            else:
+                entry["verdict"] = VERDICT_UNRELIABLE
+                entry["reason"] = "no convertible purchases recorded for this ingredient"
         elif theory["qty"] <= 0:
             entry["verdict"] = VERDICT_UNRELIABLE
             entry["reason"] = "theoretical usage is zero — variance undefined"
         else:
-            pct = (actual["qty_base"] - theory["qty"]) / theory["qty"] * 100.0
+            pct = (purchase["qty_base"] - theory["qty"]) / theory["qty"] * 100.0
             entry["variance_pct"] = round(pct, 1)
             entry["verdict"] = classify_variance(pct)
 
         rows.append(entry)
+
+    # Purchases the rules say nothing about.
+    for (bucket, unit), purchase in sorted(buckets.items()):
+        if (bucket, unit) in seen_purchase_keys:
+            continue
+        flag = flagged.get(bucket, {})
+        rows.append({
+            "canonical_item": bucket,
+            "theoretical_qty": None, "theoretical_unit": None, "dishes_sold": None,
+            "ingredients": {},
+            "purchased_qty": purchase["qty_base"], "purchased_unit": purchase["unit"],
+            "purchase_cost": purchase["cost"],
+            "flagged_rows": flag.get("rows", 0), "flagged_cost": flag.get("cost", 0.0),
+            "variance_pct": None, "verdict": VERDICT_NOT_MODELLED,
+            "reason": ("no v12 rule produces theoretical usage for this ingredient — "
+                       "purchases shown, nothing to compare against"),
+        })
+
+    # Flagged-only items: money spent, no usable quantity, no theoretical match.
+    reported = {r["canonical_item"] for r in rows}
+    for item, flag in sorted(flagged.items()):
+        if item in reported:
+            continue
+        rows.append({
+            "canonical_item": item,
+            "theoretical_qty": None, "theoretical_unit": None, "dishes_sold": None,
+            "ingredients": {},
+            "purchased_qty": None, "purchased_unit": None, "purchase_cost": flag["cost"],
+            "flagged_rows": flag["rows"], "flagged_cost": flag["cost"],
+            "variance_pct": None, "verdict": VERDICT_UNRELIABLE,
+            "reason": (f"{flag['rows']} purchase line(s) worth RM{flag['cost']:.2f} "
+                       "could not be converted to a base quantity"),
+        })
 
     rows.sort(key=lambda r: (
         r["variance_pct"] is None, -(r["variance_pct"] or 0), r["canonical_item"]
@@ -330,9 +359,14 @@ def build_wastage(itemwise_rows: list[dict], purchase_rows: list[dict]) -> dict:
     return {
         "rows": rows,
         "unreliable_count": sum(1 for r in rows if r["verdict"] == VERDICT_UNRELIABLE),
-        "not_modelled": [r["canonical_item"] for r in rows if r["verdict"] == VERDICT_NOT_MODELLED],
-        "flagged_cost": round(sum(r["flagged_cost"] for r in rows), 2),
-        "flagged_rows": sum(r["flagged_rows"] for r in rows),
+        "not_modelled": [r["canonical_item"] for r in rows
+                         if r["verdict"] == VERDICT_NOT_MODELLED],
+        "no_purchase_category": [r["canonical_item"] for r in rows
+                                 if r["verdict"] == VERDICT_NO_PURCHASE_CATEGORY],
+        "no_portion_rule": [r["canonical_item"] for r in rows
+                            if r["verdict"] == VERDICT_NO_PORTION_RULE],
+        "flagged_cost": round(sum(f["cost"] for f in flagged.values()), 2),
+        "flagged_rows": sum(f["rows"] for f in flagged.values()),
     }
 
 

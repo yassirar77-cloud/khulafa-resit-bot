@@ -175,10 +175,45 @@ the flags, so a missing channel is never mistaken for a real zero.
 
 ## Wastage
 
-Theoretical usage comes from `monthly_itemwise` through the locked v12 framework
-in `kitchen_usage` — the same Thai/staff exclusions, ayam cut rules and portion
-sizes the daily comparison uses, so the two can never disagree about the same
-kitchen.
+Theoretical usage comes from `monthly_itemwise` through the owner-locked v12
+rule set in `wastage_rules_v12.py`. Until this was encoded, only KAMBING and
+DAGING had portions and everything else — including ayam, roughly a third of
+food cost — came out NOT MODELLED.
+
+**Portions** (owner-locked): isi ayam 50 g · kambing 180 g bone-in · daging 60 g
+· tulang 50 g · ikan tenggirri 180 g · beras biasa 120 g raw · beras basmati
+150 g raw · serbuk teh/kopi 5 g per cup · minyak masak 80 ml per fried dish ·
+susu 1 tin per 9 drinks.
+
+**Chicken.** Bawang and rempah are the same cut and share one bucket. Tandoori,
+hati and default are separate. `DOUBLE`/`DBL` = 2 pcs; rendang, kurma and kari
+are one piece cut into three, so ⅓ each — and the two compose (a doubled
+rendang is ⅔).
+
+**Isi ayam.** *Every* Thai-keyword dish takes fillet, including the ones with no
+protein in the name (Maggi Sup, Nasi Goreng Pattaya, Kueyteow Kungfu, Maggi
+Goreng Basa). Excluded: dishes named `sayur` or `kosong`, and dishes whose main
+protein is daging, kambing or ikan. `ikan masin` and `ikan bilis` are stripped
+before that main-protein test — otherwise every Thai *ikan masin* dish reads as
+a fish dish and silently loses its fillet.
+
+**Thai/Mamak split** is about sourcing, not size: daging is 60 g either way,
+from MYSOOR (fresh, Mamak/unspecified) or MD HANI (frozen, Thai). Ayam is fillet
+on the Thai line and whole-cut on the Mamak line.
+
+**Eggs.** A goreng is one egg; a named egg dish (Telur Mata/Dadar/Bistik, Roti
+Telur, Tosai Telur) adds one, so a goreng plus a named egg dish is two; `double`
+on an egg dish makes it two. Deep-fried dishes (Ayam Goreng, Ikan Goreng, Kailan
+Goreng) carry "goreng" but use none. There is no generic "Nasi Goreng Telur", so
+a bare `telur` in a name adds nothing.
+
+**Drinks.** Condensed milk (susu pekat) by default; `C` variants take evaporated
+(susu cair); `O` variants take neither milk nor sugar. 1 tin = 9 drinks (the
+owner's 8–10 band, midpoint locked); 1 carton = 24 tins is a purchase-side
+conversion and lives in `uom_conversion`, not here.
+
+**Oil** in every goreng / fried / tandoori / roti dish, minus capati, naan and
+roti bakar.
 
 ```
 variance % = (purchased − theoretical) / theoretical
@@ -187,19 +222,27 @@ variance % = (purchased − theoretical) / theoretical
 < −5%    OVER-USED
 ```
 
-**No percentage is printed** when it would be computed over bad data:
+Rows are keyed `(canonical_item, unit)`, not by item alone — which is what makes
+ayam comparable at all. Whole cuts are bought by the EKOR and consumed in pieces;
+fillet is bought by the KG and consumed in grams; liver is neither. Collapsing
+them would force a MIXED verdict on the largest ingredient in the report.
+MYSOOR and MD HANI beef *do* share a bucket, because an invoice cannot tell them
+apart — the split is kept as detail.
 
-* any flagged or unconvertible purchase row → `UNRELIABLE`, with the flagged RM
-  shown;
-* purchases in a unit the theoretical figure isn't in, with no locked rule to
-  convert → `UNRELIABLE`;
-* an ingredient with no locked v12 portion rule → `NOT MODELLED`, purchases still
-  reported.
+**Four distinct reasons for no percentage**, kept separate because each calls
+for a different fix:
 
-v12 locks grams-per-portion for kambing (180 g) and daging (60 g) only. Ayam and
-ikan are sold and logged as whole pieces. **Egg and drinks portion rules do not
-exist in this repo**, so those ingredients report NOT MODELLED rather than being
-converted on an invented factor — the same rule that governs `uom_conversion`.
+| Verdict | Meaning | Fix |
+| --- | --- | --- |
+| `NO PORTION RULE` | udang, sotong, hati ayam — demand shown in **dishes** | owner supplies a portion |
+| `NO PURCHASE CATEGORY` | telur, beras, minyak, susu, tulang — modelled, but canonicalization v2 has no category so purchases can never match | add the category to `data/canonical_items_v2.json` |
+| `UNRELIABLE` | purchases exist but some are unconvertible, or in the wrong unit | fix `uom_conversion` / the flagged rows |
+| `NOT MODELLED` | purchases exist for something no rule mentions | add a rule |
+
+Nothing is estimated to close any of those gaps. Over the real 143-item
+Damansara itemwise section the rules now produce minyak masak, beras, tea/kopi
+powder, ikan, ayam (both fillet **and** whole-cut), kambing, daging, tulang,
+telur, susu and sotong — where previously only kambing and daging resolved.
 
 ## Menu hygiene
 
