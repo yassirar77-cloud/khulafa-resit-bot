@@ -143,7 +143,12 @@ IMAGE_MAX_DIM = int(os.environ.get("IMAGE_MAX_DIM", "1600"))
 # sit in the heavy region (download -> decode -> OCR -> verify -> archive) at
 # once, bounding peak RSS regardless of how many photos arrive together. Numpad
 # taps and text commands are unaffected — they never take this lock.
-OCR_MAX_CONCURRENCY = max(1, int(os.environ.get("OCR_MAX_CONCURRENCY", "2")))
+#
+# Default is 1: the heavy region now also runs the line-items OCR pass, and the
+# production instance is a 512MB Render box where two concurrent 12MP decodes
+# plus two in-flight base64 payloads is the OOM case this semaphore exists to
+# prevent. Raise it only on an instance with headroom to spare.
+OCR_MAX_CONCURRENCY = max(1, int(os.environ.get("OCR_MAX_CONCURRENCY", "1")))
 _ocr_semaphore = asyncio.Semaphore(OCR_MAX_CONCURRENCY)
 
 
@@ -387,6 +392,54 @@ async def extract_with_glm_chat(image_bytes: bytes) -> dict:
 extract_receipt = extract_with_glm_chat
 
 
+# Line-item extraction is a SECOND vision call on the same image. It is worth a
+# separate pass rather than more keys on OCR_PROMPT: the two prompts want
+# opposite things from the model (the first summarises the receipt, this one
+# must not summarise anything) and mixing them degraded both. It runs only for
+# SUPPLIER_PURCHASE receipts, inside the OCR semaphore, reusing the already
+# resized bytes — so it costs a call and no extra resident memory.
+INVOICE_LINES_ENABLED = (
+    os.environ.get("INVOICE_LINES_ENABLED", "true").lower() == "true"
+)
+
+
+async def extract_invoice_lines(image_bytes: bytes) -> dict:
+    """Second OCR pass returning structured invoice LINE ITEMS.
+
+    Returns ``invoice_ocr.parse_line_items_response`` output. Raises on
+    transport error so the caller can decide whether to continue without line
+    items (it does — the receipt itself is already extracted).
+    """
+    from invoice_ocr import LINE_ITEMS_PROMPT, parse_line_items_response
+
+    start = time.monotonic()
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    data_url = f"data:image/jpeg;base64,{b64}"
+    response = await asyncio.to_thread(
+        zai_client.chat.completions.create,
+        model=ZAI_MODEL,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": LINE_ITEMS_PROMPT},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }
+        ],
+        temperature=0.1,
+    )
+    latency = time.monotonic() - start
+    content = response.choices[0].message.content or ""
+    parsed = parse_line_items_response(content)
+    logger.info(
+        "invoice-lines OCR: latency=%.2fs lines=%d supplier=%r subtotal=%s total=%s",
+        latency, len(parsed["lines"]), parsed["supplier"],
+        parsed["subtotal"], parsed["total"],
+    )
+    return parsed
+
+
 VERIFY_PROMPT_TEMPLATE = (
     "You are a receipt audit assistant. A first-pass OCR extracted the following "
     "from this receipt photo:\n\n"
@@ -578,6 +631,40 @@ def store_receipt(record: dict) -> dict:
         else:
             raise
     return result.data[0] if result.data else record
+
+
+def build_and_save_receipt_items(
+    receipt_id, outlet: str | None, stored: dict, invoice_lines: dict
+) -> tuple[list[dict], dict]:
+    """Persist one invoice's line items. Returns ``(rows, subtotal_check)``.
+
+    Synchronous (Supabase client is blocking) — call via ``asyncio.to_thread``.
+    Stores the CANONICAL outlet name so the monthly export can match on one
+    spelling instead of every chat-title variant.
+    """
+    from outlet_resolver import canonical_outlet
+    from receipt_items import build_item_rows, save_receipt_items
+    from receipt_validation import check_subtotal
+    from uom_conversion import load_conversions
+
+    subtotal_check = check_subtotal(
+        invoice_lines.get("lines"), invoice_lines.get("subtotal")
+    )
+    rows = build_item_rows(
+        invoice_lines,
+        receipt_id=receipt_id,
+        outlet=canonical_outlet(outlet) or outlet,
+        conversions=load_conversions(supabase),
+        # The receipt record is the reconciled truth for these two: it has been
+        # through date normalisation and the verifier's corrections, whereas the
+        # line-items pass read the header a second time and may disagree.
+        invoice_date=stored.get("receipt_date"),
+        supplier=stored.get("merchant") or invoice_lines.get("supplier"),
+        base_confidence=stored.get("confidence"),
+        subtotal_check=subtotal_check,
+    )
+    save_receipt_items(supabase, rows)
+    return rows, subtotal_check
 
 
 def store_staff_advance(
@@ -1621,6 +1708,42 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         verification, verify_prefix = await run_verification(image_bytes, parsed)
 
+        # PR #24: classify receipt type. Runs AFTER verification so it sees the
+        # corrected merchant/total, and INSIDE the semaphore so the line-items
+        # pass below can be gated on it while the image bytes are still held.
+        # Only SUPPLIER_PURCHASE receipts trigger price aggregation, spike
+        # alerts, and anomaly checks. STAFF_ADVANCE/UTILITY/RENT_LICENSE/
+        # PETTY_CASH are routed to their own side tables; UNKNOWN gets a manual
+        # review prompt.
+        # PR #28: pass merchant explicitly. Some OCR responses return a clean
+        # `merchant` field but a sparse `raw_text` that omits the header,
+        # which caused 132+ EVEREST/MYMOON/BABAS receipts to be mis-classified
+        # as UNKNOWN because the whitelist never saw the merchant name.
+        classification = classify_receipt(
+            ocr_text=parsed.get("raw_text") or "",
+            parsed_items=parsed.get("items"),
+            total=_to_float(parsed.get("total")),
+            merchant=parsed.get("merchant"),
+        )
+
+        # Line items for wastage analysis — supplier invoices only, and only
+        # for receipts that will actually be saved. A utility bill has no
+        # quantities worth converting and a review-queued receipt has no
+        # receipt_id to hang lines off, so a vision call for either is pure
+        # cost. Failure here is non-critical: the receipt is already extracted
+        # and will be stored either way.
+        invoice_lines = None
+        if (
+            INVOICE_LINES_ENABLED
+            and classification.receipt_type == ReceiptType.SUPPLIER_PURCHASE
+            and not should_queue(verification["confidence"])
+        ):
+            try:
+                invoice_lines = await extract_invoice_lines(image_bytes)
+            except Exception:
+                logger.exception("Invoice line-items OCR failed (non-critical)")
+                invoice_lines = None
+
         # Collect the background image archive result (started before OCR, so it
         # has overlapped the slow OCR/verification work). Never let it break the
         # save.
@@ -1639,22 +1762,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         image_upload_task = None
         _release_freed_memory()
         _ocr_semaphore.release()
-
-    # PR #24: classify receipt type before any downstream logic. Only
-    # SUPPLIER_PURCHASE receipts trigger price aggregation, spike alerts,
-    # and anomaly checks. STAFF_ADVANCE/UTILITY/RENT_LICENSE/PETTY_CASH
-    # are routed to their own side tables; UNKNOWN gets a manual review
-    # prompt.
-    # PR #28: pass merchant explicitly. Some OCR responses return a clean
-    # `merchant` field but a sparse `raw_text` that omits the header,
-    # which caused 132+ EVEREST/MYMOON/BABAS receipts to be mis-classified
-    # as UNKNOWN because the whitelist never saw the merchant name.
-    classification = classify_receipt(
-        ocr_text=parsed.get("raw_text") or "",
-        parsed_items=parsed.get("items"),
-        total=_to_float(parsed.get("total")),
-        merchant=parsed.get("merchant"),
-    )
 
     user = update.effective_user
     merchant_raw = parsed.get("merchant")
@@ -1798,6 +1905,61 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     # Fall-through: SUPPLIER_PURCHASE only.
+    # === Invoice line items into receipt_items (wastage analysis) ===
+    # Structured per-line quantities with a base unit, so the monthly
+    # /wastage_purchases export can answer "how many kg of ayam, at what cost".
+    # Failure MUST NOT crash the receipt pipeline — the receipt is already
+    # stored and every downstream stage below is independent of these rows.
+    try:
+        if invoice_lines and invoice_lines.get("lines") and receipt_id is not None:
+            item_rows, subtotal_check = await asyncio.to_thread(
+                build_and_save_receipt_items,
+                receipt_id, outlet, stored, invoice_lines,
+            )
+            if subtotal_check.get("needs_review"):
+                # The invoice does not add up. Post it back to the outlet group
+                # that sent it — the paper is in that room, so that is the only
+                # place it can actually be corrected.
+                from receipt_validation import format_subtotal_flag_message
+
+                flag_text = format_subtotal_flag_message(
+                    subtotal_check,
+                    supplier=stored.get("merchant"),
+                    invoice_no=invoice_lines.get("invoice_no"),
+                    invoice_date=stored.get("receipt_date"),
+                    outlet=outlet,
+                    line_count=len(item_rows),
+                )
+                try:
+                    await message.reply_text(flag_text)
+                except Exception:
+                    logger.exception("Failed to post subtotal mismatch to outlet group")
+            from receipt_items import unconvertible_units
+
+            unknown_units = unconvertible_units(item_rows)
+            if unknown_units:
+                logger.warning(
+                    "receipt %s: no uom_conversion row for unit(s) %s — "
+                    "qty_base left NULL, lines flagged for review",
+                    receipt_id, unknown_units,
+                )
+                try:
+                    await context.bot.send_message(
+                        chat_id=ALERT_CHAT_ID,
+                        text=(
+                            "📏 Unit tak dikenali pada resit "
+                            f"#{receipt_id} ({stored.get('merchant') or '—'}): "
+                            f"{', '.join(unknown_units)}\n"
+                            "Kuantiti tak dikira sehingga faktor ditambah dalam "
+                            "uom_conversion."
+                        ),
+                    )
+                except Exception:
+                    logger.exception("Failed to send unknown-unit alert")
+    except Exception as e:
+        logger.warning("Receipt line-item capture failed (non-critical): %s", e)
+    # === End invoice line items ===
+
     # === Price aggregation: per-item rows into item_prices ===
     # Passive data collection for PR #24 (price-spike detection). Failure
     # here MUST NOT crash the receipt pipeline — broad except + lazy import.
@@ -1961,6 +2123,10 @@ HELP_TEXT = (
     "/cash_no_receipt_today — POS cash payouts with no receipt\n"
     "/reconcile_now — re-run today/yesterday reconciliation\n"
     "/reconcile_date YYYY-MM-DD — re-run one historical date\n"
+    "\n"
+    "Wastage:\n"
+    "/wastage_purchases <outlet> <YYYY-MM> — monthly purchase CSV "
+    "(canonical item, qty in base units, cost, avg cost/kg)\n"
     "\n"
     "Merchant auto-resolve:\n"
     "/merchant_resolve_now — clear the unresolved-merchant backlog (auto-resolve, escalate, defer)\n"
@@ -4036,6 +4202,75 @@ async def food_cost_outlet_command(update: Update, context: ContextTypes.DEFAULT
     )
 
 
+async def wastage_purchases_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/wastage_purchases <outlet> <YYYY-MM> — monthly purchase CSV.
+
+    Feeds the Cost Calculator sheet of
+    ``Khulafa_[OUTLET]_[MONTH]_[YEAR]_Wastage_Report.xlsx``.
+    """
+    import io
+
+    import wastage_export
+
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    args = context.args or []
+    usage = (
+        "Usage: /wastage_purchases <outlet> <YYYY-MM>\n"
+        "Example: /wastage_purchases klang 2026-08"
+    )
+    if len(args) < 2:
+        await message.reply_text(usage)
+        return
+
+    month = args[-1].strip()
+    window = wastage_export.parse_month(month)
+    if window is None:
+        await message.reply_text(f"'{month}' is not a valid YYYY-MM month.\n\n{usage}")
+        return
+    start, end = window
+    outlet = _resolve_outlet_name(" ".join(args[:-1]))
+
+    def _fetch() -> list[dict]:
+        rows = wastage_export.fetch_receipt_item_rows(supabase, outlet, start, end)
+        if rows:
+            return rows
+        # receipt_items stores the canonical outlet name, falling back to the
+        # raw chat-title outlet when it does not resolve. Retry on the raw
+        # argument so receipts from an unmapped group are still exportable.
+        raw = " ".join(args[:-1]).strip()
+        if raw and raw != outlet:
+            return wastage_export.fetch_receipt_item_rows(supabase, raw, start, end)
+        return []
+
+    try:
+        rows = await asyncio.to_thread(_fetch)
+    except Exception:
+        logger.exception("wastage_purchases fetch failed (outlet=%s month=%s)", outlet, month)
+        await message.reply_text("Failed to read purchase lines.")
+        return
+
+    aggregated = wastage_export.aggregate_purchases(rows)
+    if not aggregated["rows"] and not aggregated["excluded"]:
+        await message.reply_text(f"No purchase lines for {outlet} in {month}.")
+        return
+
+    filename = wastage_export.export_filename(outlet, month)
+    csv_text = wastage_export.build_csv(aggregated["rows"])
+    summary = wastage_export.format_summary(outlet, month, aggregated, filename=filename)
+    try:
+        await context.bot.send_document(
+            chat_id=message.chat_id,
+            document=io.BytesIO(csv_text.encode("utf-8")),
+            filename=filename,
+            caption=summary[:1024],
+        )
+    except Exception:
+        logger.exception("wastage_purchases: failed to send CSV document")
+        await message.reply_text(f"{summary}\n\n(Failed to attach the CSV file.)")
+
+
 async def cash_no_receipt_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message or not is_reviewer(_command_owner_id(update)):
@@ -4810,6 +5045,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("register", register_command))
     app.add_handler(CommandHandler("weekly_report_now", weekly_report_now_command))
     app.add_handler(CommandHandler("order_drafts_now", order_drafts_now_command))
+    app.add_handler(CommandHandler("wastage_purchases", wastage_purchases_command))
     app.add_handler(CommandHandler("cash_no_receipt_today", cash_no_receipt_today_command))
     app.add_handler(CommandHandler("reconcile_now", reconcile_now_command))
     app.add_handler(CommandHandler("reconcile_date", reconcile_date_command))
@@ -5016,6 +5252,7 @@ async def run_bot() -> None:
                 BotCommand("compare", "Compare an item's unit price across outlets"),
                 BotCommand("advances", "Staff cash advances (PAYOUT/PINJAM) tracker"),
                 BotCommand("dashboard", "Open the Mini App dashboard"),
+                BotCommand("wastage_purchases", "Monthly purchase CSV: <outlet> <YYYY-MM>"),
                 BotCommand("help", "Show command list"),
             ])
         scheduler.start()
