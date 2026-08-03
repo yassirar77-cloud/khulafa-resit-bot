@@ -1,0 +1,12 @@
+run_id:     30778244289
+commit:     3ed77657c93b6b65896871f750de8c0721b033cf
+outcome:    failure
+mode:       dry-run
+
+mode=dry-run
+ERROR: SUPABASE_URL / SUPABASE_KEY are not set as repo Actions secrets.
+Add them at Settings → Secrets and variables → Actions → New repository secret:
+  SUPABASE_URL   https://<project>.supabase.co
+  SUPABASE_KEY   the service-role key the bot runs with
+  ZAI_API_KEY    (full runs only — the Z.ai key used for OCR)
+Then edit .github/uom-run-mode and push to re-fire this run.
