@@ -20,7 +20,7 @@ on:
       - .github/uom-run-mode
 
 permissions:
-  contents: read
+  contents: write   # to commit the run's outcome back to this branch (see below)
 
 jobs:
   worklist:
@@ -33,35 +33,80 @@ jobs:
       - name: Install minimal deps
         run: pip install --quiet supabase openai httpx Pillow tzdata
       - name: Shadow-run the invoice extractor (read-only)
+        id: shadow
+        continue-on-error: true   # a failed run must still report WHY, below
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           ZAI_BASE_URL: ${{ secrets.ZAI_BASE_URL }}
         run: |
-          # First line is the mode; anything below it is free-text, so the file
-          # can be nudged to re-fire a run without changing what it does.
-          MODE="$(head -n1 .github/uom-run-mode | tr -d '[:space:]')"
-          echo "mode=$MODE"
-          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ]; then
-            echo "::error::SUPABASE_URL / SUPABASE_KEY are not set as repo Actions secrets."
-            echo "Add them at Settings → Secrets and variables → Actions → New repository secret:"
-            echo "  SUPABASE_URL   https://<project>.supabase.co"
-            echo "  SUPABASE_KEY   the service-role key the bot runs with"
-            echo "  ZAI_API_KEY    (full runs only — the Z.ai key used for OCR)"
-            echo "Then edit .github/uom-run-mode and push to re-fire this run."
-            exit 1
+          # Everything this step prints is teed to run-report.txt so the next
+          # step can commit the reason back to the branch — including the
+          # failure reasons, which are the ones worth reading. `pipefail` keeps
+          # the real exit status through the pipe; the braces run in a subshell,
+          # so `exit 1` below ends the pipeline rather than the whole shell.
+          set -o pipefail
+          {
+            # First line is the mode; anything below it is free-text, so the
+            # file can be nudged to re-fire a run without changing behaviour.
+            MODE="$(head -n1 .github/uom-run-mode | tr -d '[:space:]')"
+            echo "mode=$MODE"
+            if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ]; then
+              echo "ERROR: SUPABASE_URL / SUPABASE_KEY are not set as repo Actions secrets."
+              echo "Add them at Settings → Secrets and variables → Actions → New repository secret:"
+              echo "  SUPABASE_URL   https://<project>.supabase.co"
+              echo "  SUPABASE_KEY   the service-role key the bot runs with"
+              echo "  ZAI_API_KEY    (full runs only — the Z.ai key used for OCR)"
+              echo "Then edit .github/uom-run-mode and push to re-fire this run."
+              exit 1
+            fi
+            ARGS="--days 60 --date-field receipt_date --out uom_seeding_worklist.csv"
+            if [ "$MODE" = "dry-run" ]; then
+              ARGS="$ARGS --dry-run"
+            elif [ -z "$ZAI_API_KEY" ]; then
+              echo "ERROR: ZAI_API_KEY is required for a full run (mode=full)."
+              echo "Add it at Settings → Secrets and variables → Actions, or set"
+              echo ".github/uom-run-mode back to 'dry-run' for a free receipt count."
+              exit 1
+            fi
+            python scripts/uom_seeding_worklist.py $ARGS
+          } 2>&1 | tee run-report.txt
+      - name: Commit the outcome back to this branch
+        # The run's result has to come back to whoever asked for it, and the
+        # Actions UI is not always reachable (an API client can lose its
+        # connection; a phone can't download an artifact). Committing the CSV
+        # and the report to the branch means `git fetch` is enough to read the
+        # outcome — success or failure — with no other tooling.
+        #
+        # Writes only under docs/worklist/, which is NOT the trigger path, so
+        # this commit cannot re-fire the workflow.
+        if: always()
+        run: |
+          mkdir -p docs/worklist
+          {
+            echo "run_id:     ${{ github.run_id }}"
+            echo "commit:     ${{ github.sha }}"
+            echo "outcome:    ${{ steps.shadow.outcome }}"
+            echo "mode:       $(head -n1 .github/uom-run-mode | tr -d '[:space:]')"
+            echo
+            cat run-report.txt 2>/dev/null || echo "(no report captured)"
+          } > docs/worklist/last-run.txt
+          if [ -f uom_seeding_worklist.csv ]; then
+            cp uom_seeding_worklist.csv docs/worklist/uom_seeding_worklist.csv
           fi
-          ARGS="--days 60 --date-field receipt_date --out uom_seeding_worklist.csv"
-          if [ "$MODE" = "dry-run" ]; then
-            ARGS="$ARGS --dry-run"
-          elif [ -z "$ZAI_API_KEY" ]; then
-            echo "::error::ZAI_API_KEY is required for a full run (mode=full)."
-            echo "Add it at Settings → Secrets and variables → Actions, or set"
-            echo ".github/uom-run-mode back to 'dry-run' for a free receipt count."
-            exit 1
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/worklist
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+          else
+            git commit -m "Worklist run ${{ github.run_id }}: ${{ steps.shadow.outcome }} [skip ci]"
+            git push origin HEAD:${{ github.ref_name }}
           fi
-          python scripts/uom_seeding_worklist.py $ARGS
+      - name: Fail the job if the shadow run failed
+        if: ${{ steps.shadow.outcome == 'failure' }}
+        run: exit 1
       - name: Publish the CSV to the job log and run summary
         if: ${{ hashFiles('uom_seeding_worklist.csv') != '' }}
         run: |
