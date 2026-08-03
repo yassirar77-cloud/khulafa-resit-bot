@@ -84,13 +84,18 @@ CANONICAL_BY_INGREDIENT: dict[str, str | None] = {
     "sotong": "sotong",
     "serbuk_teh": "tea_masala",
     "serbuk_kopi": "kopi",
-    "tulang": None,
-    "beras_biasa": None,
-    "beras_basmati": None,
-    "minyak_masak": None,
-    "susu_pekat": None,
-    "susu_cair": None,
-    "telur": None,
+    # Added to canonicalization v2 alongside this rule set, so these are now
+    # comparable against real purchases instead of reporting
+    # NO PURCHASE CATEGORY. Both rice grades share the `beras` category and both
+    # milks share `susu`: an invoice line says "BERAS SUPER 10KG", not which
+    # dish it will end up in.
+    "tulang": "tulang",
+    "beras_biasa": "beras",
+    "beras_basmati": "beras",
+    "minyak_masak": "minyak_masak",
+    "susu_pekat": "susu",
+    "susu_cair": "susu",
+    "telur": "telur",
 }
 
 # --- chicken -----------------------------------------------------------------
@@ -109,6 +114,17 @@ _DOUBLE_RE = re.compile(r"\b(double|dbl)\b", re.IGNORECASE)
 #: A Thai dish is NOT isi ayam when it is meat-free by name, or when another
 #: protein is clearly the main one.
 _ISI_AYAM_EXCLUDE_WORDS = ("sayur", "kosong")
+
+#: A named main protein means no fillet. Seafood counts: "Sotong Goreng" is a
+#: sotong dish, not a chicken one.
+_ISI_AYAM_EXCLUDING_PROTEINS = ("daging", "kambing", "ikan", "sotong", "udang")
+
+#: Composite dishes draw fillet AND seafood — the kitchen builds them from
+#: several proteins, so a named seafood does not displace the chicken. The
+#: markers are stripped before the main-protein test, the same treatment
+#: "ikan masin" / "ikan bilis" get, so the seafood word in a composite name
+#: cannot be mistaken for the dish's single main protein.
+COMPOSITE_MARKERS = ("seafood", "campur", "special")
 
 # --- eggs --------------------------------------------------------------------
 #: Dishes that name an egg preparation. Each contributes one egg (two if the
@@ -175,23 +191,49 @@ def is_staff_meal(name: Any) -> bool:
     return _has(_normalise(name), _STAFF_WORDS)
 
 
-def main_protein(name: Any) -> str | None:
-    """The dish's main protein: 'kambing' / 'daging' / 'ikan' / 'ayam' / None.
+def is_composite_dish(name: Any) -> bool:
+    """True for 'seafood' / 'campur' / 'special' dishes, built from several
+    proteins rather than one."""
+    return _has(_normalise(name), COMPOSITE_MARKERS)
 
-    Checked in that order because a dish naming two proteins is named for its
-    main one first in practice ("Nasi Kambing Daging" is a kambing dish).
+
+def main_protein(name: Any) -> str | None:
+    """The dish's main protein, or ``None``.
+
+    One of 'kambing' / 'daging' / 'ikan' / 'sotong' / 'udang' / 'ayam', checked
+    in that order because a dish naming two proteins is named for its main one
+    first in practice ("Nasi Kambing Daging" is a kambing dish).
+
+    Two sets of words are stripped before the test, for the same reason in both
+    cases — they name something that is not the dish's single main protein:
+
+    * ``ikan masin`` / ``ikan bilis`` are seasonings that contain "ikan";
+    * on a COMPOSITE dish, the seafood words, because a composite is built from
+      several proteins and none of them displaces the chicken.
     """
     text = _normalise(name)
     if _has(text, _KAMBING_WORDS):
         return "kambing"
     if _has(text, _DAGING_WORDS):
         return "daging"
-    # Strip the seasoning phrases before asking whether this is a fish dish.
-    fish_text = text
+
+    stripped = text
     for phrase in _IKAN_NOT_MAIN:
-        fish_text = fish_text.replace(phrase, " ")
-    if _has(fish_text, _IKAN_WORDS):
+        stripped = stripped.replace(phrase, " ")
+    if _has(stripped, _IKAN_WORDS):
         return "ikan"
+
+    if is_composite_dish(text):
+        # A composite names seafood as one component among several, so it is not
+        # the main protein — "Tomyam Seafood" and "Nasi Goreng Sotong Campur"
+        # both keep their fillet.
+        for phrase in COMPOSITE_MARKERS + _UDANG_WORDS + _SOTONG_WORDS:
+            stripped = stripped.replace(phrase, " ")
+    if _has(stripped, _SOTONG_WORDS):
+        return "sotong"
+    if _has(stripped, _UDANG_WORDS):
+        return "udang"
+
     if "ayam" in text:
         return "ayam"
     return None
@@ -240,7 +282,7 @@ def uses_isi_ayam(name: Any) -> bool:
         return False
     if _has(text, _ISI_AYAM_EXCLUDE_WORDS):
         return False
-    if main_protein(text) in ("daging", "kambing", "ikan"):
+    if main_protein(text) in _ISI_AYAM_EXCLUDING_PROTEINS:
         return False
     return True
 

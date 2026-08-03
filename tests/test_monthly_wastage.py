@@ -68,10 +68,15 @@ class TheoreticalUsage(unittest.TestCase):
         self.assertEqual(entry["ingredients"],
                          {"daging_mysoor": 600.0, "daging_md_hani": 300.0})
 
-    def test_rice_variants_never_merge(self):
+    def test_rice_grades_share_a_bucket_but_keep_their_breakdown(self):
+        # Both grades are bought as `beras` — an invoice cannot say which dish
+        # a sack ends up in — so they compare as one, exactly like the two beef
+        # stocks, with the split preserved as detail.
         usage = theoretical_usage([dish("Nasi Kandar", 10), dish("Briyani Ayam", 10)])
-        self.assertEqual(usage[("beras_biasa", "g")]["qty"], 1200.0)
-        self.assertEqual(usage[("beras_basmati", "g")]["qty"], 1500.0)
+        entry = usage[("beras", "g")]
+        self.assertEqual(entry["qty"], 2700.0)
+        self.assertEqual(entry["ingredients"],
+                         {"beras_biasa": 1200.0, "beras_basmati": 1500.0})
 
     def test_contributing_dishes_are_recorded(self):
         usage = theoretical_usage([dish("Nasi Goreng Pattaya", 3)])
@@ -187,13 +192,30 @@ class NoPercentageWithoutGoodData(unittest.TestCase):
         self.assertIsNone(row["variance_pct"])
         self.assertIn("no portion size is locked", row["reason"])
 
-    def test_ingredients_with_no_purchase_category_say_which_fix_is_needed(self):
+    def test_the_widened_staples_are_now_comparable(self):
+        # telur / beras / minyak all have canonical categories now, so a missing
+        # purchase is UNRELIABLE ("none recorded"), not NO PURCHASE CATEGORY
+        # ("can never be recorded").
         result = build_wastage([dish("Nasi Goreng", 10)], [])
-        for item in ("telur", "beras_biasa", "minyak_masak"):
-            row = row_for(result, item)
-            self.assertEqual(row["verdict"], VERDICT_NO_PURCHASE_CATEGORY, item)
-            self.assertIn("canonical_items_v2.json", row["reason"], item)
-        self.assertIn("telur", result["no_purchase_category"])
+        for item in ("telur", "beras", "minyak_masak"):
+            self.assertEqual(row_for(result, item)["verdict"], VERDICT_UNRELIABLE, item)
+        self.assertEqual(result["no_purchase_category"], [])
+
+    def test_a_widened_staple_scores_a_real_variance(self):
+        # 10 nasi goreng -> 1200 g beras; 1500 g bought -> +25 %.
+        result = build_wastage([dish("Nasi Goreng", 10)],
+                               [purchase("beras", 1500, "g")])
+        row = row_for(result, "beras")
+        self.assertEqual(row["variance_pct"], 25.0)
+        self.assertEqual(row["verdict"], VERDICT_HIGH)
+
+    def test_an_ingredient_with_no_category_still_says_so(self):
+        # hati ayam is unportioned; the NO PURCHASE CATEGORY path itself is
+        # still live for any future ingredient the rules model without one.
+        from monthly_wastage import _has_no_purchase_category
+
+        self.assertTrue(_has_no_purchase_category({"made_up_ingredient": 1.0}))
+        self.assertFalse(_has_no_purchase_category({"telur": 1.0}))
 
     def test_purchases_the_rules_do_not_model(self):
         result = build_wastage([], [purchase("santan", 12000, "ml")])
@@ -259,8 +281,8 @@ class AgainstRealPosItemwise(unittest.TestCase):
         self.assertGreater(self.usage[("ayam", "pcs")]["qty"], 0)
 
     def test_the_staples_are_all_modelled(self):
-        for key in (("beras_biasa", "g"), ("minyak_masak", "ml"),
-                    ("telur", "pcs"), ("susu_pekat", "tin")):
+        for key in (("beras", "g"), ("minyak_masak", "ml"),
+                    ("telur", "pcs"), ("susu", "tin")):
             self.assertIn(key, self.usage, key)
             self.assertGreater(self.usage[key]["qty"], 0, key)
 

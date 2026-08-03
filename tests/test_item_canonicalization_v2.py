@@ -23,11 +23,20 @@ class CanonicalizeItemExactMatch(unittest.TestCase):
     def test_ayam_exact(self):
         self.assertEqual(canonicalize_item("AYAM")["canonical"], "ayam")
 
-    def test_telur_not_in_v2(self):
+    def test_telur_now_resolves(self):
+        # TELUR was deliberately absent from v2 until the monthly wastage rules
+        # needed an egg figure to compare purchases against. Added as its own
+        # category (see tests/test_canonical_v2_additive.py for the gate that
+        # proves the addition took nothing from the original 34).
         res = canonicalize_item("TELUR")
-        self.assertFalse(res["matched"])
-        self.assertIsNone(res["canonical"])
+        self.assertTrue(res["matched"])
+        self.assertEqual(res["canonical"], "telur")
         self.assertFalse(res["is_noise"])
+
+    def test_telur_ikan_is_still_fish_roe_not_egg(self):
+        # The collision that made adding `telur` risky: "TELUR IKAN" is roe and
+        # must stay with ikan.
+        self.assertEqual(canonicalize_item("TELUR IKAN")["canonical"], "ikan")
 
     def test_kopi_exact(self):
         self.assertEqual(canonicalize_item("KOPI")["canonical"], "kopi")
@@ -186,7 +195,8 @@ class ClassifyItemsInReceipt(unittest.TestCase):
 class ItemCanonicalUtilities(unittest.TestCase):
     def test_list_canonical_items_count_and_sorted(self):
         items = list_canonical_items()
-        self.assertEqual(len(items), 34)
+        # 34 original + telur/beras/minyak_masak/susu/tulang.
+        self.assertEqual(len(items), 39)
         self.assertEqual(items, sorted(items))
 
     def test_get_item_variations_ayam(self):

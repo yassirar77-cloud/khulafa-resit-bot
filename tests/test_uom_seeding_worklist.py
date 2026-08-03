@@ -54,7 +54,7 @@ class CollectMisses(unittest.TestCase):
         self.assertEqual(len(misses), 1)
         self.assertEqual(misses[0], {
             "supplier": "MEWAH TRADING",
-            "canonical_item": wl.UNCATEGORISED,   # no 'beras' category in v2
+            "canonical_item": "beras",   # v2 gained a `beras` category
             "unit_raw": "GUNI",
             "cost": 514.0,
         })
@@ -296,13 +296,17 @@ class RunEndToEnd(unittest.TestCase):
         self.assertNotIn("EKOR", listed)
 
     def test_csv_is_the_deliverable(self):
+        # "BERAS SUPER TEMPATAN" and "TELUR GRED A" resolve now that
+        # canonicalization v2 carries `beras` and `telur` — the worklist names
+        # the item instead of shrugging at it, which is what makes a row
+        # seedable as an item-scoped uom_conversion factor.
         rows, _stats = self._run(days=60)
         self.assertEqual(
             wl.build_csv(rows).splitlines(),
             [
                 "supplier,canonical_item,unit_raw,line_count,total_RM",
-                "MEWAH TRADING,UNCATEGORISED,GUNI,1,514.00",
-                "BESTARI FARM,UNCATEGORISED,PAPAN,1,45.00",
+                "MEWAH TRADING,beras,GUNI,1,514.00",
+                "BESTARI FARM,telur,PAPAN,1,45.00",
             ],
         )
 

@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from wastage_rules_v12 import (  # noqa: E402
     CANONICAL_BY_INGREDIENT,
+    COMPOSITE_MARKERS,
     CHICKEN_TYPE_BAWANG_REMPAH,
     CHICKEN_TYPE_DEFAULT,
     CHICKEN_TYPE_HATI,
@@ -28,6 +29,7 @@ from wastage_rules_v12 import (  # noqa: E402
     is_thai_dish,
     main_protein,
     rice_component,
+    is_composite_dish,
     seafood_components,
     servings_for_dish,
     usage_for_dish,
@@ -158,6 +160,57 @@ class IsiAyam(unittest.TestCase):
 
     def test_a_mamak_dish_never_uses_fillet(self):
         self.assertFalse(uses_isi_ayam("Ayam Goreng"))
+
+    def test_a_named_seafood_protein_means_no_fillet(self):
+        for name in ("Sotong Goreng", "Nasi Goreng Sotong", "Nasi Goreng Udang",
+                     "Udang Masak Merah"):
+            self.assertFalse(uses_isi_ayam(name), name)
+            self.assertNotIn("isi_ayam", amounts(name), name)
+
+
+class SeafoodAsMainProtein(unittest.TestCase):
+    """A named seafood is the main protein — unless the dish is a composite."""
+
+    def test_sotong_and_udang_are_main_proteins(self):
+        self.assertEqual(main_protein("Sotong Goreng"), "sotong")
+        self.assertEqual(main_protein("Nasi Goreng Udang"), "udang")
+
+    def test_sotong_dishes_take_sotong_only(self):
+        for name in ("Sotong Goreng", "Nasi Goreng Sotong"):
+            usage = amounts(name)
+            self.assertIn("sotong", usage, name)
+            self.assertNotIn("isi_ayam", usage, name)
+            self.assertNotIn("udang", usage, name)
+
+    def test_composite_markers(self):
+        self.assertEqual(COMPOSITE_MARKERS, ("seafood", "campur", "special"))
+        for name in ("Tomyam Seafood", "Nasi Campur", "Tomyam Special"):
+            self.assertTrue(is_composite_dish(name), name)
+        self.assertFalse(is_composite_dish("Sotong Goreng"))
+
+    def test_a_seafood_dish_draws_fillet_AND_both_shellfish(self):
+        for name in ("Tomyam Seafood", "Mee Goreng Seafood"):
+            usage = amounts(name)
+            self.assertEqual(usage["isi_ayam"], 50.0, name)
+            self.assertIn("udang", usage, name)
+            self.assertIn("sotong", usage, name)
+
+    def test_a_composite_rescues_a_named_seafood(self):
+        # "campur"/"special" mean several proteins, so the sotong does not
+        # displace the chicken the way a plain "Nasi Goreng Sotong" does.
+        usage = amounts("Nasi Goreng Sotong Campur")
+        self.assertEqual(usage["isi_ayam"], 50.0)
+        self.assertIn("sotong", usage)
+
+    def test_composites_do_not_rescue_the_other_proteins(self):
+        # The override is about seafood; a beef dish is still a beef dish.
+        self.assertEqual(main_protein("Tomyam Daging Special"), "daging")
+        self.assertFalse(uses_isi_ayam("Tomyam Daging Special"))
+
+    def test_seafood_words_are_stripped_the_same_way_ikan_masin_is(self):
+        # Both are "a protein word that is not THIS dish's main protein".
+        self.assertIsNone(main_protein("Tomyam Seafood"))
+        self.assertIsNone(main_protein("Nasi Goreng Ikan Masin"))
 
 
 class ProteinSplit(unittest.TestCase):
@@ -321,13 +374,22 @@ class PurchaseCategoryMapping(unittest.TestCase):
         self.assertEqual(CANONICAL_BY_INGREDIENT["serbuk_teh"], "tea_masala")
         self.assertEqual(CANONICAL_BY_INGREDIENT["serbuk_kopi"], "kopi")
 
-    def test_ingredients_with_no_canonical_category_are_declared_not_guessed(self):
-        # canonicalization v2 has no telur / beras / minyak / susu / tulang
-        # category, so these are explicitly None rather than pointed at a
-        # near-miss like 'drinks'.
-        for key in ("telur", "beras_biasa", "beras_basmati", "minyak_masak",
-                    "susu_pekat", "susu_cair", "tulang"):
-            self.assertIsNone(CANONICAL_BY_INGREDIENT[key], key)
+    def test_the_staples_now_map_to_their_own_categories(self):
+        # These reported NO PURCHASE CATEGORY until canonicalization v2 was
+        # widened for them. Both rice grades share `beras` and both milks share
+        # `susu`: an invoice line says "BERAS SUPER 10KG", not which dish it
+        # will end up in.
+        for key, canonical in (("telur", "telur"), ("beras_biasa", "beras"),
+                               ("beras_basmati", "beras"),
+                               ("minyak_masak", "minyak_masak"),
+                               ("susu_pekat", "susu"), ("susu_cair", "susu"),
+                               ("tulang", "tulang")):
+            self.assertEqual(CANONICAL_BY_INGREDIENT[key], canonical, key)
+
+    def test_unportioned_ingredients_still_have_no_portion(self):
+        # Widening the purchase side does not invent a portion for them.
+        for key in UNPORTIONED:
+            self.assertNotIn(key, PORTIONS, key)
 
     def test_every_ingredient_the_rules_emit_has_a_mapping(self):
         emitted = set()

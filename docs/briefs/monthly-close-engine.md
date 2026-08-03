@@ -193,9 +193,17 @@ rendang is ⅔).
 **Isi ayam.** *Every* Thai-keyword dish takes fillet, including the ones with no
 protein in the name (Maggi Sup, Nasi Goreng Pattaya, Kueyteow Kungfu, Maggi
 Goreng Basa). Excluded: dishes named `sayur` or `kosong`, and dishes whose main
-protein is daging, kambing or ikan. `ikan masin` and `ikan bilis` are stripped
-before that main-protein test — otherwise every Thai *ikan masin* dish reads as
-a fish dish and silently loses its fillet.
+protein is daging, kambing, ikan, **sotong or udang** — a named seafood is a
+main protein, so "Sotong Goreng" is a sotong dish, not a chicken one.
+
+**Composites override that.** `seafood`, `campur` and `special` mark a dish built
+from several proteins, so a named seafood does not displace the chicken:
+"Tomyam Seafood" and "Mee Goreng Seafood" draw fillet **and** udang **and**
+sotong, and "Nasi Goreng Sotong Campur" keeps its fillet. The markers are
+stripped before the main-protein test — the same treatment `ikan masin` and
+`ikan bilis` get, and for the same reason: they name a protein that is not
+*this* dish's single main one. Without the ikan strip, every Thai *ikan masin*
+dish reads as a fish dish and silently loses its fillet.
 
 **Thai/Mamak split** is about sourcing, not size: daging is 60 g either way,
 from MYSOOR (fresh, Mamak/unspecified) or MD HANI (frozen, Thai). Ayam is fillet
@@ -235,14 +243,47 @@ for a different fix:
 | Verdict | Meaning | Fix |
 | --- | --- | --- |
 | `NO PORTION RULE` | udang, sotong, hati ayam — demand shown in **dishes** | owner supplies a portion |
-| `NO PURCHASE CATEGORY` | telur, beras, minyak, susu, tulang — modelled, but canonicalization v2 has no category so purchases can never match | add the category to `data/canonical_items_v2.json` |
+| `NO PURCHASE CATEGORY` | modelled, but canonicalization v2 has no category so purchases can never match | add the category to `data/canonical_items_v2.json` |
 | `UNRELIABLE` | purchases exist but some are unconvertible, or in the wrong unit | fix `uom_conversion` / the flagged rows |
 | `NOT MODELLED` | purchases exist for something no rule mentions | add a rule |
 
-Nothing is estimated to close any of those gaps. Over the real 143-item
-Damansara itemwise section the rules now produce minyak masak, beras, tea/kopi
-powder, ikan, ayam (both fillet **and** whole-cut), kambing, daging, tulang,
-telur, susu and sotong — where previously only kambing and daging resolved.
+Nothing is estimated to close any of those gaps.
+
+### Widening canonicalization v2
+
+`telur`, `beras`, `minyak_masak`, `susu` and `tulang` had no category, so those
+ingredients could never be compared however good the portion was. They are now
+added — **additively**. `data/canonical_items_v2.json` is shared with
+`price_aggregation` (which writes `item_prices.canonical_item`) and
+`item_resolver`, so a category that quietly starts claiming strings another one
+owned would re-label historical spend with no error anywhere.
+
+`tests/test_canonical_v2_additive.py` is the gate. A 361-string baseline was
+captured from the data as it stood *before* the addition — every declared
+variation, every noise pattern, every item name in the real POS fixture, and
+realistic invoice lines — and the hard assertion is that **none of the 205
+pre-existing variations moves**. It doesn't: 34 categories → 39, zero drift.
+
+Two collisions were live and are pinned by tests: `TELUR IKAN` is fish roe and
+stays with `ikan` (the longer phrase beats bare `TELUR`), and
+`MUTTON LEG BONE IN C` stays with `kambing` — which is why `tulang` deliberately
+does *not* declare a bare `BONE`.
+
+**`TEPUNG` was not added.** `tepung_roti` already declares `TEPUNG` and `FLOUR`;
+a second `tepung` category would be a merge of an existing one, not an addition.
+
+**One accepted change outside the gate**, recorded rather than buried: the POS
+dish names `Roti Telur` and `Roti Telur Bawang` now resolve to `telur` instead
+of `roti`, because longest-match prefers `TELUR` (5) over `ROTI` (4). Neither is
+a declared variation and neither is a shape that appears on a supplier invoice —
+canonicalization is applied to invoice lines, not menu names. If they should
+stay `roti`, the fix is to declare them under `roti`, which means touching one
+of the original 34.
+
+Over the real 143-item Damansara itemwise section the rules now produce minyak
+masak, beras, tea/kopi powder, ikan, ayam (both fillet **and** whole-cut),
+kambing, daging, tulang, telur, susu and sotong — where previously only kambing
+and daging resolved, and `NO PURCHASE CATEGORY` is now empty.
 
 ## Menu hygiene
 
