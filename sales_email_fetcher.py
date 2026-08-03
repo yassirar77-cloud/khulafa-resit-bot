@@ -36,18 +36,35 @@ IMAP_TIMEOUT_SECONDS = 30
 
 _S_SUBJECT_RE = re.compile(r"^\s*(S-[\w\s]+?)\s+SHIFTCLOSE", re.IGNORECASE)
 _D_SUBJECT_RE = re.compile(r"^\s*(D-[\w\s]+?)\s+ON\s+\d", re.IGNORECASE)
+# Monthly close: "MONTHLY REPORT-Damansara ON Jul 2026", and the shorter
+# "M-Damansara ON Jul 2026" some POS versions send. The month is a NAME here,
+# which is what separates a monthly subject from a daily one (D- is followed by
+# a digit). The attachment header is still the authority on outlet+period —
+# this only decides which parser to hand the mail to.
+_M_SUBJECT_RE = re.compile(
+    r"^\s*(?:MONTHLY\s+REPORT|M)\s*-\s*([\w\s]+?)\s+ON\s+[A-Za-z]{3,9}", re.IGNORECASE
+)
 
 
 def detect_email_type(subject) -> tuple[str, str] | None:
     """Classify a POS email subject. Returns ``(email_type, outlet_code)`` —
-    ``('S', 'S-KLANG')`` / ``('D', 'D-SEK20')`` — or ``None`` if it is neither.
+    ``('S', 'S-KLANG')`` / ``('D', 'D-SEK20')`` / ``('M', 'DAMANSARA')`` — or
+    ``None`` if it is none of them.
 
     S-files carry the word SHIFTCLOSE; D-files (daily summary) are ``D-OUTLET ON
-    {date}`` with no SHIFTCLOSE. Codes may contain spaces (``D-ST KHU``); internal
+    {date}`` with no SHIFTCLOSE; M-files (monthly) are ``ON {Month} {Year}`` with
+    an alphabetic month. Codes may contain spaces (``D-ST KHU``); internal
     whitespace is collapsed and the code upper-cased.
+
+    Monthly is tested FIRST: ``M-`` would otherwise be missed entirely, and a
+    daily subject can never match the monthly pattern because ``D-`` is followed
+    by a digit date.
     """
     if not isinstance(subject, str):
         return None
+    m = _M_SUBJECT_RE.match(subject)
+    if m:
+        return "M", re.sub(r"\s+", " ", m.group(1)).strip().upper()
     m = _S_SUBJECT_RE.match(subject)
     if m:
         return "S", re.sub(r"\s+", " ", m.group(1)).strip().upper()

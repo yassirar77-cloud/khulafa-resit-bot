@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import signal
+import tempfile
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -198,51 +199,12 @@ SUSPICIOUS_PRICE_RATIO = 1.20
 SUSPICIOUS_ITEM_LOOKBACK_DAYS = 7
 DUPLICATE_TOTAL_TOLERANCE = 0.05
 
-KNOWN_SUPPLIERS = [
-    # Spices & dry goods
-    'BABAS', 'SAIDA', 'BALAJI', 'SHREE MAP JAYA',
-    # Rice
-    'JASMINE', 'BERAS',
-    # Dairy
-    'MEWAH', 'F&N', 'DUTCH LADY',
-    # Meat & frozen
-    'HANEE', 'BS FROZEN', 'BESTARI FARM', 'BESTARI',
-    # Tea & coffee
-    'CAMELLIAA', 'CAMELLIA', 'BOH',
-    # Eggs
-    'JY RESOURCES', 'JUTA RIA',
-    # Plastics & packaging
-    'REZA PLASTIC', 'REZA', 'HAMEED PLASTICS', 'HAMEED',
-    # Vegetables
-    'SAYUR', 'PASAR BORONG',
-    # Drinks & wholesale
-    'BESTARI WHOLESALE',
-    # Seafood
-    'FOOK LEONG', 'QUIWAVE OCEANIC', 'QUIWAVE',
-    # Daily consumables
-    'DAILY PAY',
-    # Ice
-    'EVEREST AISVARAM', 'EVEREST',
-    # Catering
-    'CATERERS AT TANJUNG', 'MYMOON',
-    # Convenience
-    'KK SUPERMART', 'KK MART',
-    # Utility/common chains
-    '99 SPEEDMART', '99', 'TESCO', 'LOTUSS', 'GIANT',
-]
+# The supplier master now lives in supplier_master.py so the monthly close can
+# use the same list without importing this module's Telegram/Supabase runtime.
+# Re-exported here because the names are used throughout bot.py.
+from supplier_master import KNOWN_SUPPLIERS, is_known_supplier  # noqa: E402,F401
 
 LEARNED_SUPPLIER_THRESHOLD = 3
-
-
-def is_known_supplier(merchant) -> bool:
-    """Check if merchant matches any known supplier (substring, case-insensitive)."""
-    if not merchant:
-        return False
-    m = merchant.upper().strip()
-    for known in KNOWN_SUPPLIERS:
-        if known in m or m in known:
-            return True
-    return False
 
 
 NON_PURCHASE_KEYWORDS = [
@@ -2103,9 +2065,12 @@ HELP_TEXT = (
     "/reconcile_now — re-run today/yesterday reconciliation\n"
     "/reconcile_date YYYY-MM-DD — re-run one historical date\n"
     "\n"
-    "Wastage:\n"
+    "Wastage & monthly close:\n"
     "/wastage_purchases <outlet> <YYYY-MM> — monthly purchase CSV "
     "(canonical item, qty in base units, cost, avg cost/kg)\n"
+    "/monthly_ingest_now — pull MONTHLY REPORT emails from the POS mailbox\n"
+    "/monthly_close <outlet> <YYYY-MM> — P&L, cash reconciliation, wastage, "
+    "menu hygiene (+ workbook)\n"
     "\n"
     "Merchant auto-resolve:\n"
     "/merchant_resolve_now — clear the unresolved-merchant backlog (auto-resolve, escalate, defer)\n"
@@ -4250,6 +4215,154 @@ async def wastage_purchases_command(update: Update, context: ContextTypes.DEFAUL
         await message.reply_text(f"{summary}\n\n(Failed to attach the CSV file.)")
 
 
+def _run_monthly_close(outlet: str, period: str) -> dict:
+    """Read a stored monthly report and close the month. Synchronous.
+
+    Returns everything the command needs: the P&L, the cash reconciliation, the
+    menu hygiene report, the wastage variance, and the workbook path. Raises
+    ``LookupError`` when the month has not been ingested — that is a different
+    problem from a month that closed badly, and the command says so.
+    """
+    import monthly_close as mc
+    import monthly_report_ingest as mri
+    import monthly_wastage as mw
+    from menu_hygiene import build_menu_hygiene
+    from monthly_report_xlsx import report_filename, write_monthly_sheets
+    from wastage_export import parse_month
+
+    header_rows = (
+        supabase.table(mri.MONTHLY_REPORT_TABLE).select("*")
+        .eq("outlet", outlet).eq("period", period).limit(1).execute().data or []
+    )
+    if not header_rows:
+        raise LookupError(
+            f"no monthly report ingested for {outlet} {period} — "
+            "run /monthly_ingest_now after the POS emails it"
+        )
+    header = header_rows[0]
+
+    def fetch(table):
+        return fetch_all_pages(
+            lambda: supabase.table(table).select("*")
+            .eq("outlet", outlet).eq("period", period).order("id")
+        )
+
+    payout_rows = fetch(mri.PAYOUTS_TABLE)
+    itemwise = fetch(mri.ITEMWISE_TABLE)
+    advances = fetch(mri.STAFF_ADVANCE_TABLE)
+
+    by_block = {"purchase": [], "pinjam": [], "salary_block": []}
+    for row in payout_rows:
+        by_block.setdefault(row.get("block") or "purchase", []).append(row)
+    staff_names = {
+        str(r.get("staff_name") or "").strip().upper()
+        for r in advances if r.get("staff_name")
+    }
+
+    config_rows = (
+        supabase.table("outlet_config").select("*").eq("outlet", outlet).execute().data or []
+    )
+    # A period-specific row wins over the standing one.
+    config = next((c for c in config_rows if c.get("period") == period), None) \
+        or next((c for c in config_rows if not c.get("period")), None)
+
+    totals = {k: header.get(k) for k in header if header.get(k) is not None}
+    pl = mc.build_pl(totals, by_block["purchase"], by_block["pinjam"],
+                     by_block["salary_block"], staff_names, config)
+    cash = mc.build_cash_reconciliation(totals)
+    hygiene = build_menu_hygiene(itemwise)
+
+    window = parse_month(period)
+    purchases = mw.fetch_purchases(supabase, outlet, *window) if window else []
+    wastage = mw.build_wastage(itemwise, purchases)
+
+    path = os.path.join(tempfile.gettempdir(), report_filename(outlet, period))
+    write_monthly_sheets(path, outlet=outlet, period=period,
+                         pl=pl, cash=cash, hygiene=hygiene, wastage=wastage)
+    return {"pl": pl, "cash": cash, "hygiene": hygiene, "wastage": wastage,
+            "path": path, "header": header}
+
+
+async def monthly_close_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/monthly_close <outlet> <YYYY-MM> — P&L, cash rec, wastage, hygiene."""
+    import monthly_close as mc
+    from wastage_export import parse_month
+
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    args = context.args or []
+    usage = ("Usage: /monthly_close <outlet> <YYYY-MM>\n"
+             "Example: /monthly_close damansara 2026-07")
+    if len(args) < 2:
+        await message.reply_text(usage)
+        return
+    period = args[-1].strip()
+    if parse_month(period) is None:
+        await message.reply_text(f"'{period}' is not a valid YYYY-MM month.\n\n{usage}")
+        return
+    outlet = _resolve_outlet_name(" ".join(args[:-1]))
+
+    try:
+        result = await asyncio.to_thread(_run_monthly_close, outlet, period)
+    except LookupError as exc:
+        await message.reply_text(str(exc))
+        return
+    except Exception:
+        logger.exception("monthly_close failed (outlet=%s period=%s)", outlet, period)
+        await message.reply_text("Failed to close the month — see logs.")
+        return
+
+    digest = mc.format_monthly_digest(
+        outlet, period, result["pl"], result["cash"],
+        result["wastage"], result["hygiene"],
+    )
+    try:
+        await _reply_chunked(message, digest)
+    except Exception:
+        logger.exception("monthly_close: failed to send digest")
+    try:
+        with open(result["path"], "rb") as f:
+            await context.bot.send_document(
+                chat_id=message.chat_id, document=f,
+                filename=os.path.basename(result["path"]),
+                caption=f"{outlet} {period} — P&L, Cash Reconciliation, Menu Hygiene",
+            )
+    except Exception:
+        logger.exception("monthly_close: failed to send workbook")
+        await message.reply_text("Digest sent, but the workbook could not be attached.")
+
+
+async def monthly_ingest_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/monthly_ingest_now — poll the mailbox for MONTHLY REPORT emails."""
+    from monthly_report_ingest import run_monthly_ingest
+
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    await message.reply_text("Polling for monthly reports…")
+    try:
+        result = await asyncio.to_thread(run_monthly_ingest, supabase)
+    except Exception:
+        logger.exception("monthly ingest failed")
+        await message.reply_text("Monthly ingest failed — see logs.")
+        return
+    lines = [
+        f"Monthly ingest: {len(result['ingested'])} ingested, "
+        f"{len(result['skipped'])} skipped, {len(result['errors'])} error(s)"
+    ]
+    for row in result["ingested"]:
+        counts = row.get("counts", {})
+        lines.append(
+            f"• {row['outlet']} {row['period']}: "
+            f"{counts.get('monthly_itemwise', 0)} items, "
+            f"{counts.get('monthly_payouts', 0)} payouts"
+        )
+    for row in result["errors"][:5]:
+        lines.append(f"⚠️ {row.get('outlet') or row.get('subject')}: {row.get('reason')}")
+    await _reply_chunked(message, "\n".join(lines))
+
+
 async def cash_no_receipt_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message or not is_reviewer(_command_owner_id(update)):
@@ -5025,6 +5138,8 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("weekly_report_now", weekly_report_now_command))
     app.add_handler(CommandHandler("order_drafts_now", order_drafts_now_command))
     app.add_handler(CommandHandler("wastage_purchases", wastage_purchases_command))
+    app.add_handler(CommandHandler("monthly_close", monthly_close_command))
+    app.add_handler(CommandHandler("monthly_ingest_now", monthly_ingest_now_command))
     app.add_handler(CommandHandler("cash_no_receipt_today", cash_no_receipt_today_command))
     app.add_handler(CommandHandler("reconcile_now", reconcile_now_command))
     app.add_handler(CommandHandler("reconcile_date", reconcile_date_command))
@@ -5232,6 +5347,7 @@ async def run_bot() -> None:
                 BotCommand("advances", "Staff cash advances (PAYOUT/PINJAM) tracker"),
                 BotCommand("dashboard", "Open the Mini App dashboard"),
                 BotCommand("wastage_purchases", "Monthly purchase CSV: <outlet> <YYYY-MM>"),
+                BotCommand("monthly_close", "Monthly P&L + cash rec: <outlet> <YYYY-MM>"),
                 BotCommand("help", "Show command list"),
             ])
         scheduler.start()
