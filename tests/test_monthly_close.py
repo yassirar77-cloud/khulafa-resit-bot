@@ -221,9 +221,11 @@ class ProfitAndLoss(unittest.TestCase):
         )
 
     def test_cogs_is_the_sum_of_its_three_sources(self):
+        # Paikkasu is an inline TAG on rows already in the payouts block — there
+        # is no paikkasu total to add, so it is split OUT of the till rows.
         pl = self._pl(
-            payouts=[{"description": "PAY TO AYAM BESTARI", "amount": 20000.0}],
-            totals={"total_paikkasu": 7882.30},
+            payouts=[{"description": "PAY TO AYAM BESTARI", "amount": 20000.0},
+                     {"description": "NON PAY TO CAMELLIA TEA _PAIKKASU_", "amount": 7882.30}],
         )
         self.assertEqual(pl["cogs_breakdown"]["till_purchases"], 20000.0)
         self.assertEqual(pl["cogs_breakdown"]["paikkasu"], 7882.30)
@@ -234,22 +236,31 @@ class ProfitAndLoss(unittest.TestCase):
     def test_gross_profit_and_contribution(self):
         pl = self._pl(
             payouts=[{"description": "PAY TO AYAM BESTARI", "amount": 20000.0},
+                     {"description": "PAY TO BABAS MASALA _PAIKKASU_", "amount": 7882.30},
                      {"description": "PAY [SALARY] TO KALEEL", "amount": 6000.0},
                      {"description": "PAY TO GAS", "amount": 1815.10}],
-            totals={"total_paikkasu": 7882.30},
         )
         self.assertEqual(pl["gross_profit"], 92704.50)
         self.assertEqual(pl["till_wages"], 6000.0)
         self.assertEqual(pl["other_till_expense"], 1815.10)
         self.assertEqual(pl["contribution"], 84889.40)
 
-    def test_paikkasu_already_in_the_rows_is_not_double_counted(self):
+    def test_paikkasu_rows_are_counted_once_not_twice(self):
+        # A tagged row must appear in the paikkasu bucket only — never in both
+        # that and till_purchases, which would double it inside COGS.
         pl = self._pl(
-            payouts=[{"description": "PAY PAIKKASU", "amount": 7882.30}],
-            totals={"total_paikkasu": 7882.30},
+            payouts=[{"description": "NON PAY TO REZA PLASTIC _PAIKKASU_", "amount": 7882.30}],
         )
-        self.assertEqual(pl["cogs_breakdown"]["paikkasu"], 0.0)
-        self.assertEqual(pl["cogs_breakdown"]["till_purchases"], 7882.30)
+        self.assertEqual(pl["cogs_breakdown"]["paikkasu"], 7882.30)
+        self.assertEqual(pl["cogs_breakdown"]["till_purchases"], 0.0)
+        self.assertEqual(pl["cogs"], 7882.30 + 28000.0)
+
+    def test_paikkasu_rows_of_both_printed_forms_are_recognised(self):
+        pl = self._pl(payouts=[
+            {"description": "NON PAY TO CAMELLIA TEA _PAIKKASU_", "amount": 835.0},
+            {"description": "PAY TO BABAS MASALA _PAIKKASU_", "amount": 595.0},
+        ])
+        self.assertEqual(pl["cogs_breakdown"]["paikkasu"], 1430.0)
 
     def test_without_config_it_is_contribution_and_never_net_profit(self):
         pl = self._pl()
@@ -362,3 +373,64 @@ class Digest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EndToEndOverSyntheticMonthly(unittest.TestCase):
+    """Parse -> reclassify -> P&L -> cash, over a file with the real structure.
+
+    The fixture is SYNTHETIC (see tests/fixtures/monthly_synthetic/README.md):
+    it reproduces the real report's closing-total layout, twice-printed
+    DESCRIPTION header, inline _PAIKKASU_ tags and ADVANCE TO rows, with amounts
+    chosen so every block reconciles to its own printed total. It proves the
+    chain computes correctly from parsed rows; it cannot prove the real file has
+    this shape — only the acceptance test can.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from monthly_report_parser import check_report_integrity, parse_monthly_report
+        from sales_parser import read_shift_close_file
+
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures",
+                            "monthly_synthetic", "M-Damansara Jul2026-SYNTHETIC.TXT")
+        cls.parsed = parse_monthly_report(read_shift_close_file(path))
+        cls.integrity = check_report_integrity(cls.parsed)
+        cls.pl = build_pl(cls.parsed["totals"], cls.parsed["payouts"],
+                          cls.parsed["pinjam"], cls.parsed["salary_block"], set(), None)
+        cls.cash = build_cash_reconciliation(cls.parsed["totals"])
+
+    def test_the_month_reconciles_before_anything_is_computed(self):
+        self.assertEqual(self.integrity, [])
+
+    def test_cogs_components_come_from_parsed_rows(self):
+        breakdown = self.pl["cogs_breakdown"]
+        self.assertAlmostEqual(breakdown["till_purchases"], 29726.00, places=2)
+        self.assertAlmostEqual(breakdown["paikkasu"], 2202.00, places=2)
+        self.assertAlmostEqual(breakdown["supplier_bank_block"], 23954.30, places=2)
+
+    def test_cogs_and_percent(self):
+        self.assertAlmostEqual(self.pl["cogs"], 55882.30, places=2)
+        self.assertAlmostEqual(self.pl["cogs_pct"], 37.6, places=1)
+
+    def test_contribution(self):
+        self.assertAlmostEqual(self.pl["contribution"], 84889.40, places=2)
+
+    def test_pinjam_addback_comes_from_the_advance_rows(self):
+        self.assertAlmostEqual(self.pl["pinjam_addback"], 5378.00, places=2)
+        self.assertTrue(self.pl["pinjam_check"]["ok"])
+
+    def test_cash_chain(self):
+        self.assertAlmostEqual(self.cash["cash_sales"], 69638.50, places=2)
+        self.assertAlmostEqual(self.cash["expected_bank_in"], 24517.40, places=2)
+
+    def test_no_supplier_row_was_left_unclassified(self):
+        self.assertEqual(self.pl["salary_reclass"]["flagged_rows"], [])
+
+    def test_paikkasu_suppliers_still_matched_after_tag_stripping(self):
+        # CAMELLIA / REZA PLASTIC / BABAS must survive _PAIKKASU_ removal —
+        # otherwise they fall out of COGS into the unmatched bucket.
+        buckets = {r["bucket"] for r in self.pl["classified_payouts"]}
+        self.assertIn("paikkasu", buckets)
+        payees = {r["payee"] for r in self.pl["classified_payouts"]
+                  if r["bucket"] == "paikkasu"}
+        self.assertEqual(payees, {"CAMELLIA TEA", "REZA PLASTIC", "BABAS MASALA"})

@@ -22,7 +22,14 @@ import re
 from datetime import date
 from typing import Any
 
-from monthly_report_parser import parse_header, parse_monthly_report
+from monthly_report_parser import (
+    MonthlyReportIntegrityError,
+    is_advance_row,
+    missing_controls,
+    parse_header,
+    parse_monthly_report,
+    verify_report_integrity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +48,8 @@ _DETAIL_TABLES = (
 _HEADER_COLUMNS = (
     "total_sales", "net_sales", "total_bank_sales", "total_fp_sales",
     "total_payouts", "total_purchase", "total_pinjam", "payout_pinjam",
-    "total_pay_salary", "total_paikkasu", "tax", "discount", "rounded",
+    "total_pay_salary", "total_salary", "payout_purchase", "payout_expense",
+    "total_paikkasu", "tax", "discount", "rounded",
     "total_cash", "qr_pay", "grab_pay", "total_customers",
 )
 
@@ -130,10 +138,15 @@ def build_rows(parsed: dict, outlet: str, period: str) -> dict[str, list[dict]]:
         for r in parsed.get("daily_sales") or []
     ]
 
+    # 'purchase' holds the payouts block MINUS the advances; 'pinjam' holds the
+    # ADVANCE TO rows the parser split out of it. Storing the block twice would
+    # double-count every advance.
     payouts: list[dict] = []
     for block, rows in (("purchase", parsed.get("payouts")),
                         ("pinjam", parsed.get("pinjam")),
-                        ("salary_block", parsed.get("salary_block"))):
+                        ("salary_block", parsed.get("salary_block")),
+                        ("cheque", parsed.get("cheque")),
+                        ("staff_meals", parsed.get("staff_meals"))):
         for index, row in enumerate(rows or [], start=1):
             payouts.append({
                 **key, "line_no": index, "trno": row.get("trno"),
@@ -280,6 +293,23 @@ def ingest_monthly_email(supabase_client, email_data: dict) -> dict:
             "sections found: %s", outlet, period, parsed.get("sections_found"),
         )
 
+    # The silent-zero guard. A month whose blocks do not reconcile with its own
+    # printed totals is NOT stored: a half-parsed block yields a plausible P&L
+    # that is quietly wrong, which is worse than no P&L at all.
+    try:
+        verify_report_integrity(parsed)
+    except MonthlyReportIntegrityError as exc:
+        return {"status": "error", "reason": f"integrity check failed: {exc}",
+                "failures": exc.failures, "outlet": outlet, "period": period,
+                "sections_found": parsed.get("sections_found")}
+
+    unverified = missing_controls(parsed)
+    if unverified:
+        logger.warning(
+            "monthly ingest: %s %s stored, but these controls were absent so the "
+            "corresponding checks could not run: %s", outlet, period, unverified,
+        )
+
     try:
         stored = store_monthly_report(
             supabase_client, parsed, outlet=outlet, period=period,
@@ -292,7 +322,8 @@ def ingest_monthly_email(supabase_client, email_data: dict) -> dict:
         return {"status": "error", "reason": str(exc), "outlet": outlet, "period": period}
 
     return {"status": "ok", "outlet": outlet, "period": period,
-            "sections_found": parsed.get("sections_found"), **stored}
+            "sections_found": parsed.get("sections_found"),
+            "unverified_controls": unverified, **stored}
 
 
 def run_monthly_ingest(supabase_client, *, mailbox=None, since=None, mark_seen: bool = True) -> dict:

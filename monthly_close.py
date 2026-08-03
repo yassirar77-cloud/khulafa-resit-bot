@@ -30,6 +30,7 @@ import logging
 import re
 from typing import Any
 
+from monthly_report_parser import has_paikkasu_tag, strip_paikkasu_tag
 from supplier_master import supplier_match_strength
 
 logger = logging.getLogger(__name__)
@@ -89,15 +90,20 @@ def extract_payee(description: Any) -> str:
     """The name after ``TO`` in a payout description, or the whole description.
 
     ``PAY [SALARY] TO KALEEL`` -> ``KALEEL``; ``PAY TO AYAM BESTARI`` ->
-    ``AYAM BESTARI``. Used for supplier/staff matching, never for display.
+    ``AYAM BESTARI``; ``NON PAY TO CAMELLIA TEA _PAIKKASU_`` -> ``CAMELLIA TEA``.
+
+    The inline ``_PAIKKASU_`` tag is stripped FIRST: left in place it becomes
+    part of the payee and every paikkasu row fails supplier-master matching,
+    which would push real supplier spend into the unmatched bucket.
     """
     if not isinstance(description, str):
         return ""
-    text = _BRACKET_TAG_RE.sub("PAY", description).strip()
+    text = strip_paikkasu_tag(description)
+    text = _BRACKET_TAG_RE.sub("PAY", text).strip()
     match = _PAYEE_RE.search(text)
     if match:
         return re.sub(r"\s+", " ", match.group("payee")).strip().upper()
-    return re.sub(r"\s+", " ", description).strip().upper()
+    return re.sub(r"\s+", " ", text).strip().upper()
 
 
 def bracket_tag(description: Any) -> str | None:
@@ -164,6 +170,14 @@ def classify_payout(description: Any, *, block: str, staff_names: set[str] | Non
                 "reason": "matches neither the supplier master nor a staff name"}
 
     # --- till purchases block ---
+    # Paikkasu is an inline TAG, not a section and not a prefix: it appears on
+    # both "PAY TO …" and "NON PAY TO …" rows. Classify on the tag before
+    # anything else, so a paikkasu row can never be mistaken for an expense by
+    # a keyword that happens to appear in the supplier's name.
+    if has_paikkasu_tag(description):
+        return {"category": CATEGORY_COGS, "bucket": "paikkasu", "payee": payee,
+                "reason": "inline _PAIKKASU_ tag"}
+
     if tag in _WAGE_TAGS:
         return {"category": CATEGORY_WAGES, "bucket": "till_wages", "payee": payee,
                 "reason": f"payout tagged [{tag}]"}
@@ -292,15 +306,17 @@ def build_pl(
 
     sales = float(totals.get("total_sales") or 0)
 
-    till_purchases = _sum(till, lambda r: r["category"] == CATEGORY_COGS)
-    paikkasu = float(totals.get("total_paikkasu") or 0)
-    # Only count the printed PAIKKASU total when it is not already inside the
-    # till rows — otherwise the same spend lands in COGS twice.
-    paikkasu_in_rows = _sum(till, lambda r: "PAIKKASU" in str(r.get("description") or "").upper())
-    paikkasu_extra = round(max(0.0, paikkasu - paikkasu_in_rows), 2)
+    # Paikkasu has NO section and NO printed total — it is an inline tag on rows
+    # that already live in the payouts block. So it is not added to COGS; it is
+    # SPLIT OUT of the till COGS rows for reporting. Adding a separate paikkasu
+    # figure on top would double-count every tagged row.
+    till_purchases = _sum(
+        till, lambda r: r["category"] == CATEGORY_COGS and r["bucket"] != "paikkasu"
+    )
+    paikkasu = _sum(till, lambda r: r["bucket"] == "paikkasu")
 
     supplier_bank = salary["supplier_cogs"]
-    cogs = round(till_purchases + paikkasu_extra + supplier_bank, 2)
+    cogs = round(till_purchases + paikkasu + supplier_bank, 2)
     gross_profit = round(sales - cogs, 2)
 
     till_wages = round(_sum(till, lambda r: r["category"] == CATEGORY_WAGES)
@@ -351,7 +367,7 @@ def build_pl(
         "cogs_pct": round(cogs / sales * 100, 1) if sales else None,
         "cogs_breakdown": {
             "till_purchases": till_purchases,
-            "paikkasu": paikkasu_extra,
+            "paikkasu": paikkasu,
             "supplier_bank_block": supplier_bank,
         },
         "gross_profit": gross_profit,

@@ -101,8 +101,9 @@ class BuildRows(unittest.TestCase):
                 self.assertEqual(row["period"], "2026-07", table)
 
     def test_payout_blocks_are_labelled(self):
-        blocks = {r["block"] for r in self.rows[PAYOUTS_TABLE]}
-        self.assertEqual(blocks, {"purchase", "pinjam"})
+        # The S- shift fixture uses shift closing labels, so the monthly
+        # closing-total anchors claim nothing from it — no money-block rows.
+        self.assertEqual(self.rows[PAYOUTS_TABLE], [])
 
     def test_itemwise_keeps_the_verbatim_name(self):
         names = [r["item_name"] for r in self.rows[ITEMWISE_TABLE]]

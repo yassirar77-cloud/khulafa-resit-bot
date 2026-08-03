@@ -26,6 +26,9 @@ from sales_parser import read_shift_close_file  # noqa: E402
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 REAL_POS_FILE = os.path.join(FIXTURES, "sales", "S-Damansara 25May2026.TXT")
+SYNTHETIC_MONTHLY = os.path.join(
+    FIXTURES, "monthly_synthetic", "M-Damansara Jul2026-SYNTHETIC.TXT"
+)
 
 
 class SplitTrailingNumbers(unittest.TestCase):
@@ -166,33 +169,24 @@ class ParseAgainstRealPosOutput(unittest.TestCase):
         self.assertEqual(self.parsed["outlet_code"], "DAMANSARA")
         self.assertEqual(self.parsed["period"], "2026-07")
 
-    def test_all_expected_sections_are_found(self):
-        for section in ("itemwise", "payouts", "pinjam", "staff_sales"):
+    def test_sales_sections_are_found(self):
+        for section in ("itemwise", "staff_sales"):
             self.assertIn(section, self.parsed["sections_found"], section)
 
-    def test_payouts_parsed_with_tags_intact(self):
-        descriptions = [r["description"] for r in self.parsed["payouts"]]
-        self.assertIn("PAY TO AYAM BESTARI", descriptions)
-        self.assertIn("PAY [SALARY] TO KALEEL", descriptions)
-        self.assertIn("PAY [LEAVE PAY] TO ABU", descriptions)
+    def test_shift_money_blocks_are_NOT_claimed_by_the_monthly_anchors(self):
+        # The S- file is a SHIFT report: it closes its money blocks with
+        # "TOTAL PURCHASE" / "TOTAL PINJAM", which are deliberately NOT monthly
+        # closing anchors. The monthly parser must claim nothing here rather
+        # than half-parse a foreign format.
+        self.assertEqual(self.parsed["closing_totals"], {})
+        self.assertEqual(self.parsed["payouts"], [])
+        self.assertEqual(self.parsed["pinjam"], [])
 
-    def test_pinjam_block_is_separate_from_purchases(self):
-        self.assertEqual([r["description"] for r in self.parsed["pinjam"]],
-                         ["ADVANCE TO YUSUF"])
-
-    def test_payout_totals_reconcile_with_the_detail(self):
-        # The real file prints TOTAL PURCHASE 974 + TOTAL PINJAM 50 = PAYOUT 1024.
+    def test_shift_summary_labels_still_read(self):
         totals = self.parsed["totals"]
         self.assertAlmostEqual(totals["total_purchase"], 974.0, places=2)
         self.assertAlmostEqual(totals["total_pinjam"], 50.0, places=2)
-        self.assertAlmostEqual(
-            totals["total_purchase"] + totals["total_pinjam"],
-            totals["total_payouts"], places=2,
-        )
-        self.assertAlmostEqual(
-            sum(r["amount"] for r in self.parsed["payouts"]),
-            totals["total_purchase"], places=2,
-        )
+        self.assertAlmostEqual(totals["total_payouts"], 1024.0, places=2)
 
     def test_every_itemwise_row_was_parsed(self):
         self.assertEqual(len(self.parsed["itemwise"]), 143)
@@ -256,3 +250,151 @@ class Robustness(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClosingTotalAnchoring(unittest.TestCase):
+    """The money blocks are bounded by their CLOSING totals, not their headers.
+
+    Driven by a SYNTHETIC file that reproduces the real report's structure —
+    including the `DESCRIPTION AMOUNT` header printed twice, which is exactly
+    why header anchoring cannot work. It cannot prove the real file looks like
+    this; only the acceptance test can.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.parsed = parse_monthly_report(read_shift_close_file(SYNTHETIC_MONTHLY))
+
+    def test_all_four_closing_totals_are_read(self):
+        self.assertEqual(self.parsed["closing_totals"], {
+            "payouts": 45121.10, "cheque": 0.0,
+            "salary_block": 23954.30, "staff_meals": 0.0,
+        })
+
+    def test_the_twice_printed_header_does_not_split_a_block(self):
+        # If DESCRIPTION were an anchor, the supplier rows would land in the
+        # payouts block and COGS would be overstated by RM23,954.30.
+        payees = {r["description"] for r in self.parsed["salary_block"]}
+        self.assertIn("BALAJI", payees)
+        self.assertNotIn("BALAJI", {r["description"] for r in self.parsed["payouts"]})
+
+    def test_supplier_block_rows_sum_to_its_closing_total(self):
+        self.assertAlmostEqual(
+            sum(r["amount"] for r in self.parsed["salary_block"]), 23954.30, places=2
+        )
+
+    def test_advance_rows_come_out_of_the_payouts_block(self):
+        # PINJAM has no section: ADVANCE TO rows sit inside the payouts block.
+        self.assertEqual([r["description"] for r in self.parsed["pinjam"]],
+                         ["ADVANCE TO YUSUF", "ADVANCE TO AHMAD"])
+        self.assertNotIn("ADVANCE TO YUSUF",
+                         {r["description"] for r in self.parsed["payouts"]})
+
+    def test_advances_are_not_double_counted(self):
+        combined = sum(r["amount"] for r in self.parsed["payouts"] + self.parsed["pinjam"])
+        self.assertAlmostEqual(combined, self.parsed["closing_totals"]["payouts"], places=2)
+
+    def test_paikkasu_rows_are_kept_with_their_inline_tag(self):
+        tagged = [r["description"] for r in self.parsed["payouts"]
+                  if "_PAIKKASU_" in r["description"]]
+        self.assertEqual(len(tagged), 3)
+        self.assertTrue(any(d.startswith("NON PAY TO") for d in tagged))
+        self.assertTrue(any(d.startswith("PAY TO") for d in tagged))
+
+    def test_summary_labels_are_read(self):
+        totals = self.parsed["totals"]
+        self.assertAlmostEqual(totals["payout_purchase"], 39743.10, places=2)
+        self.assertAlmostEqual(totals["payout_pinjam"], 5378.00, places=2)
+        self.assertAlmostEqual(totals["payout_expense"], 0.0, places=2)
+        self.assertAlmostEqual(totals["total_salary"], 23954.30, places=2)
+
+    def test_the_report_header_line_is_not_a_payout_row(self):
+        # "MONTHLY REPORT-Damansara ON Jul 2026" ends in a number; without the
+        # 2-decimal rule it parses as a RM2,026.00 payout.
+        self.assertNotIn(2026.0, [r["amount"] for r in self.parsed["payouts"]])
+
+    def test_summary_lines_are_not_payout_rows(self):
+        descriptions = {r["description"] for r in self.parsed["payouts"]}
+        self.assertNotIn("PAYOUT PURCHASE", descriptions)
+        self.assertNotIn("TOTAL SALES", descriptions)
+
+
+class PaikkasuAndAdvanceHelpers(unittest.TestCase):
+
+    def test_tag_detection_on_both_row_forms(self):
+        from monthly_report_parser import has_paikkasu_tag
+
+        self.assertTrue(has_paikkasu_tag("NON PAY TO CAMELLIA TEA _PAIKKASU_"))
+        self.assertTrue(has_paikkasu_tag("PAY TO BABAS MASALA _PAIKKASU_"))
+        self.assertFalse(has_paikkasu_tag("PAY TO AYAM BESTARI"))
+        self.assertFalse(has_paikkasu_tag(None))
+
+    def test_tag_is_stripped_for_matching(self):
+        from monthly_report_parser import strip_paikkasu_tag
+
+        self.assertEqual(strip_paikkasu_tag("NON PAY TO CAMELLIA TEA _PAIKKASU_"),
+                         "NON PAY TO CAMELLIA TEA")
+
+    def test_advance_detection(self):
+        from monthly_report_parser import is_advance_row
+
+        self.assertTrue(is_advance_row("ADVANCE TO YUSUF"))
+        self.assertFalse(is_advance_row("PAY TO AYAM BESTARI"))
+        self.assertFalse(is_advance_row(None))
+
+
+class IntegrityGuard(unittest.TestCase):
+    """The silent-zero guard: a block that parses short must never pass."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.content = read_shift_close_file(SYNTHETIC_MONTHLY)
+
+    def test_a_good_month_reconciles(self):
+        from monthly_report_parser import check_report_integrity
+
+        self.assertEqual(check_report_integrity(parse_monthly_report(self.content)), [])
+
+    def test_zero_rows_with_a_non_zero_closing_total_fails(self):
+        from monthly_report_parser import (
+            MonthlyReportIntegrityError, verify_report_integrity,
+        )
+
+        parsed = parse_monthly_report(self.content)
+        parsed["salary_block"] = []          # simulate an unrecognised block
+        with self.assertRaises(MonthlyReportIntegrityError) as ctx:
+            verify_report_integrity(parsed)
+        self.assertIn("NO rows were parsed", str(ctx.exception))
+
+    def test_a_partially_parsed_block_fails_too(self):
+        from monthly_report_parser import check_report_integrity
+
+        parsed = parse_monthly_report(self.content)
+        parsed["salary_block"] = parsed["salary_block"][:2]
+        failures = check_report_integrity(parsed)
+        self.assertTrue(any("rows sum to" in f for f in failures), failures)
+
+    def test_supplier_sum_is_checked_against_the_summary_control(self):
+        from monthly_report_parser import check_report_integrity
+
+        parsed = parse_monthly_report(self.content)
+        parsed["totals"]["total_salary"] = 99999.99
+        failures = check_report_integrity(parsed)
+        self.assertTrue(any("TOTAL SALARY" in f for f in failures), failures)
+
+    def test_advance_sum_is_checked_against_payout_pinjam(self):
+        from monthly_report_parser import check_report_integrity
+
+        parsed = parse_monthly_report(self.content)
+        parsed["totals"]["payout_pinjam"] = 1.00
+        failures = check_report_integrity(parsed)
+        self.assertTrue(any("PAYOUT PINJAM" in f for f in failures), failures)
+
+    def test_an_absent_control_is_reported_not_silently_passed(self):
+        from monthly_report_parser import check_report_integrity, missing_controls
+
+        parsed = parse_monthly_report(self.content)
+        parsed["totals"].pop("total_salary")
+        parsed["totals"].pop("payout_pinjam")
+        self.assertEqual(check_report_integrity(parsed), [])
+        self.assertEqual(len(missing_controls(parsed)), 2)

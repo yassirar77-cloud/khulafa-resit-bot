@@ -88,8 +88,16 @@ class MigrationShape(unittest.TestCase):
             self.assertIn("outlet             text NOT NULL", block, table)
             self.assertIn("period             text NOT NULL", block, table)
 
-    def test_payout_block_is_constrained_to_the_three_printed_blocks(self):
-        self.assertIn("CHECK (block IN ('purchase', 'pinjam', 'salary_block'))", self.sql)
+    def test_payout_block_is_constrained_to_the_printed_blocks(self):
+        for block in ("'purchase'", "'pinjam'", "'salary_block'", "'cheque'",
+                      "'staff_meals'"):
+            self.assertIn(block, self.sql, block)
+
+    def test_the_summary_control_totals_are_stored(self):
+        # total_salary is what the supplier block is reconciled against; without
+        # it the silent-zero guard has nothing to check.
+        for column in ("total_salary", "payout_purchase", "payout_expense"):
+            self.assertIn(column, self.sql, column)
 
     def test_outlet_config_carries_every_bank_paid_line(self):
         for column in ("rent", "tnb", "air_selangor", "unifi", "central_payroll",

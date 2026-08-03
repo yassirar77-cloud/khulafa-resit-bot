@@ -32,6 +32,62 @@ Neither correction is stored. The tables hold what the POS **printed**, verbatim
 `monthly_close.py` derives the categories at read time, so changing a rule
 re-reads the source instead of needing a backfill.
 
+## Section boundaries are CLOSING totals, not headers
+
+The report prints the column header `DESCRIPTION   AMOUNT` **twice** — once over
+the payouts block and once over the supplier block — so header anchoring cannot
+tell them apart. Had the parser anchored there, every supplier row would have
+landed in the payouts block and COGS would have been overstated by the whole
+RM23,954.30.
+
+Blocks are therefore bounded by the closing total that **ends** them:
+
+```
+^\s*TOTAL (PAYOUTS|CHEQUE OUT|PAY SALARY|STAFF MEALS)\s*:\s*([\d,]*\.\d\d)$
+```
+
+```
+     TOTAL PAYOUTS :45121.10        -> ends the payouts block
+     TOTAL CHEQUE OUT :.00          -> ends the cheque block
+     TOTAL PAY SALARY :23954.30     -> ends the SUPPLIER block
+TOTAL STAFF MEALS :.00              -> ends the staff meals block
+```
+
+Rows belong to the block terminated by the next closing line. A row is only a
+candidate if it has no colon (that excludes the summary lines) and ends in a
+2-decimal amount (that excludes prose — without it the report's own header line
+`MONTHLY REPORT-Damansara ON Jul 2026` parses as a RM2,026.00 payout).
+
+**Neither PAIKKASU nor PINJAM is a section.**
+
+* Paikkasu is an inline tag on rows of both printed forms:
+  `NON PAY TO CAMELLIA TEA _PAIKKASU_` and `PAY TO BABAS MASALA _PAIKKASU_`.
+  Classification is on the tag, not the prefix, and the tag is stripped before
+  supplier-master matching — left in place it becomes part of the payee and
+  every paikkasu row falls out of COGS into the unmatched bucket.
+  Paikkasu is **split out of** the till COGS rows for reporting, never added on
+  top: there is no paikkasu total, so adding one would double every tagged row.
+* Pinjam is `ADVANCE TO <name>` rows **inside** the payouts block. The parser
+  separates them so nothing is counted in both.
+
+## The silent-zero guard
+
+The dangerous failure here is not a crash. If a block's rows go unrecognised its
+sum is zero, and zero slots into the P&L without complaint — COGS simply comes
+out light and every downstream number is quietly wrong. So the parse is
+reconciled against the report's own printed totals and **raises**
+`MonthlyReportIntegrityError` rather than returning:
+
+1. a block with **zero rows but a non-zero closing total**;
+2. supplier block sum ≠ `TOTAL SALARY (-)` in the summary;
+3. Σ `ADVANCE TO *` ≠ `PAYOUT PINJAM`;
+4. any block whose rows sum ≠ its own closing total (a partially-parsed block is
+   as silent as an unparsed one).
+
+`monthly_report_ingest` refuses to store a month that fails. A control total the
+report did not print is reported by `missing_controls()` as *unverified* — an
+unrun check is not a pass.
+
 ## Parsing hazards, all real
 
 The monthly report comes from the same generator as the S-/D- shift files, and
@@ -52,23 +108,27 @@ spaces and would turn `"Barli  Panas"` into two columns, inventing an item.
 
 Leading spaces are kept all the way into `monthly_itemwise.item_name` because the
 menu-hygiene sheet exists to find the SKU that differs from its twin only by that
-space. The parser is verified against the real file: its 143 itemwise rows sum to
-the printed `TOTAL :3050.40`, and `TOTAL PURCHASE 974 + TOTAL PINJAM 50` equals
-the printed `TOTAL PAYOUT 1024`.
+space. The parser is verified against the real shift file: its 143 itemwise rows
+sum to the printed `TOTAL :3050.40`.
+
+That file is a **shift** report, so it closes its money blocks with
+`TOTAL PURCHASE` / `TOTAL PINJAM` — not the monthly anchors. The monthly parser
+correctly claims nothing from it, and the money-block behaviour is exercised
+against `tests/fixtures/monthly_synthetic/` instead (see that README: synthetic
+structure, real layout, amounts that reconcile).
 
 ## P&L
 
 ```
 Sales               = TOTAL SALES
 COGS                = till purchases + paikkasu + supplier bank block
+                      (paikkasu is split OUT of the till rows, not added on top)
 Gross profit        = Sales − COGS
 Till wages          = PAY [SALARY] + PAY [LP]
 Other till expense  = gas, hardware, bills, pest, medical, lalamove,
                       shopee, donation, customer refunds
 Outlet contribution = Gross profit − till wages − other till
 ```
-
-Paikkasu already present in the till rows is not added twice.
 
 Rent, TNB, Air Selangor, Unifi, central payroll and KWSP/PERKESO come from
 `outlet_config` — they are paid from the bank and appear in no POS report. **When

@@ -117,27 +117,121 @@ def _norm_label(key: str) -> str:
 
 
 # --- section banners --------------------------------------------------------
-# Each entry is (section_key, banner_regex). Matched against the STRIPPED line,
-# case-insensitively. Order matters only in that the first match on a line wins.
+# Banner-driven detection is used ONLY for the sales sections, which are
+# introduced by a title line. The money blocks are handled by closing-total
+# anchoring below — see _CLOSING_TOTAL_RE.
 _BANNERS: tuple[tuple[str, re.Pattern], ...] = (
     ("daily_sales", re.compile(r"DAY\s*WISE|DAILY\s+SALES|DATEWISE|DATE\s*WISE", re.I)),
-    ("payouts", re.compile(r"PURCHASE\s+DETAILS|PAYOUT\s+DETAILS", re.I)),
-    ("pinjam", re.compile(r"STAFF\s+PINJAM|PINJAM\s+DETAILS", re.I)),
-    ("salary_block", re.compile(r"PAY\s+SALARY\s+DETAILS|SALARY\s+DETAILS", re.I)),
     ("itemwise", re.compile(r"^\s*ITEMWISE\s+SALES|^\s*ITEM\s*WISE\s+SALES", re.I)),
     ("subgroup_itemwise", re.compile(r"SUB\s*GROUP\s+ITEMWISE", re.I)),
     ("staff_sales", re.compile(r"STAFF\s*WISE\s+SALES", re.I)),
     ("staff_advance", re.compile(r"STAFF\s+ADVANCE|ADVANCE\s+DETAILS|SALARY\s+ADVANCE", re.I)),
 )
 
-# Column-header lines that sit directly under a banner and must not be parsed
-# as data.
-_HEADER_HINT_RE = re.compile(
-    r"^\s*(TRNO|SHIFTNO|ITEMNAME|STAFFNAME|DATE|SNO|NO)\b", re.I
+# --- money blocks: anchored on their CLOSING total, not their header ---------
+#
+# The monthly report prints the column header "DESCRIPTION   AMOUNT" TWICE —
+# once over the payouts block and once over the supplier block — so anchoring on
+# a header cannot tell the two apart. The closing total lines are unique and
+# unambiguous, so a block is defined as "the rows since the previous closing
+# total", named by the closing total that ENDS it.
+#
+# Literal examples from the real report:
+#     "     TOTAL PAYOUTS :45121.10"
+#     "     TOTAL CHEQUE OUT :.00"
+#     "     TOTAL PAY SALARY :23954.30"
+#     "TOTAL STAFF MEALS :.00"
+_CLOSING_TOTAL_RE = re.compile(
+    r"^\s*TOTAL (PAYOUTS|CHEQUE OUT|PAY SALARY|STAFF MEALS)\s*:\s*([\d,]*\.\d\d)\s*$"
 )
 
-# A row that closes a section: "TOTAL PURCHASE :974.00", "TOTAL :3050.40".
+_BLOCK_BY_CLOSING_LABEL = {
+    "PAYOUTS": "payouts",
+    "CHEQUE OUT": "cheque",
+    "PAY SALARY": "salary_block",
+    "STAFF MEALS": "staff_meals",
+}
+
+# Column-header lines that must not be parsed as data. DESCRIPTION is listed
+# because it heads both money blocks; it is skipped, never anchored on.
+_HEADER_HINT_RE = re.compile(
+    r"^\s*(TRNO|SHIFTNO|ITEMNAME|STAFFNAME|DESCRIPTION|DATE|SNO|NO)\b", re.I
+)
+
+# A row that closes a banner-driven sales section: "TOTAL :3050.40".
 _SECTION_TOTAL_RE = re.compile(r"^\s*(?:GRAND\s+)?TOTAL\b", re.I)
+
+#: A money-block row ends in a 2-decimal amount. Prose does not.
+_PAYOUT_ROW_RE = re.compile(r"\s-?[\d,]*\.\d\d\s*$")
+
+#: Advance rows live INSIDE the payouts block; PINJAM has no section of its own.
+_ADVANCE_RE = re.compile(r"^\s*(?:NON\s+)?(?:ADVANCE|ADVANS)\s+TO\b", re.I)
+
+#: Paikkasu is an inline TAG on a payout row, not a section. It appears on rows
+#: of both the "PAY TO …" and "NON PAY TO …" forms.
+PAIKKASU_TAG = "_PAIKKASU_"
+_PAIKKASU_RE = re.compile(re.escape(PAIKKASU_TAG), re.IGNORECASE)
+
+
+def has_paikkasu_tag(description: Any) -> bool:
+    """True when a payout description carries the inline ``_PAIKKASU_`` tag."""
+    return isinstance(description, str) and _PAIKKASU_RE.search(description) is not None
+
+
+def strip_paikkasu_tag(description: Any) -> str:
+    """Remove the ``_PAIKKASU_`` tag so the remainder can be supplier-matched."""
+    if not isinstance(description, str):
+        return ""
+    return re.sub(r"\s{2,}", " ", _PAIKKASU_RE.sub(" ", description)).strip()
+
+
+def is_advance_row(description: Any) -> bool:
+    """True for ``ADVANCE TO <name>`` rows (the PINJAM detail)."""
+    return isinstance(description, str) and _ADVANCE_RE.match(description) is not None
+
+
+def _money_blocks(
+    lines: list[str], excluded: set[int]
+) -> tuple[dict[str, list[str]], dict[str, float]]:
+    """Split the money blocks by their CLOSING total lines.
+
+    Returns ``(rows_by_block, closing_total_by_block)``. A row belongs to the
+    block terminated by the next closing total line; rows after the last closing
+    total belong to no block and are dropped (they are the summary section).
+
+    ``excluded`` holds line indices already claimed by a banner-driven sales
+    section, so an itemwise row can never be mistaken for a payout.
+    """
+    rows_by_block: dict[str, list[str]] = {}
+    totals: dict[str, float] = {}
+    pending: list[str] = []
+
+    for index, line in enumerate(lines):
+        closing = _CLOSING_TOTAL_RE.match(line)
+        if closing:
+            key = _BLOCK_BY_CLOSING_LABEL[closing.group(1).upper()]
+            rows_by_block.setdefault(key, []).extend(pending)
+            amount = parse_money(closing.group(2))
+            totals[key] = amount if amount is not None else 0.0
+            pending = []
+            continue
+        if index in excluded:
+            continue
+        if _is_blank(line) or _is_separator(line) or _HEADER_HINT_RE.match(line):
+            continue
+        # Summary lines ("PAYOUT PINJAM    : 5378.00") and timestamps carry a
+        # colon; payout rows never do. This is what keeps the summary block out
+        # of the last money block.
+        if ":" in line:
+            continue
+        # A payout row ALWAYS ends in a 2-decimal amount. Requiring that keeps
+        # prose out of the block — without it the report's own header line
+        # ("MONTHLY REPORT-Damansara ON Jul 2026") parses as a RM2,026.00 payout.
+        if not _PAYOUT_ROW_RE.search(line):
+            continue
+        pending.append(line)
+
+    return rows_by_block, totals
 
 
 def _section_bounds(lines: list[str]) -> dict[str, list[tuple[int, int]]]:
@@ -316,6 +410,11 @@ _HEADER_FIELDS = {
     "TOTAL PURCHASE": "total_purchase",
     "TOTAL PINJAM": "total_pinjam",
     "PAYOUT PINJAM": "payout_pinjam",
+    "PAYOUT PURCHASE": "payout_purchase",
+    "PAYOUT EXPENSE": "payout_expense",
+    # "TOTAL SALARY (-)" in the summary; _norm_label drops the "(-)". Distinct
+    # from "TOTAL PAY SALARY", which is the supplier block's CLOSING total.
+    "TOTAL SALARY": "total_salary",
     "TOTAL PAY SALARY": "total_pay_salary",
     "TOTAL PAIKKASU": "total_paikkasu",
     "PAIKKASU": "total_paikkasu",
@@ -391,6 +490,130 @@ def parse_header(content: str) -> dict:
     }
 
 
+class MonthlyReportIntegrityError(Exception):
+    """A parsed month does not reconcile with its own printed totals.
+
+    Raised rather than returned because the failure mode this guards against is
+    SILENT: if a block's rows are not recognised, its sum is zero, and a zero
+    slots into the P&L without complaint — COGS simply comes out light and every
+    downstream number is wrong in a way nothing flags. A month that does not
+    reconcile must stop, loudly.
+    """
+
+    def __init__(self, failures: list[str]):
+        self.failures = failures
+        super().__init__("; ".join(failures))
+
+
+#: Sen-level tolerance for the reconciliation assertions.
+INTEGRITY_TOLERANCE = 0.01
+
+
+def check_report_integrity(parsed: dict, *, tolerance: float = INTEGRITY_TOLERANCE) -> list[str]:
+    """Reconcile parsed rows against the report's own printed totals.
+
+    Returns a list of failure descriptions (empty when the month reconciles).
+    Three checks, all aimed at the silent zero:
+
+    1. **Empty block, non-zero closing total.** The clearest possible evidence
+       that row recognition failed. A block whose closing total says RM23,954.30
+       but which yielded no rows is not an empty block.
+    2. **Supplier block sum == ``TOTAL SALARY (-)``** from the summary. The
+       supplier block is the whole of reclassification (a); if it silently
+       parsed short, COGS is understated by the difference.
+    3. **Σ ``ADVANCE TO *`` == ``PAYOUT PINJAM``.** The advance add-back.
+
+    Checks 2 and 3 are skipped (not failed) when the summary did not print the
+    figure to compare against — an absent control total is a different problem
+    from a wrong one, and is reported by :func:`missing_controls`.
+    """
+    failures: list[str] = []
+    totals = parsed.get("totals") or {}
+    closing = parsed.get("closing_totals") or {}
+
+    block_rows = {
+        "payouts": (parsed.get("payouts") or []) + (parsed.get("pinjam") or []),
+        "salary_block": parsed.get("salary_block") or [],
+        "cheque": parsed.get("cheque") or [],
+        "staff_meals": parsed.get("staff_meals") or [],
+    }
+
+    for block, closing_total in closing.items():
+        rows = block_rows.get(block, [])
+        if not rows and closing_total and abs(closing_total) > tolerance:
+            failures.append(
+                f"{block}: closing total prints RM{closing_total:.2f} but NO rows "
+                "were parsed — the block was not recognised, and its money would "
+                "silently vanish from the close"
+            )
+
+    def _sum(rows):
+        return round(sum(float(r.get("amount") or 0) for r in rows), 2)
+
+    salary_sum = _sum(block_rows["salary_block"])
+    control_salary = totals.get("total_salary")
+    if isinstance(control_salary, (int, float)) and not isinstance(control_salary, bool):
+        if abs(salary_sum - float(control_salary)) > tolerance:
+            failures.append(
+                f"supplier block rows sum to RM{salary_sum:.2f} but the summary "
+                f"prints TOTAL SALARY RM{float(control_salary):.2f} "
+                f"(delta RM{salary_sum - float(control_salary):+.2f})"
+            )
+
+    # Beyond the two required assertions: every block's rows must sum to its own
+    # closing total. A block that parsed SOME of its rows is just as silent as
+    # one that parsed none, and the closing total is right there to catch it.
+    for block, closing_total in closing.items():
+        rows = block_rows.get(block, [])
+        if not rows:
+            continue  # already handled by the empty-block check above
+        block_sum = _sum(rows)
+        if abs(block_sum - closing_total) > tolerance:
+            failures.append(
+                f"{block}: rows sum to RM{block_sum:.2f} but its closing total "
+                f"prints RM{closing_total:.2f} (delta RM{block_sum - closing_total:+.2f}) "
+                "— rows were missed or misattributed"
+            )
+
+    advance_sum = _sum(parsed.get("pinjam") or [])
+    control_pinjam = totals.get("payout_pinjam")
+    if isinstance(control_pinjam, (int, float)) and not isinstance(control_pinjam, bool):
+        if abs(advance_sum - float(control_pinjam)) > tolerance:
+            failures.append(
+                f"ADVANCE TO rows sum to RM{advance_sum:.2f} but the summary "
+                f"prints PAYOUT PINJAM RM{float(control_pinjam):.2f} "
+                f"(delta RM{advance_sum - float(control_pinjam):+.2f})"
+            )
+
+    return failures
+
+
+def missing_controls(parsed: dict) -> list[str]:
+    """Control totals the report did not print, so a check could not run.
+
+    An unrun check is not a pass. Callers surface these so a month that
+    reconciled only because there was nothing to reconcile against is visible.
+    """
+    totals = parsed.get("totals") or {}
+    missing = []
+    if totals.get("total_salary") is None:
+        missing.append("TOTAL SALARY (-) — supplier block sum unverified")
+    if totals.get("payout_pinjam") is None:
+        missing.append("PAYOUT PINJAM — advance add-back unverified")
+    return missing
+
+
+def verify_report_integrity(parsed: dict, *, tolerance: float = INTEGRITY_TOLERANCE) -> None:
+    """Raise :class:`MonthlyReportIntegrityError` if the month does not reconcile."""
+    failures = check_report_integrity(parsed, tolerance=tolerance)
+    if failures:
+        logger.error(
+            "monthly report integrity FAILED for %s %s: %s",
+            parsed.get("outlet_code"), parsed.get("period"), failures,
+        )
+        raise MonthlyReportIntegrityError(failures)
+
+
 def parse_monthly_report(content: str) -> dict:
     """Parse a monthly report into the six section lists plus header totals.
 
@@ -418,6 +641,7 @@ def parse_monthly_report(content: str) -> dict:
             "outlet_code": None, "period": None, "totals": {},
             "daily_sales": [], "payouts": [], "itemwise": [], "staff_sales": [],
             "staff_advance": [], "salary_block": [], "pinjam": [],
+            "cheque": [], "staff_meals": [], "closing_totals": {},
             "sections_found": [], "raw_line_count": 0,
         }
 
@@ -426,29 +650,51 @@ def parse_monthly_report(content: str) -> dict:
     header = parse_header(text)
     bounds = _section_bounds(lines)
 
+    # Lines already claimed by a banner-driven sales section, so the money-block
+    # scanner cannot swallow an itemwise row.
+    claimed: set[int] = set()
+    for ranges in bounds.values():
+        for start, end in ranges:
+            claimed.update(range(start, end))
+
+    block_rows, closing_totals = _money_blocks(lines, claimed)
+
     def rows_for(key: str) -> list[str]:
         return _data_rows(lines, bounds.get(key, []))
+
+    # The payouts block holds purchases, expenses AND the ADVANCE TO rows —
+    # PINJAM is not a section. Split them here so downstream code keeps its
+    # existing contract and no row is counted in both.
+    payout_block = _parse_payout_rows(block_rows.get("payouts", []))
+    pinjam = [r for r in payout_block if is_advance_row(r["description"])]
+    payouts = [r for r in payout_block if not is_advance_row(r["description"])]
+
+    sections_found = sorted(set(bounds) | set(block_rows))
 
     result = {
         "outlet_code": header["outlet_code"],
         "period": header["period"],
         "totals": _parse_header_totals(lines),
         "daily_sales": _parse_daily_sales_rows(rows_for("daily_sales")),
-        "payouts": _parse_payout_rows(rows_for("payouts")),
+        "payouts": payouts,
         "itemwise": _parse_itemwise_rows(rows_for("itemwise")),
         "staff_sales": _parse_staff_sales_rows(rows_for("staff_sales")),
         "staff_advance": _parse_staff_advance_rows(rows_for("staff_advance")),
-        "salary_block": _parse_payout_rows(rows_for("salary_block")),
-        "pinjam": _parse_payout_rows(rows_for("pinjam")),
-        "sections_found": sorted(bounds.keys()),
+        "salary_block": _parse_payout_rows(block_rows.get("salary_block", [])),
+        "cheque": _parse_payout_rows(block_rows.get("cheque", [])),
+        "staff_meals": _parse_payout_rows(block_rows.get("staff_meals", [])),
+        "pinjam": pinjam,
+        "closing_totals": closing_totals,
+        "sections_found": sections_found,
         "raw_line_count": len(lines),
     }
     logger.info(
-        "monthly parser: outlet=%r period=%r sections=%s daily=%d payouts=%d "
-        "items=%d staff=%d advances=%d salary_block=%d pinjam=%d",
+        "monthly parser: outlet=%r period=%r sections=%s closing_totals=%s "
+        "daily=%d payouts=%d pinjam=%d items=%d staff=%d advances=%d "
+        "salary_block=%d",
         result["outlet_code"], result["period"], result["sections_found"],
-        len(result["daily_sales"]), len(result["payouts"]), len(result["itemwise"]),
-        len(result["staff_sales"]), len(result["staff_advance"]),
-        len(result["salary_block"]), len(result["pinjam"]),
+        closing_totals, len(result["daily_sales"]), len(result["payouts"]),
+        len(result["pinjam"]), len(result["itemwise"]), len(result["staff_sales"]),
+        len(result["staff_advance"]), len(result["salary_block"]),
     )
     return result

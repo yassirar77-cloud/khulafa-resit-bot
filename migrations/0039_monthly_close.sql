@@ -37,8 +37,12 @@ CREATE TABLE IF NOT EXISTS public.monthly_report (
     total_purchase    numeric,
     total_pinjam      numeric,
     payout_pinjam     numeric,
-    total_pay_salary  numeric,
-    total_paikkasu    numeric,
+    total_pay_salary  numeric,   -- the supplier block's CLOSING total
+    total_salary      numeric,   -- "TOTAL SALARY (-)" in the summary; the
+                                 -- control the supplier block is checked against
+    payout_purchase   numeric,
+    payout_expense    numeric,
+    total_paikkasu    numeric,   -- legacy; paikkasu is an inline row tag, not a total
     tax               numeric,
     discount          numeric,
     rounded           numeric,
@@ -85,7 +89,9 @@ CREATE TABLE IF NOT EXISTS public.monthly_payouts (
     -- Which printed block the row came from. NOT the P&L category — that is
     -- derived in monthly_close so a reclassification rule change re-reads the
     -- source instead of needing a backfill.
-    block              text NOT NULL CHECK (block IN ('purchase', 'pinjam', 'salary_block')),
+    block              text NOT NULL CHECK (block IN (
+                           'purchase', 'pinjam', 'salary_block', 'cheque', 'staff_meals'
+                       )),
     category           text,            -- classifier output, stored for review
     CONSTRAINT monthly_payouts_unique UNIQUE (outlet, period, block, line_no)
 );
