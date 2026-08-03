@@ -406,38 +406,17 @@ INVOICE_LINES_ENABLED = (
 async def extract_invoice_lines(image_bytes: bytes) -> dict:
     """Second OCR pass returning structured invoice LINE ITEMS.
 
-    Returns ``invoice_ocr.parse_line_items_response`` output. Raises on
+    Thin async wrapper over ``invoice_ocr.call_line_items_ocr`` — the shared
+    code path the offline shadow-run also uses, so a seeding worklist can never
+    be produced by a different prompt than the one production runs. Raises on
     transport error so the caller can decide whether to continue without line
     items (it does — the receipt itself is already extracted).
     """
-    from invoice_ocr import LINE_ITEMS_PROMPT, parse_line_items_response
+    from invoice_ocr import call_line_items_ocr
 
-    start = time.monotonic()
-    b64 = base64.b64encode(image_bytes).decode("utf-8")
-    data_url = f"data:image/jpeg;base64,{b64}"
-    response = await asyncio.to_thread(
-        zai_client.chat.completions.create,
-        model=ZAI_MODEL,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": LINE_ITEMS_PROMPT},
-                    {"type": "image_url", "image_url": {"url": data_url}},
-                ],
-            }
-        ],
-        temperature=0.1,
+    return await asyncio.to_thread(
+        call_line_items_ocr, zai_client, image_bytes, model=ZAI_MODEL
     )
-    latency = time.monotonic() - start
-    content = response.choices[0].message.content or ""
-    parsed = parse_line_items_response(content)
-    logger.info(
-        "invoice-lines OCR: latency=%.2fs lines=%d supplier=%r subtotal=%s total=%s",
-        latency, len(parsed["lines"]), parsed["supplier"],
-        parsed["subtotal"], parsed["total"],
-    )
-    return parsed
 
 
 VERIFY_PROMPT_TEMPLATE = (

@@ -1,0 +1,90 @@
+name: uom-seeding-worklist
+
+# READ-ONLY shadow run, MANUAL trigger only (never runs automatically).
+#
+# Re-reads the last N days of SUPPLIER_PURCHASE receipts through the same
+# line-items OCR pass production uses, and ranks every
+# (supplier, canonical_item, unit_raw) combination with NO uom_conversion match
+# by the ringgit flowing through it. That ranked CSV is the seeding worklist:
+# which factors to go and measure first.
+#
+# It writes NOTHING to the database — not receipt_items, not uom_conversion,
+# not receipts. The CSV is uploaded as a workflow artifact.
+#
+# COST: one vision call per receipt. Run with dry_run=true first — it reports
+# how many receipts are in the window without spending anything.
+#
+# Requires SUPABASE_URL / SUPABASE_KEY / ZAI_API_KEY as repo Actions secrets.
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Lookback window in days"
+        required: false
+        default: "60"
+      date_field:
+        description: "Window applies to receipt_date (invoice date) or created_at (upload time)"
+        required: false
+        default: "receipt_date"
+        type: choice
+        options:
+          - receipt_date
+          - created_at
+      max_calls:
+        description: "Hard cap on OCR calls (blank = one per receipt in the window)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Select receipts and report the call count without spending anything"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions: {}
+
+jobs:
+  worklist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install minimal deps
+        run: pip install --quiet supabase openai httpx Pillow tzdata
+      - name: Shadow-run the invoice extractor (read-only)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          ZAI_BASE_URL: ${{ secrets.ZAI_BASE_URL }}
+          DAYS: ${{ inputs.days }}
+          DATE_FIELD: ${{ inputs.date_field }}
+          MAX_CALLS: ${{ inputs.max_calls }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ]; then
+            echo "::error::SUPABASE_URL / SUPABASE_KEY repo Actions secrets are not set."
+            echo "Add them under Settings → Secrets and variables → Actions, then re-run."
+            exit 1
+          fi
+          ARGS="--days $DAYS --date-field $DATE_FIELD --out uom_seeding_worklist.csv"
+          if [ -n "$MAX_CALLS" ]; then ARGS="$ARGS --max-calls $MAX_CALLS"; fi
+          if [ "$DRY_RUN" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          elif [ -z "$ZAI_API_KEY" ]; then
+            echo "::error::ZAI_API_KEY is required for a real run (dry_run=false)."
+            exit 1
+          fi
+          python scripts/uom_seeding_worklist.py $ARGS
+      - name: Upload the worklist CSV
+        if: ${{ inputs.dry_run != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: uom-seeding-worklist
+          path: uom_seeding_worklist.csv
+          if-no-files-found: warn

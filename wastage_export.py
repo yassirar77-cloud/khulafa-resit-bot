@@ -149,7 +149,7 @@ def aggregate_purchases(rows: list[dict]) -> dict:
             continue
         qty_base = _to_float(row.get("qty_base"))
         base_unit = row.get("base_unit")
-        cost = _line_cost(row)
+        cost = line_cost(row)
 
         if row.get("needs_review") or qty_base is None or not base_unit:
             excluded += 1
@@ -187,12 +187,15 @@ def aggregate_purchases(rows: list[dict]) -> dict:
     }
 
 
-def _line_cost(row: dict) -> float | None:
+def line_cost(row: dict) -> float | None:
     """A line's money: ``line_total`` when printed, else ``qty × unit_price``.
 
     The fallback is arithmetic on two printed numbers, not an estimate — and
     ``receipt_validation`` has already flagged (and this export already
     excluded) any line where those two disagree with the printed total.
+
+    Shared with ``scripts/uom_seeding_worklist.py`` so the RM a line is worth
+    is computed the same way whether it is being exported or being ranked.
     """
     line_total = _to_float(row.get("line_total"))
     if line_total is not None:

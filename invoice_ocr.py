@@ -6,15 +6,21 @@ needs something stricter: one object per PRINTED line, quantities separated
 from units, and the unit kept EXACTLY as printed so
 ``uom_conversion`` can decide what a GUNI is instead of the model guessing.
 
-This module owns that prompt and the parsing of its response. It has no
-Telegram/Supabase imports so the prompt contract can be unit-tested offline;
-``bot.py`` supplies the model call.
+This module owns the prompt, the model call, and the parsing of its response,
+so the live pipeline and the offline shadow-run
+(``scripts/uom_seeding_worklist.py``) cannot drift apart — a worklist produced
+by a different prompt than production runs would seed the wrong factors. It has
+no Telegram/Supabase imports and takes the model client as an argument, so the
+prompt contract stays unit-testable offline.
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import os
 import re
+import time
 from typing import Any
 
 from date_utils import normalize_date
@@ -64,6 +70,57 @@ LINE_ITEMS_PROMPT = (
     "\"RM1,234.50\".\n\n"
     "No markdown, no code fences, no commentary. JSON only."
 )
+
+#: Vision model for the line-items pass. Same default as ``bot.ZAI_MODEL`` so
+#: the shadow-run reads invoices with the model production actually uses.
+DEFAULT_MODEL = os.environ.get("ZAI_MODEL", "glm-4.6v-flash")
+
+
+def call_line_items_ocr(
+    client,
+    image_bytes: bytes,
+    *,
+    model: str | None = None,
+    mime_type: str = "image/jpeg",
+) -> dict:
+    """Run the line-items pass on ``image_bytes`` via an OpenAI-compatible client.
+
+    Synchronous — ``bot.py`` wraps it in ``asyncio.to_thread``, the shadow-run
+    script calls it directly. Raises on transport error so the caller decides
+    whether to continue without line items. Returns
+    :func:`parse_line_items_response` output.
+    """
+    start = time.monotonic()
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    data_url = f"data:{mime_type};base64,{b64}"
+    response = client.chat.completions.create(
+        model=model or DEFAULT_MODEL,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": LINE_ITEMS_PROMPT},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }
+        ],
+        temperature=0.1,
+    )
+    latency = time.monotonic() - start
+    content = response.choices[0].message.content or ""
+    parsed = parse_line_items_response(content)
+    usage = getattr(response, "usage", None)
+    logger.info(
+        "invoice-lines OCR: latency=%.2fs image_bytes=%d lines=%d supplier=%r "
+        "subtotal=%s total=%s total_tokens=%s",
+        latency, len(image_bytes), len(parsed["lines"]), parsed["supplier"],
+        parsed["subtotal"], parsed["total"],
+        getattr(usage, "total_tokens", None) if usage else None,
+    )
+    parsed["_latency_s"] = round(latency, 3)
+    parsed["_total_tokens"] = getattr(usage, "total_tokens", None) if usage else None
+    return parsed
+
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
 _OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)

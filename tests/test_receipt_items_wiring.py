@@ -44,6 +44,16 @@ class BotInvoiceLinesWiring(unittest.TestCase):
         )
         self.assertIn('and not should_queue(verification["confidence"])', self.src)
 
+    def test_line_pass_uses_the_shared_ocr_code_path(self):
+        # The offline shadow-run (scripts/uom_seeding_worklist.py) calls the
+        # same function. If bot.py inlined its own call again, a seeding
+        # worklist could be built from a different prompt than production runs.
+        self.assertIn("from invoice_ocr import call_line_items_ocr", self.src)
+        self.assertIn(
+            "call_line_items_ocr, zai_client, image_bytes, model=ZAI_MODEL", self.src
+        )
+        self.assertNotIn("LINE_ITEMS_PROMPT", self.src)
+
     def test_line_pass_failure_does_not_abort_the_receipt(self):
         idx = self.src.index("invoice_lines = await extract_invoice_lines(image_bytes)")
         window = self.src[idx: idx + 400]

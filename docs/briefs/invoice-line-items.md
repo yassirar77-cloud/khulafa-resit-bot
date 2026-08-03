@@ -96,12 +96,70 @@ reported in the caption ("N line(s) excluded · RM… not counted"). Their money
 real but their quantity is unknown, and counting the cost against an incomplete
 quantity would inflate cost-per-kg by exactly the amount nobody would notice.
 
+## Which factors to measure first — the seeding worklist
+
+`GUNI`, `PAPAN`, `CTN`, `BTL` and `PKT` all need a real measured factor, but
+they are not equally urgent: one of them might carry RM2,000/month and another
+RM40. `scripts/uom_seeding_worklist.py` answers that with money.
+
+It re-reads the last N days of `SUPPLIER_PURCHASE` receipts through the **same**
+`invoice_ocr.call_line_items_ocr` the live pipeline uses (that sharing is
+enforced by a test — a worklist built from a different prompt would seed the
+wrong factors), resolves every line against the live `uom_conversion` table, and
+ranks each `(supplier, canonical_item, unit_raw)` combination with no match by
+the ringgit flowing through it.
+
+It is **read-only**: no `receipt_items`, no `uom_conversion`, no `receipts`. A
+test greps the script for any write call.
+
+```bash
+# Free: how many receipts are in the window, and therefore how many OCR calls.
+python scripts/uom_seeding_worklist.py --days 60 --dry-run
+
+# The real run — one vision call per receipt.
+SUPABASE_URL=… SUPABASE_KEY=… ZAI_API_KEY=… \
+python scripts/uom_seeding_worklist.py --days 60 --out worklist.csv
+```
+
+Or run it from CI with the repo secrets and download the CSV artifact:
+**Actions → uom-seeding-worklist → Run workflow** (manual trigger only).
+
+Output:
+
+```
+supplier,canonical_item,unit_raw,line_count,total_RM
+MEWAH RICE SUPPLY,UNCATEGORISED,GUNI,3,2083.00
+BESTARI FARM,UNCATEGORISED,PAPAN,2,304.50
+FOOK LEONG TRADING,santan,CTN,1,216.00
+```
+
+Read it top-down: weigh one MEWAH sack of beras, count one BESTARI tray of
+telur, and you have unlocked the majority of the unconverted spend.
+`UNCATEGORISED` means the canonicaliser didn't recognise the item, so that row
+can only be seeded as a supplier-wide or unit-wide factor, never an item-scoped
+one.
+
+Two things the worklist deliberately does *not* do:
+
+* It does not use `convert_to_base` for the miss test, only
+  `resolve_conversion`. A line whose quantity was illegible still names a unit
+  that needs a factor; conflating "no factor" with "no quantity" would put
+  phantom work on the list.
+* It does not skip invoices that failed the subtotal check. The live pipeline
+  withholds their quantities, but the units printed on them are real. Those
+  invoices are counted in the report footer instead.
+
+Lines that printed no unit at all are counted and excluded — there is nothing
+to seed for them.
+
 ## Files
 
 | File | Role |
 | --- | --- |
 | `migrations/0038_receipt_items_uom.sql` | Both tables, indexes, RLS, seed factors |
-| `invoice_ocr.py` | Pass-2 prompt + response parsing |
+| `invoice_ocr.py` | Pass-2 prompt, model call, response parsing |
+| `scripts/uom_seeding_worklist.py` | Read-only shadow run → ranked seeding CSV |
+| `.github/workflows/uom-seeding-worklist.yml` | Manual CI trigger for the above |
 | `uom_conversion.py` | Lookup order, unit folding, conversion |
 | `receipt_items.py` | Row building, per-line confidence, upsert |
 | `receipt_validation.py` | Subtotal / line arithmetic checks, flag message |
