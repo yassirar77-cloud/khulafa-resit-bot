@@ -24,6 +24,7 @@ from typing import Any
 
 from monthly_report_parser import (
     MonthlyReportIntegrityError,
+    format_integrity_alert,
     is_advance_row,
     missing_controls,
     parse_header,
@@ -300,7 +301,10 @@ def ingest_monthly_email(supabase_client, email_data: dict) -> dict:
         verify_report_integrity(parsed)
     except MonthlyReportIntegrityError as exc:
         return {"status": "error", "reason": f"integrity check failed: {exc}",
-                "failures": exc.failures, "outlet": outlet, "period": period,
+                "failures": exc.failures,
+                # Ready-to-post ops message naming the block and both numbers.
+                "alert": format_integrity_alert(outlet, period, exc.failures),
+                "outlet": outlet, "period": period,
                 "sections_found": parsed.get("sections_found")}
 
     unverified = missing_controls(parsed)

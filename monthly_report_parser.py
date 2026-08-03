@@ -145,6 +145,20 @@ _CLOSING_TOTAL_RE = re.compile(
     r"^\s*TOTAL (PAYOUTS|CHEQUE OUT|PAY SALARY|STAFF MEALS)\s*:\s*([\d,]*\.\d\d)\s*$"
 )
 
+# A closing total bounds the END of a block but says nothing about where it
+# STARTS. Without a start bound the payouts block swallowed everything above it
+# — the report's own summary lines (TOTAL SALES, NET AMOUNT, TOTAL QR PAY) carry
+# no colon and end in an amount, so they read as payout rows. On the real July
+# file that produced 65 rows / RM524,145.60 in place of 56 rows / RM45,121.10.
+#
+# So a block runs from its column header to its closing total, and rows outside
+# an open block are ignored entirely.
+_BLOCK_START_RE = re.compile(r"^\s*(CHEQUENO\s+)?DESCRIPTION\s+AMOUNT\s*$", re.IGNORECASE)
+
+# Belt and braces inside an open block: no report line beginning "TOTAL " is
+# ever a payout row, whatever else it looks like.
+_TOTAL_LINE_RE = re.compile(r"^\s*TOTAL\s", re.IGNORECASE)
+
 _BLOCK_BY_CLOSING_LABEL = {
     "PAYOUTS": "payouts",
     "CHEQUE OUT": "cheque",
@@ -205,6 +219,7 @@ def _money_blocks(
     rows_by_block: dict[str, list[str]] = {}
     totals: dict[str, float] = {}
     pending: list[str] = []
+    open_block = False
 
     for index, line in enumerate(lines):
         closing = _CLOSING_TOTAL_RE.match(line)
@@ -214,15 +229,33 @@ def _money_blocks(
             amount = parse_money(closing.group(2))
             totals[key] = amount if amount is not None else 0.0
             pending = []
+            open_block = False
+            continue
+
+        if _BLOCK_START_RE.match(line):
+            if open_block and pending:
+                # A second column header with no closing total between them: the
+                # previous rows have no owner. Attributing them to the next block
+                # would move money between blocks, so they are dropped loudly —
+                # the integrity guard then catches the shortfall.
+                logger.warning(
+                    "monthly parser: %d row(s) discarded — a new DESCRIPTION "
+                    "header opened before the previous block closed", len(pending),
+                )
+            pending = []
+            open_block = True
+            continue
+
+        # Outside an open block nothing is a payout row. This is what keeps the
+        # colon-less summary lines out of the payouts block.
+        if not open_block:
             continue
         if index in excluded:
             continue
         if _is_blank(line) or _is_separator(line) or _HEADER_HINT_RE.match(line):
             continue
-        # Summary lines ("PAYOUT PINJAM    : 5378.00") and timestamps carry a
-        # colon; payout rows never do. This is what keeps the summary block out
-        # of the last money block.
-        if ":" in line:
+        # No line starting "TOTAL " is a payout row.
+        if _TOTAL_LINE_RE.match(line):
             continue
         # A payout row ALWAYS ends in a 2-decimal amount. Requiring that keeps
         # prose out of the block — without it the report's own header line
@@ -231,6 +264,11 @@ def _money_blocks(
             continue
         pending.append(line)
 
+    if pending:
+        logger.warning(
+            "monthly parser: %d row(s) after the last closing total belong to no "
+            "block and were ignored", len(pending),
+        )
     return rows_by_block, totals
 
 
@@ -452,8 +490,18 @@ def _parse_header_totals(lines: list[str]) -> dict:
                 cells = [c.strip() for c in raw.strip().strip("|").split("|")]
                 if len(cells) >= 2 and cells[-1]:
                     pair = (cells[-2], cells[-1])
-            if pair is None:
-                continue
+        if pair is None:
+            # Colon-LESS summary lines: "TOTAL SALES        148586.80". These
+            # are the lines that used to be swallowed by the payouts block; they
+            # are also where the report states its headline totals, so they must
+            # be read here or TOTAL SALES goes missing entirely. Safe because the
+            # label still has to resolve against _HEADER_FIELDS — a payout row
+            # like "PAY TO AYAM BESTARI  20000.00" matches nothing and is ignored.
+            split = split_trailing_numbers(raw, 1)
+            if split is not None:
+                pair = (split[0], str(split[1][0]))
+        if pair is None:
+            continue
         label, value = pair
         field = _HEADER_FIELDS.get(_norm_label(label))
         if field is None or field in totals:
@@ -500,19 +548,21 @@ class MonthlyReportIntegrityError(Exception):
     reconcile must stop, loudly.
     """
 
-    def __init__(self, failures: list[str]):
+    def __init__(self, failures: list[dict]):
         self.failures = failures
-        super().__init__("; ".join(failures))
+        super().__init__("; ".join(f["message"] for f in failures))
 
 
 #: Sen-level tolerance for the reconciliation assertions.
 INTEGRITY_TOLERANCE = 0.01
 
 
-def check_report_integrity(parsed: dict, *, tolerance: float = INTEGRITY_TOLERANCE) -> list[str]:
+def check_report_integrity(parsed: dict, *, tolerance: float = INTEGRITY_TOLERANCE) -> list[dict]:
     """Reconcile parsed rows against the report's own printed totals.
 
-    Returns a list of failure descriptions (empty when the month reconciles).
+    Returns a list of failure dicts (empty when the month reconciles), each with
+    ``block``, ``check``, ``parsed``, ``printed``, ``delta`` and ``message`` — so
+    the ops alert can name the block and BOTH numbers rather than a summary.
     Three checks, all aimed at the silent zero:
 
     1. **Empty block, non-zero closing total.** The clearest possible evidence
@@ -527,7 +577,7 @@ def check_report_integrity(parsed: dict, *, tolerance: float = INTEGRITY_TOLERAN
     figure to compare against — an absent control total is a different problem
     from a wrong one, and is reported by :func:`missing_controls`.
     """
-    failures: list[str] = []
+    failures: list[dict] = []
     totals = parsed.get("totals") or {}
     closing = parsed.get("closing_totals") or {}
 
@@ -541,11 +591,15 @@ def check_report_integrity(parsed: dict, *, tolerance: float = INTEGRITY_TOLERAN
     for block, closing_total in closing.items():
         rows = block_rows.get(block, [])
         if not rows and closing_total and abs(closing_total) > tolerance:
-            failures.append(
-                f"{block}: closing total prints RM{closing_total:.2f} but NO rows "
-                "were parsed — the block was not recognised, and its money would "
-                "silently vanish from the close"
-            )
+            failures.append({
+                "block": block, "check": "empty_block",
+                "parsed": 0.0, "printed": closing_total, "delta": -closing_total,
+                "message": (
+                    f"{block}: closing total prints RM{closing_total:.2f} but NO "
+                    "rows were parsed — the block was not recognised, and its "
+                    "money would silently vanish from the close"
+                ),
+            })
 
     def _sum(rows):
         return round(sum(float(r.get("amount") or 0) for r in rows), 2)
@@ -554,11 +608,16 @@ def check_report_integrity(parsed: dict, *, tolerance: float = INTEGRITY_TOLERAN
     control_salary = totals.get("total_salary")
     if isinstance(control_salary, (int, float)) and not isinstance(control_salary, bool):
         if abs(salary_sum - float(control_salary)) > tolerance:
-            failures.append(
-                f"supplier block rows sum to RM{salary_sum:.2f} but the summary "
-                f"prints TOTAL SALARY RM{float(control_salary):.2f} "
-                f"(delta RM{salary_sum - float(control_salary):+.2f})"
-            )
+            failures.append({
+                "block": "salary_block", "check": "total_salary_control",
+                "parsed": salary_sum, "printed": round(float(control_salary), 2),
+                "delta": round(salary_sum - float(control_salary), 2),
+                "message": (
+                    f"supplier block rows sum to RM{salary_sum:.2f} but the summary "
+                    f"prints TOTAL SALARY RM{float(control_salary):.2f} "
+                    f"(delta RM{salary_sum - float(control_salary):+.2f})"
+                ),
+            })
 
     # Beyond the two required assertions: every block's rows must sum to its own
     # closing total. A block that parsed SOME of its rows is just as silent as
@@ -569,21 +628,32 @@ def check_report_integrity(parsed: dict, *, tolerance: float = INTEGRITY_TOLERAN
             continue  # already handled by the empty-block check above
         block_sum = _sum(rows)
         if abs(block_sum - closing_total) > tolerance:
-            failures.append(
-                f"{block}: rows sum to RM{block_sum:.2f} but its closing total "
-                f"prints RM{closing_total:.2f} (delta RM{block_sum - closing_total:+.2f}) "
-                "— rows were missed or misattributed"
-            )
+            failures.append({
+                "block": block, "check": "block_sum",
+                "parsed": block_sum, "printed": closing_total,
+                "delta": round(block_sum - closing_total, 2),
+                "message": (
+                    f"{block}: rows sum to RM{block_sum:.2f} but its closing total "
+                    f"prints RM{closing_total:.2f} "
+                    f"(delta RM{block_sum - closing_total:+.2f}) — rows were "
+                    "missed or misattributed"
+                ),
+            })
 
     advance_sum = _sum(parsed.get("pinjam") or [])
     control_pinjam = totals.get("payout_pinjam")
     if isinstance(control_pinjam, (int, float)) and not isinstance(control_pinjam, bool):
         if abs(advance_sum - float(control_pinjam)) > tolerance:
-            failures.append(
-                f"ADVANCE TO rows sum to RM{advance_sum:.2f} but the summary "
-                f"prints PAYOUT PINJAM RM{float(control_pinjam):.2f} "
-                f"(delta RM{advance_sum - float(control_pinjam):+.2f})"
-            )
+            failures.append({
+                "block": "pinjam", "check": "payout_pinjam_control",
+                "parsed": advance_sum, "printed": round(float(control_pinjam), 2),
+                "delta": round(advance_sum - float(control_pinjam), 2),
+                "message": (
+                    f"ADVANCE TO rows sum to RM{advance_sum:.2f} but the summary "
+                    f"prints PAYOUT PINJAM RM{float(control_pinjam):.2f} "
+                    f"(delta RM{advance_sum - float(control_pinjam):+.2f})"
+                ),
+            })
 
     return failures
 
@@ -609,7 +679,8 @@ def verify_report_integrity(parsed: dict, *, tolerance: float = INTEGRITY_TOLERA
     if failures:
         logger.error(
             "monthly report integrity FAILED for %s %s: %s",
-            parsed.get("outlet_code"), parsed.get("period"), failures,
+            parsed.get("outlet_code"), parsed.get("period"),
+            [f["message"] for f in failures],
         )
         raise MonthlyReportIntegrityError(failures)
 
@@ -698,3 +769,39 @@ def parse_monthly_report(content: str) -> dict:
         len(result["staff_advance"]), len(result["salary_block"]),
     )
     return result
+
+
+def format_integrity_alert(outlet: Any, period: Any, failures: list[dict]) -> str:
+    """The ops-group message for a month that failed its integrity checks.
+
+    Names the block and BOTH numbers on every line: an alert saying only "the
+    month did not reconcile" leaves whoever reads it no way to tell a parser bug
+    from a genuinely odd report, which is the entire question.
+    """
+    lines = [
+        "🛑 Monthly report REJECTED — it does not reconcile with its own totals",
+        "",
+        f"Outlet: {outlet or '—'}   Period: {period or '—'}",
+        "",
+    ]
+    for failure in failures or []:
+        parsed_value = failure.get("parsed")
+        printed_value = failure.get("printed")
+        delta = failure.get("delta")
+        lines.append(f"• {failure.get('block', '?')} [{failure.get('check', '?')}]")
+        lines.append(
+            f"    parsed  RM{parsed_value:,.2f}" if isinstance(parsed_value, (int, float))
+            else "    parsed  —"
+        )
+        lines.append(
+            f"    printed RM{printed_value:,.2f}" if isinstance(printed_value, (int, float))
+            else "    printed —"
+        )
+        if isinstance(delta, (int, float)):
+            lines.append(f"    delta   RM{delta:+,.2f}")
+    lines += [
+        "",
+        "NOTHING was stored for this month. The close would otherwise have been "
+        "computed on a short block and looked perfectly normal.",
+    ]
+    return "\n".join(lines)

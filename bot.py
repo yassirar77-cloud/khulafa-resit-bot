@@ -4362,6 +4362,20 @@ async def monthly_ingest_now_command(update: Update, context: ContextTypes.DEFAU
         lines.append(f"⚠️ {row.get('outlet') or row.get('subject')}: {row.get('reason')}")
     await _reply_chunked(message, "\n".join(lines))
 
+    # A month rejected by the integrity guard is an OPS event, not a reply to
+    # whoever happened to run the command: the close will silently not exist
+    # until someone fixes it, so the group that watches the pipeline is told,
+    # with the block named and BOTH numbers shown.
+    for row in result["errors"]:
+        alert = row.get("alert")
+        if not alert:
+            continue
+        try:
+            for chunk in chunk_message(alert):
+                await context.bot.send_message(chat_id=ALERT_CHAT_ID, text=chunk)
+        except Exception:
+            logger.exception("Failed to post monthly integrity alert to ops")
+
 
 async def cash_no_receipt_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message

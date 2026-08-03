@@ -55,6 +55,12 @@ class BotMonthlyWiring(unittest.TestCase):
         block = self.src[index: index + 2600]
         self.assertIn('c.get("period") == period', block)
 
+    def test_integrity_failures_are_posted_to_the_ops_group(self):
+        index = self.src.index("async def monthly_ingest_now_command(")
+        block = self.src[index: index + 3000]
+        self.assertIn('row.get("alert")', block)
+        self.assertIn("chat_id=ALERT_CHAT_ID", block)
+
     def test_commands_are_documented(self):
         self.assertIn("/monthly_close <outlet> <YYYY-MM>", self.src)
         self.assertIn("/monthly_ingest_now", self.src)

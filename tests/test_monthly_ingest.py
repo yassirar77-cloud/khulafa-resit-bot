@@ -275,3 +275,52 @@ class Workbook(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IntegrityGuardBlocksStorage(unittest.TestCase):
+    """A month that does not reconcile is never stored, and carries an alert."""
+
+    def _content(self):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures",
+                            "monthly_synthetic", "M-Damansara Jul2026-SYNTHETIC.TXT")
+        return read_shift_close_file(path)
+
+    def _email(self, content):
+        return {"content": content, "filename": "M.TXT", "message_id": "<1>",
+                "outlet_code": "DAMANSARA",
+                "subject": "MONTHLY REPORT-Damansara ON Jul 2026"}
+
+    def test_a_reconciling_month_stores(self):
+        db = FakeSupabase()
+        result = ingest_monthly_email(db, self._email(self._content()))
+        self.assertEqual(result["status"], "ok")
+        self.assertGreater(len(db.rows(PAYOUTS_TABLE)), 0)
+
+    def test_a_broken_month_is_rejected_and_nothing_is_written(self):
+        # Corrupt the supplier block's closing total so its rows no longer add up.
+        broken = self._content().replace("TOTAL PAY SALARY :23954.30",
+                                         "TOTAL PAY SALARY :99999.99")
+        db = FakeSupabase()
+        result = ingest_monthly_email(db, self._email(broken))
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(db.rows(PAYOUTS_TABLE), [])
+        self.assertEqual(db.rows(MONTHLY_REPORT_TABLE), [])
+
+    def test_the_rejection_carries_an_ops_alert_with_both_numbers(self):
+        broken = self._content().replace("TOTAL PAY SALARY :23954.30",
+                                         "TOTAL PAY SALARY :99999.99")
+        result = ingest_monthly_email(FakeSupabase(), self._email(broken))
+        alert = result["alert"]
+        self.assertIn("salary_block", alert)
+        self.assertIn("RM23,954.30", alert)   # parsed
+        self.assertIn("RM99,999.99", alert)   # printed
+        self.assertIn("NOTHING was stored", alert)
+
+    def test_failures_are_structured_for_the_alert(self):
+        broken = self._content().replace("TOTAL PAY SALARY :23954.30",
+                                         "TOTAL PAY SALARY :99999.99")
+        result = ingest_monthly_email(FakeSupabase(), self._email(broken))
+        failure = result["failures"][0]
+        self.assertEqual(failure["block"], "salary_block")
+        self.assertIn("parsed", failure)
+        self.assertIn("printed", failure)

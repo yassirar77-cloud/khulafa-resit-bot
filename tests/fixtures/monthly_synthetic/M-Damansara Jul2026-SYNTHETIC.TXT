@@ -1,6 +1,12 @@
 MONTHLY REPORT-Damansara ON Jul 2026
           NASI KANDAR KHULAFA
 ========================================
+TOTAL SALES                      148586.80
+NET AMOUNT                       148586.80
+TOTAL QR PAY                      52000.00
+TOTAL BANK SALES                  70000.00
+TOTAL FP SALES                     8948.30
+========================================
 DESCRIPTION                       AMOUNT
 ========================================
 PAY TO AYAM BESTARI                20000.00
@@ -33,7 +39,4 @@ PAYOUT PURCHASE  : 39743.10
 PAYOUT PINJAM    : 5378.00
 PAYOUT EXPENSE   : .00
 TOTAL SALARY (-) : 23954.30
-TOTAL SALES      : 148586.80
-TOTAL BANK SALES : 70000.00
-TOTAL FP SALES   : 8948.30
 TOTAL PAYOUTS    : 45121.10

@@ -372,7 +372,7 @@ class IntegrityGuard(unittest.TestCase):
         parsed = parse_monthly_report(self.content)
         parsed["salary_block"] = parsed["salary_block"][:2]
         failures = check_report_integrity(parsed)
-        self.assertTrue(any("rows sum to" in f for f in failures), failures)
+        self.assertTrue(any(f["check"] == "block_sum" for f in failures), failures)
 
     def test_supplier_sum_is_checked_against_the_summary_control(self):
         from monthly_report_parser import check_report_integrity
@@ -380,7 +380,10 @@ class IntegrityGuard(unittest.TestCase):
         parsed = parse_monthly_report(self.content)
         parsed["totals"]["total_salary"] = 99999.99
         failures = check_report_integrity(parsed)
-        self.assertTrue(any("TOTAL SALARY" in f for f in failures), failures)
+        salary = next(f for f in failures if f["check"] == "total_salary_control")
+        self.assertEqual(salary["parsed"], 23954.30)
+        self.assertEqual(salary["printed"], 99999.99)
+        self.assertIn("TOTAL SALARY", salary["message"])
 
     def test_advance_sum_is_checked_against_payout_pinjam(self):
         from monthly_report_parser import check_report_integrity
@@ -388,7 +391,9 @@ class IntegrityGuard(unittest.TestCase):
         parsed = parse_monthly_report(self.content)
         parsed["totals"]["payout_pinjam"] = 1.00
         failures = check_report_integrity(parsed)
-        self.assertTrue(any("PAYOUT PINJAM" in f for f in failures), failures)
+        pinjam = next(f for f in failures if f["check"] == "payout_pinjam_control")
+        self.assertEqual(pinjam["parsed"], 5378.00)
+        self.assertEqual(pinjam["printed"], 1.00)
 
     def test_an_absent_control_is_reported_not_silently_passed(self):
         from monthly_report_parser import check_report_integrity, missing_controls
@@ -398,3 +403,104 @@ class IntegrityGuard(unittest.TestCase):
         parsed["totals"].pop("payout_pinjam")
         self.assertEqual(check_report_integrity(parsed), [])
         self.assertEqual(len(missing_controls(parsed)), 2)
+
+
+class BlockStartBound(unittest.TestCase):
+    """A closing total bounds only the END. Without a START bound the payouts
+    block swallowed the report's own summary lines — on the real July file that
+    was 65 rows / RM524,145.60 instead of 56 rows / RM45,121.10.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.parsed = parse_monthly_report(read_shift_close_file(SYNTHETIC_MONTHLY))
+
+    def test_colon_less_summary_lines_are_not_payout_rows(self):
+        descriptions = {r["description"] for r in
+                        self.parsed["payouts"] + self.parsed["pinjam"]}
+        for label in ("TOTAL SALES", "NET AMOUNT", "TOTAL QR PAY",
+                      "TOTAL BANK SALES", "TOTAL FP SALES"):
+            self.assertNotIn(label, descriptions, label)
+
+    def test_no_payout_row_starts_with_TOTAL_or_NET(self):
+        for row in self.parsed["payouts"] + self.parsed["pinjam"]:
+            self.assertFalse(row["description"].upper().startswith(("TOTAL", "NET")),
+                             row["description"])
+
+    def test_the_payouts_block_reconciles_to_its_closing_total(self):
+        rows = self.parsed["payouts"] + self.parsed["pinjam"]
+        self.assertAlmostEqual(sum(r["amount"] for r in rows),
+                               self.parsed["closing_totals"]["payouts"], places=2)
+
+    def test_colon_less_summary_lines_ARE_read_as_header_totals(self):
+        # They must leave the payouts block AND still be picked up as totals —
+        # dropping them entirely would lose TOTAL SALES.
+        totals = self.parsed["totals"]
+        self.assertAlmostEqual(totals["total_sales"], 148586.80, places=2)
+        self.assertAlmostEqual(totals["total_bank_sales"], 70000.00, places=2)
+        self.assertAlmostEqual(totals["total_fp_sales"], 8948.30, places=2)
+
+    def test_a_block_with_no_header_never_opens(self):
+        # TOTAL STAFF MEALS has no DESCRIPTION line above it in the real report.
+        self.assertEqual(self.parsed["staff_meals"], [])
+        self.assertEqual(self.parsed["closing_totals"]["staff_meals"], 0.0)
+
+    def test_rows_before_any_header_are_ignored(self):
+        content = (
+            "MONTHLY REPORT-X ON Jul 2026\n"
+            "STRAY ROW BEFORE ANY HEADER      999.00\n"
+            "DESCRIPTION                       AMOUNT\n"
+            "PAY TO AYAM BESTARI               100.00\n"
+            "     TOTAL PAYOUTS :100.00\n"
+        )
+        parsed = parse_monthly_report(content)
+        self.assertEqual([r["description"] for r in parsed["payouts"]],
+                         ["PAY TO AYAM BESTARI"])
+
+    def test_cheque_header_variant_opens_a_block(self):
+        content = (
+            "MONTHLY REPORT-X ON Jul 2026\n"
+            "CHEQUENO  DESCRIPTION                AMOUNT\n"
+            "1001  PAY TO BALAJI                  500.00\n"
+            "     TOTAL CHEQUE OUT :500.00\n"
+        )
+        parsed = parse_monthly_report(content)
+        self.assertEqual(len(parsed["cheque"]), 1)
+        self.assertEqual(parsed["cheque"][0]["amount"], 500.00)
+
+    def test_the_reported_regression_would_now_fail_the_guard(self):
+        # Simulate the old behaviour: summary lines counted as payout rows.
+        from monthly_report_parser import check_report_integrity
+
+        parsed = parse_monthly_report(read_shift_close_file(SYNTHETIC_MONTHLY))
+        parsed["payouts"] = parsed["payouts"] + [
+            {"trno": None, "description": "TOTAL SALES", "amount": 148586.80},
+        ]
+        failures = check_report_integrity(parsed)
+        self.assertTrue(any(f["check"] == "block_sum" and f["block"] == "payouts"
+                            for f in failures), failures)
+
+
+class IntegrityAlert(unittest.TestCase):
+
+    def test_names_the_block_and_both_numbers(self):
+        from monthly_report_parser import format_integrity_alert
+
+        text = format_integrity_alert("D.U", "2026-07", [{
+            "block": "salary_block", "check": "total_salary_control",
+            "parsed": 0.0, "printed": 23954.30, "delta": -23954.30,
+            "message": "…",
+        }])
+        self.assertIn("salary_block", text)
+        self.assertIn("total_salary_control", text)
+        self.assertIn("RM0.00", text)
+        self.assertIn("RM23,954.30", text)
+        self.assertIn("RM-23,954.30", text)
+        self.assertIn("D.U", text)
+        self.assertIn("2026-07", text)
+
+    def test_says_nothing_was_stored(self):
+        from monthly_report_parser import format_integrity_alert
+
+        self.assertIn("NOTHING was stored",
+                      format_integrity_alert("D.U", "2026-07", []))

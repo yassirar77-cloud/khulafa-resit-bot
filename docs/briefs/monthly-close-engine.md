@@ -32,31 +32,39 @@ Neither correction is stored. The tables hold what the POS **printed**, verbatim
 `monthly_close.py` derives the categories at read time, so changing a rule
 re-reads the source instead of needing a backfill.
 
-## Section boundaries are CLOSING totals, not headers
+## Block boundaries need BOTH bounds
 
-The report prints the column header `DESCRIPTION   AMOUNT` **twice** — once over
-the payouts block and once over the supplier block — so header anchoring cannot
-tell them apart. Had the parser anchored there, every supplier row would have
-landed in the payouts block and COGS would have been overstated by the whole
-RM23,954.30.
+The report prints the column header `DESCRIPTION   AMOUNT` **twice** — over the
+payouts block and over the supplier block — so a header alone cannot say *which*
+block you are in. The closing total can, so it names the block.
 
-Blocks are therefore bounded by the closing total that **ends** them:
+But a closing total bounds only the **END**. With no start bound the payouts
+block swallowed everything above it: the report's own summary lines
+(`TOTAL SALES`, `NET AMOUNT`, `TOTAL QR PAY`) carry **no colon** and end in an
+amount, so they read as payout rows. On the real July file that gave
+**65 rows / RM524,145.60** in place of **56 rows / RM45,121.10**.
+
+So both bounds are used:
 
 ```
-^\s*TOTAL (PAYOUTS|CHEQUE OUT|PAY SALARY|STAFF MEALS)\s*:\s*([\d,]*\.\d\d)$
+START: ^\s*(CHEQUENO\s+)?DESCRIPTION\s+AMOUNT\s*$
+END:   ^\s*TOTAL (PAYOUTS|CHEQUE OUT|PAY SALARY|STAFF MEALS)\s*:\s*([\d,]*\.\d\d)$
 ```
 
-```
-     TOTAL PAYOUTS :45121.10        -> ends the payouts block
-     TOTAL CHEQUE OUT :.00          -> ends the cheque block
-     TOTAL PAY SALARY :23954.30     -> ends the SUPPLIER block
-TOTAL STAFF MEALS :.00              -> ends the staff meals block
-```
+A block opens at its column header and is closed — and named — by its closing
+total. **Rows outside an open block are ignored.** Inside one, a row must not
+start with `TOTAL ` and must end in a 2-decimal amount (without that, the
+report's own header line `MONTHLY REPORT-Damansara ON Jul 2026` parses as a
+RM2,026.00 payout).
 
-Rows belong to the block terminated by the next closing line. A row is only a
-candidate if it has no colon (that excludes the summary lines) and ends in a
-2-decimal amount (that excludes prose — without it the report's own header line
-`MONTHLY REPORT-Damansara ON Jul 2026` parses as a RM2,026.00 payout).
+The colon-less summary lines still have to be *read* — they are where the report
+states TOTAL SALES — so the header-totals parser picks up `LABEL   AMOUNT` rows
+too, keyed on the known label map. Leaving the block and being read as a total
+are two different things, and the fix has to do both.
+
+`TOTAL STAFF MEALS` has no `DESCRIPTION` header above it, so that block never
+opens. At `.00` that is correct; if it were ever non-zero the guard below turns
+it into a rejection rather than a silent omission.
 
 **Neither PAIKKASU nor PINJAM is a section.**
 
@@ -65,8 +73,8 @@ candidate if it has no colon (that excludes the summary lines) and ends in a
   Classification is on the tag, not the prefix, and the tag is stripped before
   supplier-master matching — left in place it becomes part of the payee and
   every paikkasu row falls out of COGS into the unmatched bucket.
-  Paikkasu is **split out of** the till COGS rows for reporting, never added on
-  top: there is no paikkasu total, so adding one would double every tagged row.
+  Paikkasu is **split out of** the till COGS rows, never added on top: there is
+  no paikkasu total, so adding one would double every tagged row.
 * Pinjam is `ADVANCE TO <name>` rows **inside** the payouts block. The parser
   separates them so nothing is counted in both.
 
@@ -74,19 +82,35 @@ candidate if it has no colon (that excludes the summary lines) and ends in a
 
 The dangerous failure here is not a crash. If a block's rows go unrecognised its
 sum is zero, and zero slots into the P&L without complaint — COGS simply comes
-out light and every downstream number is quietly wrong. So the parse is
+out light and every downstream number is quietly wrong. The parse is therefore
 reconciled against the report's own printed totals and **raises**
-`MonthlyReportIntegrityError` rather than returning:
+`MonthlyReportIntegrityError` on:
 
 1. a block with **zero rows but a non-zero closing total**;
 2. supplier block sum ≠ `TOTAL SALARY (-)` in the summary;
 3. Σ `ADVANCE TO *` ≠ `PAYOUT PINJAM`;
-4. any block whose rows sum ≠ its own closing total (a partially-parsed block is
-   as silent as an unparsed one).
+4. any block whose rows sum ≠ its own closing total — a half-parsed block is as
+   silent as an unparsed one, and check 4 is what catches the 65-row bug.
 
-`monthly_report_ingest` refuses to store a month that fails. A control total the
-report did not print is reported by `missing_controls()` as *unverified* — an
-unrun check is not a pass.
+`monthly_report_ingest` stores **nothing** for a failing month, and returns a
+ready-to-post ops message naming the block and **both** numbers:
+
+```
+🛑 Monthly report REJECTED — it does not reconcile with its own totals
+
+Outlet: D.U   Period: 2026-07
+
+• salary_block [total_salary_control]
+    parsed  RM0.00
+    printed RM23,954.30
+    delta   RM-23,954.30
+
+NOTHING was stored for this month. …
+```
+
+`/monthly_ingest_now` posts it to the ops group. A control the report did not
+print is reported by `missing_controls()` as *unverified* — an unrun check is
+not a pass.
 
 ## Parsing hazards, all real
 
