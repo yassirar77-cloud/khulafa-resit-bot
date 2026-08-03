@@ -60,12 +60,31 @@ jobs:
             exit 1
           fi
           python scripts/uom_seeding_worklist.py $ARGS
-      - name: Show the CSV in the job log
+      - name: Publish the CSV to the job log and run summary
         if: ${{ hashFiles('uom_seeding_worklist.csv') != '' }}
         run: |
           echo "----- BEGIN WORKLIST CSV -----"
           cat uom_seeding_worklist.csv
           echo "----- END WORKLIST CSV -----"
+          # Also render it on the run's summary page, so the worklist is
+          # readable without downloading the artifact or opening the raw log.
+          {
+            echo "## uom_conversion seeding worklist"
+            echo
+            echo "Last 60 days of SUPPLIER_PURCHASE receipts, ranked by RM."
+            echo
+            echo '| supplier | canonical_item | unit_raw | line_count | total_RM |'
+            echo '| --- | --- | --- | ---: | ---: |'
+            tail -n +2 uom_seeding_worklist.csv | python3 -c "import csv,sys;[print('| '+' | '.join(r)+' |') for r in csv.reader(sys.stdin) if len(r)==5]"
+            echo
+            echo '<details><summary>Raw CSV</summary>'
+            echo
+            echo '```csv'
+            cat uom_seeding_worklist.csv
+            echo '```'
+            echo
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload the worklist CSV
         if: ${{ hashFiles('uom_seeding_worklist.csv') != '' }}
         uses: actions/upload-artifact@v4
