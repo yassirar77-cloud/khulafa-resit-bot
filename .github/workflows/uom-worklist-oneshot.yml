@@ -39,7 +39,9 @@ jobs:
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           ZAI_BASE_URL: ${{ secrets.ZAI_BASE_URL }}
         run: |
-          MODE="$(tr -d '[:space:]' < .github/uom-run-mode)"
+          # First line is the mode; anything below it is free-text, so the file
+          # can be nudged to re-fire a run without changing what it does.
+          MODE="$(head -n1 .github/uom-run-mode | tr -d '[:space:]')"
           echo "mode=$MODE"
           if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ]; then
             echo "::error::SUPABASE_URL / SUPABASE_KEY are not set as repo Actions secrets."
