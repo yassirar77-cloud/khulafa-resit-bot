@@ -121,8 +121,18 @@ SUPABASE_URL=… SUPABASE_KEY=… ZAI_API_KEY=… \
 python scripts/uom_seeding_worklist.py --days 60 --out worklist.csv
 ```
 
-Or run it from CI with the repo secrets and download the CSV artifact:
-**Actions → uom-seeding-worklist → Run workflow** (manual trigger only).
+Or run it from CI and download the CSV artifact:
+**Actions → uom-seeding-worklist → Run workflow** (manual trigger only, available
+once this branch is on `main` — `workflow_dispatch` only registers from the
+default branch). Before the merge, `uom-worklist-oneshot.yml` fires the same run
+from this branch: edit `.github/uom-run-mode` to `dry-run` or `full` and push.
+
+**CI needs secrets that are not currently set.** A run on 2026-08-03
+(`actions/runs/30777522464`) reached the script with `SUPABASE_URL`,
+`SUPABASE_KEY` and `ZAI_API_KEY` all empty, and `ingest-latency-check` has never
+been run — so the repo has no Actions secrets configured at all. Add them at
+*Settings → Secrets and variables → Actions* before either workflow can reach
+the database.
 
 Output:
 

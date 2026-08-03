@@ -42,14 +42,21 @@ jobs:
           MODE="$(tr -d '[:space:]' < .github/uom-run-mode)"
           echo "mode=$MODE"
           if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ]; then
-            echo "::error::SUPABASE_URL / SUPABASE_KEY repo Actions secrets are not set."
+            echo "::error::SUPABASE_URL / SUPABASE_KEY are not set as repo Actions secrets."
+            echo "Add them at Settings → Secrets and variables → Actions → New repository secret:"
+            echo "  SUPABASE_URL   https://<project>.supabase.co"
+            echo "  SUPABASE_KEY   the service-role key the bot runs with"
+            echo "  ZAI_API_KEY    (full runs only — the Z.ai key used for OCR)"
+            echo "Then edit .github/uom-run-mode and push to re-fire this run."
             exit 1
           fi
           ARGS="--days 60 --date-field receipt_date --out uom_seeding_worklist.csv"
           if [ "$MODE" = "dry-run" ]; then
             ARGS="$ARGS --dry-run"
           elif [ -z "$ZAI_API_KEY" ]; then
-            echo "::error::ZAI_API_KEY is required for a full run."
+            echo "::error::ZAI_API_KEY is required for a full run (mode=full)."
+            echo "Add it at Settings → Secrets and variables → Actions, or set"
+            echo ".github/uom-run-mode back to 'dry-run' for a free receipt count."
             exit 1
           fi
           python scripts/uom_seeding_worklist.py $ARGS
