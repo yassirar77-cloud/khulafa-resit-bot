@@ -135,24 +135,50 @@ def get_historical_average(
         return None
 
 
-def _shop_prices_for(supabase_client, canonical_item: str) -> list[dict]:
-    """Per-shop price summary for the alert block. Never raises.
+def _clean_rows(supabase_client, canonical_item: str) -> list[dict]:
+    """Comparable price rows for an item, or ``[]``. Never raises.
 
-    Deliberately does NOT exclude the current receipt: its row is already
-    in ``item_prices`` by the time detection runs, and the whole point of
-    the block is to show today's price alongside what the other shops
-    charge.
+    Delegates to ``shop_price_comparison.load_price_rows``, which drops
+    internal transfers, own-outlet lines, non-supplier receipts and
+    corrupt future dates, collapses OCR merchant variants onto one shop,
+    and tags each line with its cut. Comparing against the raw table
+    instead would average RM1.70 internal-transfer lines together with
+    RM54.00 cooked-chicken lines and call the result a chicken price.
     """
     try:
-        from shop_price_comparison import get_shop_prices
+        from shop_price_comparison import load_price_rows
 
-        return get_shop_prices(supabase_client, canonical_item)
+        return load_price_rows(supabase_client, canonical_item)
     except Exception:
         logger.exception(
-            "detect_spikes: shop comparison failed (canonical=%s)",
-            canonical_item,
+            "detect_spikes: price row load failed (canonical=%s)", canonical_item
         )
         return []
+
+
+def _history_from_rows(rows: list[dict], merchant) -> dict | None:
+    """Historical stats from cleaned rows: same shop first, then all shops.
+
+    Mirrors ``get_historical_average``'s contract (``_MIN_SAMPLES`` per
+    scope, ``None`` when neither has enough) but over rows that are
+    already filtered to one cut, so the baseline compares like with like.
+    """
+    try:
+        from shop_price_comparison import shop_key
+
+        if isinstance(merchant, str) and merchant.strip():
+            key = shop_key(merchant)
+            same_shop = [r["unit_price"] for r in rows if r["shop_key"] == key]
+            if len(same_shop) >= _MIN_SAMPLES:
+                return _summarize(same_shop, "merchant")
+
+        all_shops = [r["unit_price"] for r in rows]
+        if len(all_shops) >= _MIN_SAMPLES:
+            return _summarize(all_shops, "global")
+        return None
+    except Exception:
+        logger.exception("_history_from_rows: unexpected failure")
+        return None
 
 
 def detect_spikes(
@@ -165,6 +191,12 @@ def detect_spikes(
     """Return one spike dict per item whose current ``unit_price``
     exceeds the historical average by ``_SPIKE_THRESHOLD``.
 
+    Both the baseline and the cross-shop block are built from cleaned,
+    cut-scoped rows (see ``_clean_rows``): leg quarters are compared
+    against leg quarters at real suppliers, never against whole birds or
+    an internal transfer. When those rows can't be loaded the detector
+    falls back to the raw historical average rather than going silent.
+
     Skips records with no canonical item, non-positive prices, or
     insufficient history. Deduplicates within a single receipt: the
     same ``canonical_item`` only triggers one alert per call even if
@@ -173,8 +205,16 @@ def detect_spikes(
     try:
         if not isinstance(price_records, list):
             return []
+        try:
+            from shop_price_comparison import item_variant, summarise_shops
+        except Exception:
+            # Detection still has to run without the comparison layer.
+            logger.exception("detect_spikes: comparison layer unavailable")
+            item_variant = summarise_shops = None
+
         spikes: list[dict] = []
         seen: set[str] = set()
+        rows_cache: dict[str, list[dict]] = {}
         for rec in price_records:
             try:
                 if not isinstance(rec, dict):
@@ -188,12 +228,29 @@ def detect_spikes(
                 if current is None or current <= 0:
                     continue
 
-                hist = get_historical_average(
-                    supabase_client,
-                    canonical,
-                    merchant=merchant,
-                    exclude_receipt_id=receipt_id,
+                if item_variant is None:
+                    variant, variant_rows = "", []
+                else:
+                    if canonical not in rows_cache:
+                        rows_cache[canonical] = _clean_rows(supabase_client, canonical)
+                    variant = item_variant(rec.get("raw_item_name"), canonical)
+                    variant_rows = [
+                        r for r in rows_cache[canonical] if r["variant"] == variant
+                    ]
+
+                # The current receipt's own row is already in item_prices;
+                # it must not pull its own baseline up.
+                hist = _history_from_rows(
+                    [r for r in variant_rows if r.get("receipt_id") != receipt_id],
+                    merchant,
                 )
+                if hist is None and not variant_rows:
+                    hist = get_historical_average(
+                        supabase_client,
+                        canonical,
+                        merchant=merchant,
+                        exclude_receipt_id=receipt_id,
+                    )
                 if hist is None:
                     continue
 
@@ -203,6 +260,13 @@ def detect_spikes(
 
                 if current > _SPIKE_THRESHOLD * avg:
                     percent_increase = ((current - avg) / avg) * 100.0
+                    # Includes today's row on purpose: the block should show
+                    # this shop's new price beside everyone else's.
+                    shop_prices = (
+                        summarise_shops(variant_rows)
+                        if include_shop_prices and summarise_shops
+                        else []
+                    )
                     spikes.append({
                         "canonical_item": canonical,
                         "raw_item_name": rec.get("raw_item_name") or "",
@@ -214,11 +278,8 @@ def detect_spikes(
                         "scope": hist["scope"],
                         "percent_increase": percent_increase,
                         "merchant": merchant or "",
-                        "shop_prices": (
-                            _shop_prices_for(supabase_client, canonical)
-                            if include_shop_prices
-                            else []
-                        ),
+                        "shop_prices": shop_prices,
+                        "shop_variant": variant if include_shop_prices else "",
                     })
                     seen.add(canonical)
             except Exception:
@@ -251,7 +312,10 @@ def format_spike_message(spike: dict) -> str:
         percent = float(spike["percent_increase"])
         merchant = str(spike.get("merchant") or "").strip()
 
-        title = canonical.title()
+        # Name the cut when we know it: "Paha Ayam — BESTARI FARM" tells the
+        # director what actually moved; a bare "Ayam" does not.
+        variant = str(spike.get("shop_variant") or "").strip()
+        title = variant.title() if variant else canonical.replace("_", " ").title()
         merchant_part = f" — {merchant}" if merchant else ""
         body = (
             "⚠️ Price increase detected\n"
@@ -272,7 +336,10 @@ def format_spike_message(spike: dict) -> str:
                 from shop_price_comparison import format_shop_comparison
 
                 comparison = format_shop_comparison(
-                    canonical, shop_prices, current_shop=merchant
+                    canonical,
+                    shop_prices,
+                    current_shop=merchant,
+                    variant=spike.get("shop_variant") or None,
                 )
             except Exception:
                 logger.exception(

@@ -39,6 +39,7 @@ class FakeQuery:
         self._eq: dict = {}
         self._neq: dict = {}
         self._gte: dict = {}
+        self._in: dict = {}
         self._order: tuple | None = None
         self._range: tuple | None = None
 
@@ -55,6 +56,10 @@ class FakeQuery:
 
     def gte(self, col, val):
         self._gte[col] = val
+        return self
+
+    def in_(self, col, vals):
+        self._in[col] = set(vals)
         return self
 
     def order(self, col, desc=False):
@@ -79,6 +84,8 @@ class FakeQuery:
                 row.get(k) is not None and row.get(k) >= v
                 for k, v in self._gte.items()
             ):
+                continue
+            if not all(row.get(k) in vals for k, vals in self._in.items()):
                 continue
             out.append(row)
         if self._order is not None:
@@ -401,7 +408,7 @@ class SpikeShopComparison(unittest.TestCase):
     """The alert must answer 'who else sells it, and for how much?' —
     for every item, not just the ones we happen to watch."""
 
-    def _seed_dated(self, client, canonical, merchant, prices, start_id):
+    def _seed_dated(self, client, canonical, merchant, prices, start_id, item=None):
         today = date.today()
         client.add_rows("item_prices", [
             {
@@ -410,6 +417,7 @@ class SpikeShopComparison(unittest.TestCase):
                 "unit_price": p,
                 "receipt_id": start_id + i,
                 "receipt_date": (today - timedelta(days=len(prices) - i)).isoformat(),
+                "raw_item_name": item or canonical,
             }
             for i, p in enumerate(prices)
         ])
@@ -429,6 +437,62 @@ class SpikeShopComparison(unittest.TestCase):
         self.assertAlmostEqual(shops[0]["latest_price"], 8.0)
         self.assertEqual(shops[1]["sample_count"], 5)
 
+    def test_comparison_is_scoped_to_the_same_cut(self):
+        # A leg-quarter spike must not be compared against whole birds.
+        client = FakeSupabaseClient()
+        self._seed_dated(client, "ayam", "BESTARI", [7.0] * 5, 1, item="PAHA AYAM 10KG")
+        self._seed_dated(client, "ayam", "SEGAR MART", [8.0] * 3, 20, item="PAHA AYAM")
+        self._seed_dated(client, "ayam", "BORONG CO", [25.0] * 3, 40, item="AYAM BERSIH 30KG")
+        records = [{
+            "canonical_item": "ayam", "raw_item_name": "PAHA AYAM 5KG",
+            "qty": 1, "unit_price": 9.0, "line_total": 9.0,
+        }]
+        spikes = detect_spikes(client, records, receipt_id=999, merchant="BESTARI")
+        self.assertEqual(len(spikes), 1)
+        self.assertEqual(spikes[0]["shop_variant"], "PAHA AYAM")
+        shops = spikes[0]["shop_prices"]
+        self.assertEqual([s["shop"] for s in shops], ["BESTARI", "SEGAR MART"])
+        msg = format_spike_message(spikes[0])
+        self.assertIn("🏪 Paha Ayam — price at all shops", msg)
+        self.assertNotIn("BORONG CO", msg)
+
+    def test_baseline_ignores_other_cuts(self):
+        # A leg-quarter price must be judged against leg quarters only —
+        # averaging in whole birds would hide (or invent) the increase.
+        client = FakeSupabaseClient()
+        self._seed_dated(
+            client, "ayam", "BESTARI", [7.70, 7.80, 7.90, 7.80, 7.85], 1,
+            item="PAHA AYAM 10KG",
+        )
+        self._seed_dated(
+            client, "ayam", "BESTARI", [15.0] * 6, 20, item="AYAM BERSIH 30KG"
+        )
+        records = [{
+            "canonical_item": "ayam", "raw_item_name": "PAHA AYAM 5KG",
+            "qty": 1, "unit_price": 9.60, "line_total": 9.60,
+        }]
+        spikes = detect_spikes(client, records, receipt_id=999, merchant="BESTARI")
+        self.assertEqual(len(spikes), 1)
+        self.assertAlmostEqual(spikes[0]["historical_avg"], 7.81, places=2)
+        self.assertEqual(spikes[0]["sample_count"], 5)
+        self.assertIn("Paha Ayam — BESTARI", format_spike_message(spikes[0]))
+
+    def test_internal_transfers_do_not_move_the_baseline(self):
+        client = FakeSupabaseClient()
+        self._seed_dated(client, "ayam", "BESTARI", [10.0] * 5, 1)
+        # RM1.70 internal-transfer lines would drag the global average down
+        # far enough to make an ordinary RM11 receipt look like a spike.
+        self._seed_dated(
+            client, "ayam", "RESTORAN KHULAFA SDN. BHD.", [1.70] * 20, 40
+        )
+        records = [{
+            "canonical_item": "ayam", "raw_item_name": "Ayam",
+            "qty": 1, "unit_price": 10.5, "line_total": 10.5,
+        }]
+        self.assertEqual(
+            detect_spikes(client, records, receipt_id=999, merchant="BESTARI"), []
+        )
+
     def test_shop_prices_can_be_disabled(self):
         client = FakeSupabaseClient()
         self._seed_dated(client, "ayam", "BESTARI", [10.0] * 5, 1)
@@ -442,6 +506,19 @@ class SpikeShopComparison(unittest.TestCase):
         )
         self.assertEqual(spikes[0]["shop_prices"], [])
 
+    def test_own_outlet_transfers_never_reach_the_alert(self):
+        client = FakeSupabaseClient()
+        self._seed_dated(client, "ayam", "BESTARI", [10.0] * 5, 1)
+        self._seed_dated(client, "ayam", "RESTORAN KHULAFA SDN. BHD.", [1.70], 30)
+        records = [{
+            "canonical_item": "ayam", "raw_item_name": "Ayam",
+            "qty": 1, "unit_price": 13.0, "line_total": 13.0,
+        }]
+        spikes = detect_spikes(client, records, receipt_id=999, merchant="BESTARI")
+        self.assertEqual(
+            [s["shop"] for s in spikes[0]["shop_prices"]], ["BESTARI"]
+        )
+
     def test_works_for_any_item_not_just_ayam(self):
         client = FakeSupabaseClient()
         self._seed_dated(client, "minyak masak", "KEDAI A", [30.0] * 5, 1)
@@ -453,7 +530,7 @@ class SpikeShopComparison(unittest.TestCase):
         spikes = detect_spikes(client, records, receipt_id=999, merchant="KEDAI A")
         self.assertEqual(len(spikes), 1)
         msg = format_spike_message(spikes[0])
-        self.assertIn("Price at all shops — Minyak Masak", msg)
+        self.assertIn("🏪 Minyak Masak — price at all shops", msg)
         self.assertIn("KEDAI B", msg)
         self.assertIn("Did you ask supplier?", msg)
 
