@@ -64,7 +64,17 @@ _ID_CHUNK = 200
 
 # Only real purchases are shop prices. Internal transfers, staff advances
 # and petty cash all land in item_prices too.
+#
+# Filter by what a receipt IS NOT, never by what it is: receipts.receipt_type
+# defaults to 'UNKNOWN' and the classifier only ever tagged a slice of the
+# table, so requiring 'SUPPLIER_PURCHASE' silently deleted every supplier
+# whose receipts predate classification — which is how a nine-shop report
+# collapsed to one.
 SUPPLIER_RECEIPT_TYPE = "SUPPLIER_PURCHASE"
+_NON_SHOP_RECEIPT_TYPES = frozenset({
+    "INTERNAL_TRANSFER", "STAFF_ADVANCE", "UTILITY", "RENT_LICENSE",
+    "PETTY_CASH",
+})
 _NON_SHOP_CATEGORIES = frozenset({
     "internal_transfer", "staff_advance", "petty_cash", "utility",
     "rent_license",
@@ -352,16 +362,42 @@ def load_price_rows(
 ) -> list[dict]:
     """Cleaned, comparable price rows for one canonical item.
 
-    Applies every filter the raw table needs: supplier receipts only, no
+    Applies every filter the raw table needs: no non-supplier receipts, no
     own-outlet transfers, no future-dated rows, merchant names collapsed
     onto their canonical shop, and each line tagged with its item variant.
 
     Each row: ``{'shop', 'shop_key', 'variant', 'unit_price',
     'receipt_date', 'receipt_id'}``. Never raises.
     """
+    return load_price_rows_with_stats(
+        supabase_client,
+        canonical_item,
+        lookback_days=lookback_days,
+        exclude_receipt_id=exclude_receipt_id,
+        today=today,
+    )[0]
+
+
+def load_price_rows_with_stats(
+    supabase_client,
+    canonical_item,
+    lookback_days: int | None = DEFAULT_LOOKBACK_DAYS,
+    exclude_receipt_id=None,
+    today: date | None = None,
+) -> tuple[list[dict], dict]:
+    """``load_price_rows`` plus a tally of what was dropped and why.
+
+    The stats exist so a thin-looking report can explain itself instead of
+    leaving the reader guessing whether a supplier is missing or simply
+    hasn't sold anything lately.
+    """
+    stats = {
+        "fetched": 0, "kept": 0, "bad_price": 0, "bad_date": 0,
+        "non_supplier_receipt": 0, "non_shop_merchant": 0, "own_outlet": 0,
+    }
     try:
         if not isinstance(canonical_item, str) or not canonical_item.strip():
-            return []
+            return [], stats
         canon = canonical_item.strip()
         base_today = today or date.today()
         cutoff = _cutoff_iso(lookback_days, base_today)
@@ -370,8 +406,9 @@ def load_price_rows(
         raw_rows = _fetch_price_rows(
             supabase_client, canon, cutoff, exclude_receipt_id
         )
+        stats["fetched"] = len(raw_rows)
         if not raw_rows:
-            return []
+            return [], stats
 
         dated: list[dict] = []
         for row in raw_rows:
@@ -379,19 +416,21 @@ def load_price_rows(
                 continue
             price = _to_float(row.get("unit_price"))
             if price is None or price <= 0:
+                stats["bad_price"] += 1
                 continue
             when = _iso(row.get("receipt_date"))
             # Corrupt future dates ("last 26 Dec" on a receipt logged in
             # August) are stale OCR, not a price. Re-check the cutoff here
             # too: the fallback query path may not have filtered it.
             if not when or when > today_iso:
+                stats["bad_date"] += 1
                 continue
             if cutoff and when < cutoff:
                 continue
             dated.append((row, price, when))
 
         if not dated:
-            return []
+            return [], stats
 
         meta = _receipt_meta(supabase_client, [r.get("receipt_id") for r, _, _ in dated])
         canonicals = _merchant_canonicals(supabase_client)
@@ -401,10 +440,12 @@ def load_price_rows(
         for row, price, when in dated:
             receipt = meta.get(row.get("receipt_id")) or {}
 
-            # Real purchases only. An unknown type (receipt not found) is
-            # kept — better a slightly noisy comparison than an empty one.
-            receipt_type = receipt.get("receipt_type")
-            if receipt_type and receipt_type != SUPPLIER_RECEIPT_TYPE:
+            # Drop what is provably not a purchase. 'UNKNOWN' (the column
+            # default) and a missing receipt both mean "not classified",
+            # which is not evidence against the row.
+            receipt_type = (receipt.get("receipt_type") or "").strip().upper()
+            if receipt_type in _NON_SHOP_RECEIPT_TYPES:
+                stats["non_supplier_receipt"] += 1
                 continue
 
             raw_merchant = row.get("merchant")
@@ -416,6 +457,7 @@ def load_price_rows(
             if canonical_row:
                 category = (canonical_row.get("category") or "").strip().lower()
                 if category in _NON_SHOP_CATEGORIES:
+                    stats["non_shop_merchant"] += 1
                     continue
                 shop = (canonical_row.get("display_name") or "").strip()
             else:
@@ -429,6 +471,7 @@ def load_price_rows(
                 raw = raw_merchant.strip() if isinstance(raw_merchant, str) else ""
                 shop = shop_display(raw) or raw
             if _is_own_outlet(shop):
+                stats["own_outlet"] += 1
                 continue
             if not shop:
                 shop = _UNKNOWN_SHOP
@@ -441,10 +484,11 @@ def load_price_rows(
                 "receipt_date": when,
                 "receipt_id": row.get("receipt_id"),
             })
-        return out
+        stats["kept"] = len(out)
+        return out, stats
     except Exception:
         logger.exception("load_price_rows: unexpected failure")
-        return []
+        return [], stats
 
 
 def summarise_shops(rows: list[dict]) -> list[dict]:
@@ -548,14 +592,19 @@ def get_variant_prices(
     canonical_item,
     lookback_days: int | None = DEFAULT_LOOKBACK_DAYS,
     today: date | None = None,
+    rows: list[dict] | None = None,
 ) -> list[dict]:
     """Per-cut breakdown: ``[{'variant', 'shops', 'sample_count',
     'latest_date'}]``, most recently bought cut first. Never raises.
+
+    Pass ``rows`` to reuse an already-loaded set instead of re-querying.
     """
     try:
-        rows = load_price_rows(
-            supabase_client, canonical_item, lookback_days=lookback_days, today=today
-        )
+        if rows is None:
+            rows = load_price_rows(
+                supabase_client, canonical_item, lookback_days=lookback_days,
+                today=today,
+            )
         grouped: dict[str, list[dict]] = {}
         for row in rows:
             grouped.setdefault(row["variant"], []).append(row)
@@ -796,6 +845,26 @@ def pick_variant(query: Any, variants: list[dict]) -> str | None:
         return None
 
 
+def _count_shops(variants: list[dict]) -> int:
+    return len({s["shop"] for v in variants for s in v.get("shops", [])})
+
+
+def _format_stats(stats: dict, lookback_days: int | None) -> list[str]:
+    return [
+        "",
+        "🔍 Why rows were left out "
+        f"(window: {int(lookback_days) if lookback_days else 'all'} days)",
+        f"  read from item_prices: {stats.get('fetched', 0)}",
+        f"  kept: {stats.get('kept', 0)}",
+        f"  non-supplier receipt (transfer/advance/utility): "
+        f"{stats.get('non_supplier_receipt', 0)}",
+        f"  own outlet / non-shop merchant: "
+        f"{stats.get('own_outlet', 0) + stats.get('non_shop_merchant', 0)}",
+        f"  bad date (future/missing): {stats.get('bad_date', 0)}",
+        f"  bad price (zero/negative): {stats.get('bad_price', 0)}",
+    ]
+
+
 def build_shop_price_report(
     supabase_client,
     query,
@@ -803,18 +872,27 @@ def build_shop_price_report(
     max_shops: int = 5,
     max_variants: int = DEFAULT_MAX_VARIANTS,
     today: date | None = None,
+    debug: bool = False,
 ) -> str:
     """Full text reply for ``/shop_prices <item>``.
 
     One short block per cut (whole, leg, …) with each supplier's last
-    price, cheapest first — never one lump of unrelated lines. Blocking
-    (Supabase I/O), so call it from a worker thread. Always returns a
-    user-facing string; never raises.
+    price, cheapest first — never one lump of unrelated lines. When the
+    default window turns up fewer than two shops the search widens to a
+    year rather than reporting a comparison of one. Blocking (Supabase
+    I/O), so call it from a worker thread. Always returns a user-facing
+    string; never raises.
     """
     try:
         raw = (query or "").strip() if isinstance(query, str) else ""
         if not raw:
             return "Usage: /shop_prices <item>\nExample: /shop_prices ayam"
+
+        # Trailing "debug" / "why" asks for the drop breakdown.
+        parts = raw.split()
+        if len(parts) > 1 and parts[-1].lower() in ("debug", "why"):
+            debug = True
+            raw = " ".join(parts[:-1])
 
         resolved = resolve_item_query(raw)
         canonical = resolved.get("canonical")
@@ -832,15 +910,43 @@ def build_shop_price_report(
                 "/shop_prices ayam"
             )
 
-        variants = get_variant_prices(
-            supabase_client, canonical, lookback_days=lookback_days, today=today
+        window_days = lookback_days
+        rows, stats = load_price_rows_with_stats(
+            supabase_client, canonical, lookback_days=window_days, today=today
         )
-        title = _display_name(canonical)
-        window = _window_label(lookback_days)
-        if not variants:
-            return f"No supplier prices for {title}{window}."
+        variants = get_variant_prices(supabase_client, canonical, rows=rows)
 
-        asked = pick_variant(raw, variants)
+        # A one-shop "comparison" is not a comparison. Before giving up,
+        # look back a year — a supplier we last bought from in March is
+        # still a supplier worth calling.
+        widened = False
+        if (
+            window_days
+            and int(window_days) < 365
+            and _count_shops(variants) < 2
+        ):
+            wide_rows, wide_stats = load_price_rows_with_stats(
+                supabase_client, canonical, lookback_days=365, today=today
+            )
+            if _count_shops(
+                get_variant_prices(supabase_client, canonical, rows=wide_rows)
+            ) > _count_shops(variants):
+                window_days, rows, stats, widened = 365, wide_rows, wide_stats, True
+                variants = get_variant_prices(supabase_client, canonical, rows=rows)
+
+        title = _display_name(canonical)
+        window = _window_label(window_days)
+        if not variants:
+            out = f"No supplier prices for {title}{window}."
+            if debug or stats.get("fetched"):
+                out += "\n" + "\n".join(_format_stats(stats, window_days)).lstrip("\n")
+            return out
+
+        # Only narrow when the director named a CUT. Asking for "ayam"
+        # must not collapse onto the cut that happens to be called "AYAM"
+        # and hide "AYAM SEJUK BEKU" behind it.
+        item_names = {_normalise(canonical), _normalise(title)}
+        asked = None if _normalise(raw) in item_names else pick_variant(raw, variants)
         if asked:
             variants = [v for v in variants if v["variant"] == asked]
 
@@ -866,6 +972,21 @@ def build_shop_price_report(
                 f"… +{len(hidden)} more type(s): "
                 + ", ".join(str(v["variant"]).title() for v in hidden[:5])
             )
+
+        if widened:
+            lines.append("")
+            lines.append(
+                f"(Only one shop in the last {int(lookback_days)} days — "
+                "widened to a year.)"
+            )
+        if _count_shops(variants) < 2:
+            lines.append("")
+            lines.append(
+                "Only one supplier has priced this item. "
+                f"Run /shop_prices {raw} debug to see what was filtered out."
+            )
+        if debug:
+            lines.extend(_format_stats(stats, window_days))
         return "\n".join(lines)
     except Exception:
         logger.exception("build_shop_price_report: unexpected failure")

@@ -27,6 +27,7 @@ from shop_price_comparison import (  # noqa: E402
     get_variant_prices,
     item_variant,
     load_price_rows,
+    load_price_rows_with_stats,
     pick_variant,
     resolve_item_query,
     shop_display,
@@ -126,6 +127,28 @@ class LoadPriceRows(unittest.TestCase):
         )
         rows = load_price_rows(client, "ayam", today=TODAY)
         self.assertEqual([r["shop"] for r in rows], ["BESTARI FARM"])
+
+    def test_unclassified_receipts_are_kept(self):
+        # receipts.receipt_type defaults to 'UNKNOWN' and only a slice of
+        # the table was ever classified. Requiring SUPPLIER_PURCHASE
+        # deleted every supplier whose receipts predate classification.
+        client = _client(
+            [
+                _row("ayam", "AYAM BERLIAN", 11.20, 10),
+                _row("ayam", "BALAJI ENTERPRISE", 12.50, 11),
+                _row("ayam", "BESTARI FARM", 13.00, 12),
+            ],
+            receipts=[
+                {"id": 10, "receipt_type": "UNKNOWN"},
+                {"id": 11, "receipt_type": ""},
+                {"id": 12, "receipt_type": "SUPPLIER_PURCHASE"},
+            ],
+        )
+        rows = load_price_rows(client, "ayam", today=TODAY)
+        self.assertEqual(
+            sorted(r["shop"] for r in rows),
+            ["AYAM BERLIAN", "BALAJI ENTERPRISE", "BESTARI FARM"],
+        )
 
     def test_non_supplier_merchant_category_dropped(self):
         client = _client(
@@ -473,6 +496,17 @@ class BuildShopPriceReport(unittest.TestCase):
         self.assertIn("Ayam Bersih", out)
         self.assertIn("🥇 BESTARI FARM — RM15.20", out)
 
+    def test_plain_item_query_does_not_collapse_onto_one_cut(self):
+        # "ayam" must not narrow to the cut that happens to be called AYAM.
+        client = _client([
+            _row("ayam", "BESTARI FARM", 13.00, 1, item="AYAM 30KG"),
+            _row("ayam", "BALAJI ENTERPRISE", 20.50, 2, item="AYAM SEJUK BEKU"),
+        ])
+        out = build_shop_price_report(client, "ayam", today=TODAY)
+        self.assertIn("Ayam Sejuk Beku", out)
+        self.assertIn("BALAJI ENTERPRISE", out)
+        self.assertIn("BESTARI FARM", out)
+
     def test_query_can_name_one_cut(self):
         client = _client([
             _row("ayam", "BESTARI FARM", 7.80, 1, item="PAHA AYAM 10KG"),
@@ -500,6 +534,37 @@ class BuildShopPriceReport(unittest.TestCase):
         ])
         out = build_shop_price_report(client, "ayam", max_variants=2, today=TODAY)
         self.assertIn("… +5 more type(s):", out)
+
+    def test_window_widens_rather_than_reporting_one_shop(self):
+        client = _client([
+            _row("ayam", "BESTARI FARM", 13.00, 1, days_ago=2),
+            _row("ayam", "AYAM BERLIAN", 11.20, 2, days_ago=200),
+        ])
+        out = build_shop_price_report(client, "ayam", today=TODAY)
+        self.assertIn("AYAM BERLIAN", out)
+        self.assertIn("last 365 days", out)
+        self.assertIn("widened to a year", out)
+
+    def test_lone_supplier_says_so_and_points_at_debug(self):
+        client = _client([_row("ayam", "BESTARI FARM", 13.00, 1)])
+        out = build_shop_price_report(client, "ayam", today=TODAY)
+        self.assertIn("Only one supplier has priced this item", out)
+        self.assertIn("/shop_prices ayam debug", out)
+
+    def test_debug_keyword_explains_the_filtering(self):
+        client = _client(
+            [
+                _row("ayam", "BESTARI FARM", 13.00, 1),
+                _row("ayam", "SOME OUTLET", 2.30, 2),
+                _row("ayam", "PHANTOM", 9.0, 3, days_ago=-30),
+            ],
+            receipts=[{"id": 2, "receipt_type": "INTERNAL_TRANSFER"}],
+        )
+        out = build_shop_price_report(client, "ayam debug", today=TODAY)
+        self.assertIn("🔍 Why rows were left out", out)
+        self.assertIn("non-supplier receipt (transfer/advance/utility): 1", out)
+        self.assertIn("bad date (future/missing): 1", out)
+        self.assertIn("kept: 1", out)
 
     def test_item_with_no_history(self):
         client = _client([_row("ayam", "KEDAI A", 8.0, 1)])

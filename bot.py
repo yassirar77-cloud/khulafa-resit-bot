@@ -3689,7 +3689,9 @@ async def shop_prices_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not query:
         await message.reply_text(
             "Usage: /shop_prices <item>\n"
-            "Example: /shop_prices ayam — shows every shop's price for that item."
+            "Example: /shop_prices ayam — every shop's price, grouped by cut.\n"
+            "Add a cut to narrow it (/shop_prices paha ayam), or 'debug' to see "
+            "what was filtered out."
         )
         return
 
