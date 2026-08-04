@@ -13,6 +13,7 @@ Run with::
 import os
 import sys
 import unittest
+from datetime import date, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -29,13 +30,17 @@ class FakeResult:
 
 
 class FakeQuery:
-    """Stand-in for ``.table(...).select(...).eq(...).neq(...).execute()``."""
+    """Stand-in for the fluent subset both the spike query and the
+    cross-shop comparison query use: ``select/eq/neq/gte/order/range``."""
 
     def __init__(self, parent, table_name):
         self.parent = parent
         self.table_name = table_name
         self._eq: dict = {}
         self._neq: dict = {}
+        self._gte: dict = {}
+        self._order: tuple | None = None
+        self._range: tuple | None = None
 
     def select(self, *_cols):
         return self
@@ -48,6 +53,18 @@ class FakeQuery:
         self._neq[col] = val
         return self
 
+    def gte(self, col, val):
+        self._gte[col] = val
+        return self
+
+    def order(self, col, desc=False):
+        self._order = (col, desc)
+        return self
+
+    def range(self, start, end):
+        self._range = (start, end)
+        return self
+
     def execute(self):
         if self.parent.raise_on_execute is not None:
             raise self.parent.raise_on_execute
@@ -58,7 +75,20 @@ class FakeQuery:
                 continue
             if not all(row.get(k) != v for k, v in self._neq.items()):
                 continue
+            if not all(
+                row.get(k) is not None and row.get(k) >= v
+                for k, v in self._gte.items()
+            ):
+                continue
             out.append(row)
+        if self._order is not None:
+            col, desc = self._order
+            out = sorted(
+                out, key=lambda r: (r.get(col) is None, r.get(col)), reverse=desc
+            )
+        if self._range is not None:
+            start, end = self._range
+            out = out[start:end + 1]
         return FakeResult(out)
 
 
@@ -365,6 +395,67 @@ class DetectSpikes(unittest.TestCase):
             detect_spikes(client, records, receipt_id=999, merchant="BESTARI"),
             [],
         )
+
+
+class SpikeShopComparison(unittest.TestCase):
+    """The alert must answer 'who else sells it, and for how much?' —
+    for every item, not just the ones we happen to watch."""
+
+    def _seed_dated(self, client, canonical, merchant, prices, start_id):
+        today = date.today()
+        client.add_rows("item_prices", [
+            {
+                "canonical_item": canonical,
+                "merchant": merchant,
+                "unit_price": p,
+                "receipt_id": start_id + i,
+                "receipt_date": (today - timedelta(days=len(prices) - i)).isoformat(),
+            }
+            for i, p in enumerate(prices)
+        ])
+
+    def test_spike_carries_per_shop_prices(self):
+        client = FakeSupabaseClient()
+        self._seed_dated(client, "ayam", "BESTARI", [10.0] * 5, 1)
+        self._seed_dated(client, "ayam", "SEGAR MART", [8.0] * 3, 20)
+        records = [{
+            "canonical_item": "ayam", "raw_item_name": "Ayam",
+            "qty": 1, "unit_price": 13.0, "line_total": 13.0,
+        }]
+        spikes = detect_spikes(client, records, receipt_id=999, merchant="BESTARI")
+        self.assertEqual(len(spikes), 1)
+        shops = spikes[0]["shop_prices"]
+        self.assertEqual([s["shop"] for s in shops], ["SEGAR MART", "BESTARI"])
+        self.assertAlmostEqual(shops[0]["latest_price"], 8.0)
+        self.assertEqual(shops[1]["sample_count"], 5)
+
+    def test_shop_prices_can_be_disabled(self):
+        client = FakeSupabaseClient()
+        self._seed_dated(client, "ayam", "BESTARI", [10.0] * 5, 1)
+        records = [{
+            "canonical_item": "ayam", "raw_item_name": "Ayam",
+            "qty": 1, "unit_price": 13.0, "line_total": 13.0,
+        }]
+        spikes = detect_spikes(
+            client, records, receipt_id=999, merchant="BESTARI",
+            include_shop_prices=False,
+        )
+        self.assertEqual(spikes[0]["shop_prices"], [])
+
+    def test_works_for_any_item_not_just_ayam(self):
+        client = FakeSupabaseClient()
+        self._seed_dated(client, "minyak masak", "KEDAI A", [30.0] * 5, 1)
+        self._seed_dated(client, "minyak masak", "KEDAI B", [26.0] * 2, 30)
+        records = [{
+            "canonical_item": "minyak masak", "raw_item_name": "Minyak Masak 5KG",
+            "qty": 1, "unit_price": 40.0, "line_total": 40.0,
+        }]
+        spikes = detect_spikes(client, records, receipt_id=999, merchant="KEDAI A")
+        self.assertEqual(len(spikes), 1)
+        msg = format_spike_message(spikes[0])
+        self.assertIn("Price at all shops — Minyak Masak", msg)
+        self.assertIn("KEDAI B", msg)
+        self.assertIn("Did you ask supplier?", msg)
 
 
 class FormatSpikeMessage(unittest.TestCase):

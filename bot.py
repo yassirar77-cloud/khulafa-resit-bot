@@ -104,6 +104,7 @@ import manager_registration
 import order_generator
 import reconciliation_service
 import sales_analytics
+import shop_price_comparison
 import weekly_manager_reports as wmr
 from digest_data import gather_digest_data, log_digest
 from sales_ingest import run_ingest_once
@@ -1946,6 +1947,8 @@ HELP_TEXT = (
     "/start — short greeting\n"
     "/summary — today's spending grouped by merchant\n"
     "/compare <item> — compare an item's unit price across outlets\n"
+    "/shop_prices <item> — every shop's price for that item, cheapest first\n"
+    "   (aliases: /all_prices, /harga — works for any item, e.g. ayam, telur, minyak)\n"
     "/advances — list outstanding staff advances (PAYOUT / PINJAM)\n"
     "/advances <staff> — history for one staff member\n"
     "/advances <outlet> — open advances at one outlet\n"
@@ -3666,6 +3669,41 @@ async def price_history_command(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 
+async def shop_prices_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/shop_prices <item>`` — every shop's price for ANY item.
+
+    The same comparison that rides along with a price-spike alert, on
+    demand: latest price per supplier, cheapest first, so the director can
+    check any item without waiting for it to spike. Answers in the alert
+    group (where the alerts land) and to reviewers anywhere; supplier
+    pricing isn't for arbitrary outlet groups.
+    """
+    message = update.effective_message
+    if not message:
+        return
+    in_alert_chat = message.chat_id == ALERT_CHAT_ID
+    if not in_alert_chat and not is_reviewer(_command_owner_id(update)):
+        return
+
+    query = " ".join(context.args or []).strip()
+    if not query:
+        await message.reply_text(
+            "Usage: /shop_prices <item>\n"
+            "Example: /shop_prices ayam — shows every shop's price for that item."
+        )
+        return
+
+    try:
+        text = await asyncio.to_thread(
+            shop_price_comparison.build_shop_price_report, supabase, query
+        )
+    except Exception:
+        logger.exception("shop_prices failed (query=%r)", query)
+        await message.reply_text("Failed to read item prices.")
+        return
+    await message.reply_text(text)
+
+
 # === PR #34: daily digest preview (owner-only) ===============================
 
 async def test_digest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4795,6 +4833,10 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("top_items", top_items_command))
     app.add_handler(CommandHandler("top_suppliers", top_suppliers_command))
     app.add_handler(CommandHandler("price_history", price_history_command))
+    app.add_handler(CommandHandler("shop_prices", shop_prices_command))
+    # Aliases: same report, whichever wording comes to mind first.
+    app.add_handler(CommandHandler("all_prices", shop_prices_command))
+    app.add_handler(CommandHandler("harga", shop_prices_command))
     app.add_handler(CommandHandler("test_digest", test_digest_command))
     app.add_handler(CommandHandler("sales_today", sales_today_command))
     app.add_handler(CommandHandler("sales_yesterday", sales_yesterday_command))

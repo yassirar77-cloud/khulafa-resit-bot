@@ -11,6 +11,13 @@ prior samples exist for the chosen scope), a spike record is emitted;
 ``bot.py`` formats it via ``format_spike_message`` and sends it to the
 manager group.
 
+Every spike also carries a cross-shop price comparison (see
+``shop_price_comparison``): for the SAME item, what every other shop
+charged recently, cheapest first. The director's next question after
+"the price went up" is always "who else sells it cheaper?", so the alert
+answers both at once. This applies to every item with price history, not
+just the ones that happen to be watched closely.
+
 Hard rules:
 - Minimum 5 historical samples per scope before any alert fires.
 - Strict ``>`` 110% threshold (exactly 110% does not trigger).
@@ -128,11 +135,32 @@ def get_historical_average(
         return None
 
 
+def _shop_prices_for(supabase_client, canonical_item: str) -> list[dict]:
+    """Per-shop price summary for the alert block. Never raises.
+
+    Deliberately does NOT exclude the current receipt: its row is already
+    in ``item_prices`` by the time detection runs, and the whole point of
+    the block is to show today's price alongside what the other shops
+    charge.
+    """
+    try:
+        from shop_price_comparison import get_shop_prices
+
+        return get_shop_prices(supabase_client, canonical_item)
+    except Exception:
+        logger.exception(
+            "detect_spikes: shop comparison failed (canonical=%s)",
+            canonical_item,
+        )
+        return []
+
+
 def detect_spikes(
     supabase_client,
     price_records: list[dict],
     receipt_id,
     merchant,
+    include_shop_prices: bool = True,
 ) -> list[dict]:
     """Return one spike dict per item whose current ``unit_price``
     exceeds the historical average by ``_SPIKE_THRESHOLD``.
@@ -186,6 +214,11 @@ def detect_spikes(
                         "scope": hist["scope"],
                         "percent_increase": percent_increase,
                         "merchant": merchant or "",
+                        "shop_prices": (
+                            _shop_prices_for(supabase_client, canonical)
+                            if include_shop_prices
+                            else []
+                        ),
                     })
                     seen.add(canonical)
             except Exception:
@@ -220,16 +253,36 @@ def format_spike_message(spike: dict) -> str:
 
         title = canonical.title()
         merchant_part = f" — {merchant}" if merchant else ""
-        return (
+        body = (
             "⚠️ Price increase detected\n"
             "\n"
             f"{title}{merchant_part}\n"
             f"Previous average: RM{avg:.2f} (from {n} receipts, {scope} scope)\n"
             f"Range: RM{min_p:.2f} - RM{max_p:.2f}\n"
             f"Today: RM{current:.2f} (+{percent:.1f}%)\n"
-            "\n"
-            "Did you ask supplier?"
         )
+
+        # Cross-shop block. Absent/empty ``shop_prices`` (or a single shop,
+        # where there is nothing to compare) leaves the alert exactly as it
+        # was before this feature.
+        comparison = ""
+        shop_prices = spike.get("shop_prices")
+        if shop_prices:
+            try:
+                from shop_price_comparison import format_shop_comparison
+
+                comparison = format_shop_comparison(
+                    canonical, shop_prices, current_shop=merchant
+                )
+            except Exception:
+                logger.exception(
+                    "format_spike_message: shop comparison block failed"
+                )
+                comparison = ""
+        if comparison:
+            body += "\n" + comparison + "\n"
+
+        return body + "\nDid you ask supplier?"
     except Exception:
         logger.exception("format_spike_message: failed to format")
         return ""
