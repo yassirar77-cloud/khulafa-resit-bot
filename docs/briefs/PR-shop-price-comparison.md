@@ -32,6 +32,20 @@ RM1.70 to RM54.00. Every entry was wrong for a different reason:
 `load_price_rows` is the filter that fixes all four, and everything else — the
 alert block, the report, and the spike baseline itself — is built on it.
 
+**Filter by what a receipt is NOT.** The first attempt at the fix required
+`receipt_type = 'SUPPLIER_PURCHASE'`, which over-corrected into the opposite
+failure: the column defaults to `'UNKNOWN'` and only a slice of the table was
+ever classified, so every supplier whose receipts predate classification
+disappeared and a nine-shop report became one shop. Only the explicitly
+non-supplier types (`INTERNAL_TRANSFER`, `STAFF_ADVANCE`, `UTILITY`,
+`RENT_LICENSE`, `PETTY_CASH`) are dropped; `UNKNOWN`, blank and "receipt not
+found" all mean *not classified*, which is not evidence against a row.
+
+**When it still looks thin.** A one-shop "comparison" is not a comparison, so
+the report widens the window to a year before giving up, says so when it does,
+and otherwise says plainly that only one supplier has priced the item —
+`/shop_prices <item> debug` then breaks down exactly what was filtered and why.
+
 ## What changed
 
 ### `shop_price_comparison.py` (new)
