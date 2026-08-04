@@ -23,6 +23,7 @@ class _Query:
         self._op = "select"
         self._payload = None
         self._filters: list[tuple[str, object]] = []
+        self._not_filters: list[tuple[str, object]] = []
         self._null_cols: list[str] = []
         self._in_filters: list[tuple[str, set]] = []
         self._range_filters: list[tuple[str, str, object]] = []
@@ -57,6 +58,10 @@ class _Query:
 
     def eq(self, col, val):
         self._filters.append((col, val))
+        return self
+
+    def neq(self, col, val):
+        self._not_filters.append((col, val))
         return self
 
     def is_(self, col, _val):
@@ -101,6 +106,7 @@ class _Query:
     def _matches(self, row):
         return (
             all(row.get(c) == v for c, v in self._filters)
+            and all(row.get(c) != v for c, v in self._not_filters)
             and all(row.get(c) is None for c in self._null_cols)
             and all(row.get(c) in vals for c, vals in self._in_filters)
             and all(self._cmp(row.get(c), op, v) for c, op, v in self._range_filters)
