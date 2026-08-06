@@ -101,6 +101,7 @@ import digest
 import food_cost_analytics
 import kitchen_usage
 import manager_registration
+import monthly_consumption
 import order_generator
 import reconciliation_service
 import sales_analytics
@@ -1961,6 +1962,7 @@ HELP_TEXT = (
     "/food_cost_week — 7-day rolling food cost % per outlet\n"
     "/food_cost_month — month-to-date food cost % per outlet\n"
     "/food_cost_outlet <name> — one outlet's food cost trend\n"
+    "/monthly_kg [YYYY-MM | last] — kg ayam/daging/kambing dll dibeli bulan itu\n"
     "/cash_no_receipt_today — POS cash payouts with no receipt\n"
     "/reconcile_now — re-run today/yesterday reconciliation\n"
     "/reconcile_date YYYY-MM-DD — re-run one historical date\n"
@@ -4179,6 +4181,58 @@ async def food_cost_month_command(update: Update, context: ContextTypes.DEFAULT_
     )
 
 
+async def monthly_kg_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/monthly_kg [YYYY-MM | last]`` — kg of ayam/daging/kambing (and the
+    other tracked proteins) bought in a month, rolled up from analysed
+    receipts. Defaults to the current month-to-date. Answers in the alert
+    group and to reviewers anywhere, same policy as /shop_prices."""
+    message = update.effective_message
+    if not message:
+        return
+    in_alert_chat = message.chat_id == ALERT_CHAT_ID
+    if not in_alert_chat and not is_reviewer(_command_owner_id(update)):
+        return
+    today = _my_today()
+    arg = context.args[0] if context.args else ""
+    parsed = monthly_consumption.parse_month_arg(arg, today)
+    if parsed is None:
+        await message.reply_text(
+            "Usage: /monthly_kg [YYYY-MM | last]\n"
+            "Contoh: /monthly_kg — bulan ini setakat hari ini\n"
+            "        /monthly_kg last — bulan lepas penuh\n"
+            "        /monthly_kg 2026-07 — bulan tertentu"
+        )
+        return
+    year, month = parsed
+    try:
+        text = await asyncio.to_thread(
+            monthly_consumption.build_monthly_report, supabase, year, month, today
+        )
+    except Exception:
+        logger.exception("monthly_kg failed (%s-%s)", year, month)
+        await message.reply_text("Failed to build the monthly kg report.")
+        return
+    await message.reply_text(text)
+
+
+async def post_monthly_kg_report(application: Application) -> None:
+    """1st of the month 09:30 MY job: last month's kg-per-protein report to
+    the alert group. Build failures degrade to a stock message inside
+    build_monthly_report, so this only guards the send itself."""
+    today = _my_today()
+    if today.month == 1:
+        year, month = today.year - 1, 12
+    else:
+        year, month = today.year, today.month - 1
+    text = await asyncio.to_thread(
+        monthly_consumption.build_monthly_report, supabase, year, month, today
+    )
+    try:
+        await application.bot.send_message(chat_id=ALERT_CHAT_ID, text=text)
+    except Exception:
+        logger.exception("monthly kg report: send failed (%s-%s)", year, month)
+
+
 # === PR #67: weekly manager food-cost reports (Phase 1) ======================
 #
 # SAFETY: weekly messages route to the OWNER (prefixed "[TEST — ...]") until
@@ -4849,6 +4903,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("food_cost_today", food_cost_today_command))
     app.add_handler(CommandHandler("food_cost_week", food_cost_week_command))
     app.add_handler(CommandHandler("food_cost_month", food_cost_month_command))
+    app.add_handler(CommandHandler("monthly_kg", monthly_kg_command))
     app.add_handler(CommandHandler("food_cost_outlet", food_cost_outlet_command))
     app.add_handler(CommandHandler("gen_codes", gen_codes_command))
     app.add_handler(CommandHandler("register", register_command))
@@ -4962,6 +5017,19 @@ async def run_bot() -> None:
         minute=0,
         args=[app],
         id="order_drafts",
+        replace_existing=True,
+    )
+    # Monthly kg-per-protein purchase report — 1st of the month 09:30 MY,
+    # covering the month that just ended, to the alert group. On-demand
+    # preview any time via /monthly_kg.
+    scheduler.add_job(
+        post_monthly_kg_report,
+        trigger="cron",
+        day=1,
+        hour=9,
+        minute=30,
+        args=[app],
+        id="monthly_kg_report",
         replace_existing=True,
     )
     # Daily Kitchen Usage Log — same in-process scheduler as the 23:00 digest.
