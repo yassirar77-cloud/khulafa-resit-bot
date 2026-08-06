@@ -18,8 +18,10 @@ from datetime import date, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from price_spike_detection import (  # noqa: E402
+    cheaper_shops,
     detect_spikes,
     format_spike_message,
+    format_spike_message_tamil,
     get_historical_average,
 )
 
@@ -591,6 +593,138 @@ class FormatSpikeMessage(unittest.TestCase):
             )
         except Exception as e:  # pragma: no cover - safety net
             self.fail(f"format_spike_message raised: {e}")
+
+
+class CheaperShops(unittest.TestCase):
+    """The "who is still cheaper" slice the Tamil manager alert names."""
+
+    def _spike(self, **overrides):
+        spike = {
+            "canonical_item": "ayam",
+            "current_price": 13.00,
+            "historical_avg": 10.00,
+            "sample_count": 8,
+            "percent_increase": 30.0,
+            "merchant": "BESTARI FARM",
+            "shop_prices": [
+                {"shop": "SEGAR FARM", "latest_price": 9.50},
+                {"shop": "ANI TRADING", "latest_price": 9.80},
+                {"shop": "BESTARI FARM", "latest_price": 13.00},
+                {"shop": "MAHKOTA", "latest_price": 14.00},
+            ],
+        }
+        spike.update(overrides)
+        return spike
+
+    def test_only_shops_below_todays_price_cheapest_first(self):
+        out = cheaper_shops(self._spike())
+        self.assertEqual(
+            [(s["shop"], s["latest_price"]) for s in out],
+            [("SEGAR FARM", 9.50), ("ANI TRADING", 9.80)],
+        )
+
+    def test_own_shop_never_listed_as_an_alternative(self):
+        # Even when the spike shop's stored latest price is below today's
+        # (today's row not yet in the block), it is not an "other place".
+        out = cheaper_shops(self._spike(current_price=13.50))
+        self.assertNotIn("BESTARI FARM", [s["shop"] for s in out])
+
+    def test_own_shop_matches_across_legal_suffix_variants(self):
+        spike = self._spike(merchant="BESTARI FARM (M) SDN BHD")
+        out = cheaper_shops(spike)
+        self.assertNotIn("BESTARI FARM", [s["shop"] for s in out])
+
+    def test_capped_at_three_shops(self):
+        spike = self._spike(shop_prices=[
+            {"shop": f"SHOP {i}", "latest_price": 5.0 + i} for i in range(6)
+        ])
+        self.assertEqual(len(cheaper_shops(spike)), 3)
+
+    def test_garbage_input_returns_empty_no_raise(self):
+        try:
+            self.assertEqual(cheaper_shops(None), [])
+            self.assertEqual(cheaper_shops({}), [])
+            self.assertEqual(cheaper_shops(self._spike(shop_prices="nope")), [])
+            self.assertEqual(cheaper_shops(self._spike(current_price=None)), [])
+            self.assertEqual(
+                cheaper_shops(self._spike(shop_prices=[{"shop": "X"}, "junk"])),
+                [],
+            )
+        except Exception as e:  # pragma: no cover - safety net
+            self.fail(f"cheaper_shops raised: {e}")
+
+
+class FormatSpikeMessageTamil(unittest.TestCase):
+
+    def _spike(self, **overrides):
+        spike = {
+            "canonical_item": "ayam",
+            "raw_item_name": "Paha Ayam",
+            "current_price": 13.00,
+            "historical_avg": 10.00,
+            "min_price": 8.00,
+            "max_price": 11.50,
+            "sample_count": 8,
+            "scope": "merchant",
+            "percent_increase": 30.0,
+            "merchant": "BESTARI FARM",
+            "shop_variant": "PAHA AYAM",
+            "shop_prices": [
+                {"shop": "SEGAR FARM", "latest_price": 9.50},
+                {"shop": "ANI TRADING", "latest_price": 9.80},
+                {"shop": "BESTARI FARM", "latest_price": 13.00},
+            ],
+        }
+        spike.update(overrides)
+        return spike
+
+    def test_full_message_with_cheaper_shops(self):
+        expected = (
+            "⚠️ விலை ஏறிடுச்சு! Price naik!\n"
+            "\n"
+            "Paha Ayam — BESTARI FARM\n"
+            "முன்னாடி average: RM10.00 (8 resit)\n"
+            "இன்னைக்கு: RM13.00 (+30.0%)\n"
+            "\n"
+            "👉 சப்ளையர்கிட்ட ஏன் விலை ஏறுச்சு-னு கேளுங்க.\n"
+            "\n"
+            "வேற கடையில இன்னும் cheap-ஆ இருக்கு:\n"
+            "• SEGAR FARM: RM9.50\n"
+            "• ANI TRADING: RM9.80\n"
+            "\n"
+            "அங்க rate-அ compare பண்ணி பாருங்க. 🙏"
+        )
+        self.assertEqual(format_spike_message_tamil(self._spike()), expected)
+
+    def test_no_cheaper_shop_says_so_instead_of_listing(self):
+        spike = self._spike(shop_prices=[
+            {"shop": "SEGAR FARM", "latest_price": 13.50},
+            {"shop": "BESTARI FARM", "latest_price": 13.00},
+        ])
+        out = format_spike_message_tamil(spike)
+        self.assertIn("வேற கடையிலயும் இப்போ இதுக்கு cheap-ஆ இல்ல", out)
+        self.assertNotIn("•", out)
+
+    def test_no_comparison_data_omits_shop_section_entirely(self):
+        out = format_spike_message_tamil(self._spike(shop_prices=[]))
+        self.assertIn("சப்ளையர்கிட்ட", out)
+        self.assertNotIn("வேற கடையில", out)
+        self.assertNotIn("cheap-ஆ இல்ல", out)
+
+    def test_falls_back_to_canonical_when_no_variant(self):
+        out = format_spike_message_tamil(self._spike(shop_variant=""))
+        self.assertIn("Ayam — BESTARI FARM", out)
+
+    def test_garbage_input_returns_empty_string_no_raise(self):
+        try:
+            self.assertEqual(format_spike_message_tamil(None), "")
+            self.assertEqual(format_spike_message_tamil("string"), "")
+            self.assertEqual(format_spike_message_tamil({}), "")
+            self.assertEqual(
+                format_spike_message_tamil({"canonical_item": "ayam"}), ""
+            )
+        except Exception as e:  # pragma: no cover - safety net
+            self.fail(f"format_spike_message_tamil raised: {e}")
 
 
 if __name__ == "__main__":
