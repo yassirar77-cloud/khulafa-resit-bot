@@ -25,6 +25,7 @@ from monthly_consumption import (  # noqa: E402
     estimate_line_kg,
     format_monthly_report,
     load_month_rows,
+    load_month_sales,
     month_bounds,
     month_label,
     parse_month_arg,
@@ -178,7 +179,7 @@ class Formatting(unittest.TestCase):
         self.assertIn("Julai 2026", text)
         self.assertIn("🐔 Ayam: 12 kg + 30 ekor — RM700", text)
         self.assertIn("🐐 Kambing: 10 kg — RM190", text)
-        self.assertIn("💰 Jumlah: RM890", text)
+        self.assertIn("💰 Jumlah Belian: RM890", text)
 
     def test_full_month_has_no_clutter(self):
         # The business report is numbers only: no receipt counts, no
@@ -200,6 +201,43 @@ class Formatting(unittest.TestCase):
     def test_empty_month_message(self):
         text = format_monthly_report(2026, 8, {})
         self.assertIn("Tiada rekod belian", text)
+
+    def test_sales_line_shown_when_available(self):
+        totals = aggregate_rows([_row("ayam", "AYAM", 5, 55.0)])
+        text = format_monthly_report(2026, 7, totals, sales_rm=152480.0)
+        self.assertIn("🏪 Jumlah Jualan: RM152,480", text)
+
+    def test_sales_line_omitted_when_no_data(self):
+        # No POS data for the month must OMIT the line, never show RM0.
+        totals = aggregate_rows([_row("ayam", "AYAM", 5, 55.0)])
+        text = format_monthly_report(2026, 7, totals, sales_rm=None)
+        self.assertNotIn("Jualan", text)
+
+
+class LoadMonthSales(unittest.TestCase):
+    def test_sums_shifts_in_window(self):
+        client = FakeSupabase()
+        for row in [
+            {"total_sales": 4758.20, "shift_business_date": "2026-08-02"},
+            {"total_sales": 1000.00, "shift_business_date": "2026-08-02"},
+            {"total_sales": 999.00, "shift_business_date": "2026-07-31"},  # out
+        ]:
+            client.table("sales_daily").insert(row).execute()
+        self.assertAlmostEqual(
+            load_month_sales(client, "2026-08-01", "2026-08-31"), 5758.20
+        )
+
+    def test_none_when_no_rows(self):
+        self.assertIsNone(
+            load_month_sales(FakeSupabase(), "2026-08-01", "2026-08-31")
+        )
+
+    def test_none_on_failure(self):
+        class Exploding:
+            def table(self, _name):
+                raise RuntimeError("boom")
+
+        self.assertIsNone(load_month_sales(Exploding(), "2026-08-01", "2026-08-31"))
 
     def test_build_monthly_report_end_to_end(self):
         client = FakeSupabase()

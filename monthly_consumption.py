@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 _ITEM_PRICES_TABLE = "item_prices"
 _RECEIPTS_TABLE = "receipts"
+_SALES_DAILY_TABLE = "sales_daily"
 
 # PostgREST chokes on very long IN lists; look receipts up in batches.
 _ID_CHUNK = 200
@@ -242,6 +243,48 @@ def load_month_rows(supabase_client, start_iso: str, end_iso: str) -> list[dict]
     ]
 
 
+def load_month_sales(supabase_client, start_iso: str, end_iso: str) -> float | None:
+    """Total POS sales (RM) for the month, from the per-shift ``sales_daily``
+    rows — the same source /sales_today sums, deduped at ingest per
+    (outlet, shift). ``None`` when there is no data or the read fails, so
+    the report can OMIT the line instead of showing a scary RM0.
+    """
+
+    def _build():
+        return (
+            supabase_client.table(_SALES_DAILY_TABLE)
+            .select("total_sales, shift_business_date")
+            .gte("shift_business_date", start_iso)
+            .lte("shift_business_date", end_iso)
+        )
+
+    try:
+        from db_pagination import fetch_all_pages
+
+        rows = fetch_all_pages(lambda: _build().order("id", desc=False))
+    except Exception:
+        try:
+            rows = getattr(_build().execute(), "data", None) or []
+        except Exception:
+            logger.exception(
+                "monthly consumption: sales_daily read failed (%s..%s)",
+                start_iso, end_iso,
+            )
+            return None
+
+    total = 0.0
+    found = False
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        value = _to_float(row.get("total_sales"))
+        if value is None:
+            continue
+        found = True
+        total += value
+    return total if found else None
+
+
 def aggregate_rows(rows: list[dict]) -> dict[str, dict]:
     """``{category: {kg, units, rm, lines}}`` for tracked categories only."""
     totals: dict[str, dict] = {}
@@ -276,6 +319,7 @@ def _fmt_qty(value: float) -> str:
 def format_monthly_report(
     year: int, month: int, totals: dict[str, dict],
     partial_through: date | None = None,
+    sales_rm: float | None = None,
 ) -> str:
     """The Telegram message — numbers only, no explanation.
 
@@ -314,7 +358,9 @@ def format_monthly_report(
             "Tiada rekod belian lagi untuk bulan ini."
         )
 
-    lines += ["", f"💰 Jumlah: RM{grand_rm:,.0f}"]
+    lines += ["", f"💰 Jumlah Belian: RM{grand_rm:,.0f}"]
+    if sales_rm is not None:
+        lines.append(f"🏪 Jumlah Jualan: RM{sales_rm:,.0f}")
     return "\n".join(lines)
 
 
@@ -328,7 +374,10 @@ def build_monthly_report(
         partial = today if (today.year, today.month) == (year, month) else None
         rows = load_month_rows(supabase_client, start_iso, end_iso)
         totals = aggregate_rows(rows)
-        return format_monthly_report(year, month, totals, partial_through=partial)
+        sales_rm = load_month_sales(supabase_client, start_iso, end_iso)
+        return format_monthly_report(
+            year, month, totals, partial_through=partial, sales_rm=sales_rm
+        )
     except Exception:
         logger.exception(
             "monthly consumption: report build failed (%s-%s)", year, month
