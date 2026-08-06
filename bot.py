@@ -101,6 +101,7 @@ import digest
 import food_cost_analytics
 import kitchen_usage
 import manager_registration
+import missing_bills
 import monthly_consumption
 import order_generator
 import reconciliation_service
@@ -2034,7 +2035,11 @@ HELP_TEXT = (
     "/weekly_report_now [recent | YYYY-MM-DD] — preview the weekly report\n"
     "\n"
     "Order drafts:\n"
-    "/order_drafts_now — preview tomorrow's per-outlet order drafts"
+    "/order_drafts_now — preview tomorrow's per-outlet order drafts\n"
+    "\n"
+    "Missing bills:\n"
+    "/missing_bills_now — check which regular suppliers' bills stopped "
+    "being uploaded"
 )
 
 
@@ -4576,6 +4581,95 @@ async def weekly_report_now_command(update: Update, context: ContextTypes.DEFAUL
     )
 
 
+# === Missing supplier-bill watch ============================================
+# Months of receipts define each supplier's upload rhythm per outlet chat.
+# When a regular supplier suddenly goes quiet, the nightly job asks that chat
+# in Tamil + Malay why nothing was uploaded ("BESTARI FARM bill எங்க?") — a
+# forgotten photo is caught within days instead of surfacing as a hole in the
+# monthly numbers. Delivery reuses the weekly-report safety gate: while
+# MANAGER_DELIVERY_ENABLED is False every question routes to the owner with a
+# [TEST] prefix. The owner gets an English summary whenever anything is quiet.
+
+def _gather_missing_bills(today=None) -> dict:
+    rows = missing_bills.load_supplier_bill_rows(supabase, today=today)
+    entries = missing_bills.find_missing_bills(rows, today=today)
+    return {"entries": entries, "enabled": wmr.delivery_enabled()}
+
+
+async def post_missing_bill_checks(application: Application, *,
+                                   notify_chat_id=None) -> None:
+    """Nightly 21:00 MY job (after the day's uploads, before the 23:00
+    digest). Asks each outlet chat about its quiet suppliers, then sends the
+    owner one consolidated summary. ``notify_chat_id`` additionally reports
+    the all-clear for the on-demand command."""
+    try:
+        bundle = await asyncio.to_thread(_gather_missing_bills)
+    except Exception:
+        logger.exception("missing bill check: gather failed")
+        if notify_chat_id is not None:
+            with contextlib.suppress(Exception):
+                await application.bot.send_message(
+                    chat_id=notify_chat_id,
+                    text="Failed to run the missing-bill check.",
+                )
+        return
+
+    entries = bundle["entries"]
+    enabled = bundle["enabled"]
+    sent = 0
+    for entry in entries:
+        # ask_today paces the chasing: overdue day 1, then every 3 days —
+        # the rest of the quiet suppliers still appear in the owner summary.
+        if not entry.get("ask_today"):
+            continue
+        text = missing_bills.format_missing_bill_message(entry)
+        if not text:
+            continue
+        if enabled:
+            target, prefix = entry["chat_id"], ""
+        else:
+            where = entry.get("outlet") or f"chat {entry['chat_id']}"
+            target = ALERT_CHAT_ID
+            prefix = f"[TEST — would go to the {where} group]\n\n"
+        try:
+            await application.bot.send_message(chat_id=target, text=prefix + text)
+            sent += 1
+        except Exception:
+            logger.exception(
+                "missing bill check: send failed (outlet=%s, supplier=%s)",
+                entry.get("outlet"), entry.get("supplier"),
+            )
+
+    summary = missing_bills.format_owner_summary(entries)
+    if summary:
+        with contextlib.suppress(Exception):
+            await application.bot.send_message(chat_id=ALERT_CHAT_ID, text=summary)
+    if notify_chat_id is not None and not entries:
+        with contextlib.suppress(Exception):
+            await application.bot.send_message(
+                chat_id=notify_chat_id,
+                text="✅ Every regular supplier's bills are coming in on rhythm "
+                     "— nothing has gone quiet.",
+            )
+    logger.info(
+        "Missing bill check: %d quiet supplier(s), %d question(s) sent, "
+        "delivery_enabled=%s",
+        len(entries), sent, enabled,
+    )
+
+
+async def missing_bills_now_command(update: Update,
+                                    context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only: run the missing-bill check on demand (for testing)."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    await message.reply_text("Checking supplier upload rhythms…")
+    await post_missing_bill_checks(
+        context.application, notify_chat_id=_command_owner_id(update)
+    )
+
+
 # === Auto order-list generator (Phase 1) ====================================
 # Evening (default 20:00 MY) per-outlet purchase-order drafts. Delivery reuses
 # the weekly-report safety gate: while MANAGER_DELIVERY_ENABLED is False every
@@ -4959,6 +5053,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("gen_codes", gen_codes_command))
     app.add_handler(CommandHandler("register", register_command))
     app.add_handler(CommandHandler("weekly_report_now", weekly_report_now_command))
+    app.add_handler(CommandHandler("missing_bills_now", missing_bills_now_command))
     app.add_handler(CommandHandler("order_drafts_now", order_drafts_now_command))
     app.add_handler(CommandHandler("cash_no_receipt_today", cash_no_receipt_today_command))
     app.add_handler(CommandHandler("reconcile_now", reconcile_now_command))
@@ -5068,6 +5163,20 @@ async def run_bot() -> None:
         minute=0,
         args=[app],
         id="order_drafts",
+        replace_existing=True,
+    )
+    # Missing supplier-bill watch — nightly 21:00 MY, after the day's receipt
+    # uploads and ahead of the 23:00 digest. Asks each outlet chat (in Tamil +
+    # Malay) about regular suppliers whose bills stopped being uploaded. Gated
+    # by MANAGER_DELIVERY_ENABLED: until the owner flips it, every question
+    # routes to the owner with a [TEST] prefix.
+    scheduler.add_job(
+        post_missing_bill_checks,
+        trigger="cron",
+        hour=21,
+        minute=0,
+        args=[app],
+        id="missing_bill_check",
         replace_existing=True,
     )
     # Monthly kg-per-protein purchase report — 1st of the month 09:30 MY,
