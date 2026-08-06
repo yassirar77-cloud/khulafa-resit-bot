@@ -44,13 +44,13 @@ _ID_CHUNK = 200
 # The categories the kitchen actually asks about, in display order.
 # Keys are canonical_item values produced by item_canonicalization_v2.
 TRACKED_CATEGORIES: dict[str, dict[str, str]] = {
-    "ayam": {"emoji": "🐔", "label": "Ayam (chicken)"},
-    "kambing": {"emoji": "🐐", "label": "Kambing (mutton)"},
-    "daging": {"emoji": "🥩", "label": "Daging (beef)"},
-    "ikan": {"emoji": "🐟", "label": "Ikan (fish)"},
-    "sotong": {"emoji": "🦑", "label": "Sotong (squid)"},
-    "udang": {"emoji": "🦐", "label": "Udang (prawn)"},
-    "ikan_bilis": {"emoji": "🐟", "label": "Ikan Bilis (anchovies)"},
+    "ayam": {"emoji": "🐔", "label": "Ayam"},
+    "kambing": {"emoji": "🐐", "label": "Kambing"},
+    "daging": {"emoji": "🥩", "label": "Daging"},
+    "ikan": {"emoji": "🐟", "label": "Ikan"},
+    "sotong": {"emoji": "🦑", "label": "Sotong"},
+    "udang": {"emoji": "🦐", "label": "Udang"},
+    "ikan_bilis": {"emoji": "🐟", "label": "Ikan Bilis"},
 }
 
 # Mirrors shop_price_comparison: receipts that are NOT purchases from a
@@ -275,20 +275,20 @@ def _fmt_qty(value: float) -> str:
 
 def format_monthly_report(
     year: int, month: int, totals: dict[str, dict],
-    receipt_count: int = 0, partial_through: date | None = None,
+    partial_through: date | None = None,
 ) -> str:
-    """The Telegram message. ``partial_through`` marks a month-to-date run."""
-    label = month_label(year, month)
-    header = f"📊 Belian Bulanan (kg) — {label}"
-    if partial_through is not None:
-        scope = f"Setakat {partial_through.day} {label.split()[0]}"
-    else:
-        scope = "Bulan penuh"
-    sub = f"{scope} · dari resit yang dianalisa"
-    if receipt_count:
-        sub += f" ({receipt_count} resit)"
+    """The Telegram message — numbers only, no explanation.
 
-    lines = [header, sub, ""]
+    One line per category (kg and/or unit count, plus RM), a total, and a
+    "Setakat <day>" marker ONLY when the month is still in progress so a
+    partial month is never mistaken for a full one.
+    """
+    label = month_label(year, month)
+    lines = [f"📊 Belian Bulanan — {label}"]
+    if partial_through is not None:
+        lines.append(f"Setakat {partial_through.day} {label.split()[0]}")
+    lines.append("")
+
     shown = 0
     grand_rm = 0.0
     for category, meta in TRACKED_CATEGORIES.items():
@@ -301,26 +301,20 @@ def format_monthly_report(
         if bucket["kg"] > 0:
             parts.append(f"{_fmt_qty(bucket['kg'])} kg")
         if bucket["units"] > 0:
-            parts.append(f"{_fmt_qty(bucket['units'])} ekor/unit")
-        qty_text = " + ".join(parts) if parts else "jumlah tak pasti"
+            parts.append(f"{_fmt_qty(bucket['units'])} ekor")
+        qty_text = " + ".join(parts)
+        qty_text = f"{qty_text} — " if qty_text else ""
         lines.append(
-            f"{meta['emoji']} {meta['label']}: {qty_text} — RM{bucket['rm']:,.0f}"
+            f"{meta['emoji']} {meta['label']}: {qty_text}RM{bucket['rm']:,.0f}"
         )
 
     if not shown:
         return (
-            f"📊 Belian Bulanan (kg) — {label}\n"
-            "Tiada rekod belian ayam/daging/kambing untuk bulan ini lagi.\n"
-            "Hantar resit seperti biasa — laporan ini dikira dari resit yang "
-            "dianalisa."
+            f"📊 Belian Bulanan — {label}\n"
+            "Tiada rekod belian lagi untuk bulan ini."
         )
 
-    lines += ["", f"Jumlah belian: RM{grand_rm:,.0f}"]
-    lines.append(
-        "\nNota: kg dianggar dari resit (berat pada nama barang, atau "
-        "kuantiti bagi barang timbang). Barang kiraan seunit ditunjuk "
-        "sebagai ekor/unit."
-    )
+    lines += ["", f"💰 Jumlah: RM{grand_rm:,.0f}"]
     return "\n".join(lines)
 
 
@@ -334,13 +328,7 @@ def build_monthly_report(
         partial = today if (today.year, today.month) == (year, month) else None
         rows = load_month_rows(supabase_client, start_iso, end_iso)
         totals = aggregate_rows(rows)
-        receipt_count = len({
-            r.get("receipt_id") for r in rows if r.get("receipt_id") is not None
-        })
-        return format_monthly_report(
-            year, month, totals,
-            receipt_count=receipt_count, partial_through=partial,
-        )
+        return format_monthly_report(year, month, totals, partial_through=partial)
     except Exception:
         logger.exception(
             "monthly consumption: report build failed (%s-%s)", year, month

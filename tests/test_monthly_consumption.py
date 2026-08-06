@@ -173,23 +173,32 @@ class Formatting(unittest.TestCase):
             _row("ayam", "WHOLE CHICKEN", 30, 570.0),
             _row("kambing", "MUTTON MYSURE 5 KG", 2, 190.0),
         ])
-        text = format_monthly_report(2026, 7, totals, receipt_count=3)
+        text = format_monthly_report(2026, 7, totals)
         self.assertIn("Ogos", month_label(2026, 8))  # sanity on helper
         self.assertIn("Julai 2026", text)
-        self.assertIn("🐔 Ayam (chicken): 12 kg + 30 ekor/unit — RM700", text)
-        self.assertIn("🐐 Kambing (mutton): 10 kg — RM190", text)
-        self.assertIn("Jumlah belian: RM890", text)
-        self.assertIn("Bulan penuh", text)
+        self.assertIn("🐔 Ayam: 12 kg + 30 ekor — RM700", text)
+        self.assertIn("🐐 Kambing: 10 kg — RM190", text)
+        self.assertIn("💰 Jumlah: RM890", text)
+
+    def test_full_month_has_no_clutter(self):
+        # The business report is numbers only: no receipt counts, no
+        # methodology footnote, no scope line on a finished month.
+        totals = aggregate_rows([_row("ayam", "AYAM", 5, 55.0)])
+        text = format_monthly_report(2026, 7, totals)
+        self.assertNotIn("resit", text)
+        self.assertNotIn("Nota", text)
+        self.assertNotIn("Setakat", text)
+        self.assertEqual(len([l for l in text.splitlines() if l.strip()]), 3)
 
     def test_month_to_date_scope_line(self):
         totals = aggregate_rows([_row("ayam", "AYAM", 5, 55.0)])
         text = format_monthly_report(
-            2026, 8, totals, receipt_count=1, partial_through=date(2026, 8, 6)
+            2026, 8, totals, partial_through=date(2026, 8, 6)
         )
         self.assertIn("Setakat 6 Ogos", text)
 
     def test_empty_month_message(self):
-        text = format_monthly_report(2026, 8, {}, receipt_count=0)
+        text = format_monthly_report(2026, 8, {})
         self.assertIn("Tiada rekod belian", text)
 
     def test_build_monthly_report_end_to_end(self):
@@ -203,7 +212,6 @@ class Formatting(unittest.TestCase):
         text = build_monthly_report(client, 2026, 8, today=TODAY)
         self.assertIn("Ogos 2026", text)
         self.assertIn("20 kg", text)
-        self.assertIn("(1 resit)", text)
 
     def test_build_never_raises(self):
         class Exploding:
