@@ -2158,6 +2158,10 @@ def _run_stage2(fake, monkeypatch, *, notify_missing=True, alert_missing_shift=F
     import types
 
     monkeypatch.setenv("KITCHEN_LOG_ENABLED", "1")
+    # Deterministic wastage-followup routing regardless of the host env: no
+    # owner chat, manager delivery off — the pandari group note still posts.
+    monkeypatch.delenv("ALERT_CHAT_ID", raising=False)
+    monkeypatch.delenv("MANAGER_DELIVERY_ENABLED", raising=False)
     monkeypatch.setattr(ku, "_supabase", fake)
     # one group: chat -100 -> SEK20
     monkeypatch.setattr(
@@ -2184,10 +2188,14 @@ def test_stage2_job_posts_comparison_when_pos_complete(monkeypatch):
     _seed_complete_day(fake)
     _seed_pos_complete(fake)  # summary + itemwise + BOTH shifts
     bot = _run_stage2(fake, monkeypatch, now=datetime(2026, 6, 25, 9, 0, tzinfo=MY))
-    assert len(bot.sent) == 1
+    # summary + the Tamil pandari wastage note (the day carries LEAK items)
+    assert len(bot.sent) == 2
     chat_id, text = bot.sent[0]
     assert chat_id == -100
     assert "Ringkasan Guna vs POS" in text and "🔴" in text  # real comparison
+    pandari_chat, pandari_text = bot.sent[1]
+    assert pandari_chat == -100
+    assert "பண்டாரி" in pandari_text and "wastage" in pandari_text
     # persisted
     assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is True
 
@@ -2210,13 +2218,15 @@ def test_stage2_defers_when_only_day_shift_in_then_posts_after_overnight(monkeyp
     # nothing compared / written against a half-day
     assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is False
 
-    # overnight email now arrives; the 11:00 retry posts the real comparison once.
+    # overnight email now arrives; the 11:00 retry posts the real comparison once
+    # (plus the Tamil pandari note — the seeded day carries LEAK items).
     _seed_pos_shifts(fake, types=("day", "overnight"))
     bot2 = _run_stage2(fake, monkeypatch, notify_missing=False,
                        now=datetime(2026, 6, 25, 11, 0, tzinfo=MY))
-    assert len(bot2.sent) == 1
+    assert len(bot2.sent) == 2
     _, text2 = bot2.sent[0]
     assert "Ringkasan Guna vs POS" in text2
+    assert "பண்டாரி" in bot2.sent[1][1]
     assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is True
 
 
@@ -2259,9 +2269,11 @@ def test_stage2_targets_yesterday_never_today(monkeypatch):
          "item_label": "Ayam Goreng", "unit": "pcs", "cooked_qty": 100, "left_qty": 0}
     )
     bot = _run_stage2(fake, monkeypatch, now=datetime(2026, 6, 26, 9, 0, tzinfo=MY))
-    assert len(bot.sent) == 1
+    # summary + pandari note, both for YESTERDAY only
+    assert len(bot.sent) == 2
     _, text = bot.sent[0]
     assert "2026-06-25" in text and "2026-06-26" not in text  # yesterday, not today
+    assert all("2026-06-26" not in t for _, t in bot.sent)
     assert ku.comparison_already_posted(fake, "SEK20", "2026-06-25") is True
     assert ku.comparison_already_posted(fake, "SEK20", "2026-06-26") is False
 
@@ -2276,7 +2288,7 @@ def test_stage2_14h_targets_yesterday_not_today_after_noon(monkeypatch):
     _seed_pos_complete(fake, date="2026-06-24")
     bot = _run_stage2(fake, monkeypatch, notify_missing=False, alert_missing_shift=True,
                       now=datetime(2026, 6, 25, 14, 0, tzinfo=MY))
-    assert len(bot.sent) == 1
+    assert len(bot.sent) == 2  # summary + pandari note (day carries LEAK)
     _, text = bot.sent[0]
     assert "2026-06-24" in text
     assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is True
@@ -2575,3 +2587,124 @@ def test_recompute_outlet_day_clears_when_pos_still_absent():
     row = fake.rows("kitchen_daily_usage")[0]
     assert row["pos_qty"] is None and row["mismatch_flag"] is None
     assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is False
+
+
+# --- Tamil wastage follow-ups (pandari + manager) ----------------------------
+
+def _leak_ev(label="Ayam Goreng", used=100, pos=80, unit="pcs", flag="LEAK",
+             source="pos"):
+    return {"code": "x", "label": label, "unit": unit, "cooked": used,
+            "left": 0, "used": used, "pos": pos, "flag": flag, "source": source}
+
+
+def test_leak_items_keeps_only_leak_flags():
+    evs = [
+        _leak_ev(flag="LEAK"),
+        _leak_ev(label="Ayam Bawang", flag="DATA"),
+        _leak_ev(label="Ikan Kari", flag=None),
+    ]
+    assert [e["label"] for e in ku.leak_items(evs)] == ["Ayam Goreng"]
+    assert ku.leak_items([]) == []
+    assert ku.leak_items(None) == []
+
+
+def test_render_pandari_wastage_tamil_content():
+    leaks = [_leak_ev(used=100, pos=80)]
+    out = ku.render_pandari_wastage("SEK-20", "2026-08-06", leaks)
+    assert "👨‍🍳 பண்டாரி கவனிக்கணும் — SEK-20 • 2026-08-06" in out
+    assert "Ayam Goreng: guna 100 pcs, POS jual 80 pcs மட்டும் — 20 pcs அதிகம்" in out
+    assert "wastage" in out and "அளவா masak பண்ணுங்க" in out
+    # empty input -> no message at all
+    assert ku.render_pandari_wastage("SEK-20", "2026-08-06", []) == ""
+
+
+def test_render_wastage_kg_and_purchase_wording():
+    leaks = [_leak_ev(label="Telur Ikan", used=1.5, pos=0.4, unit="kg",
+                      source="purchase")]
+    out = ku.render_pandari_wastage("SEK-20", "2026-08-06", leaks)
+    assert "guna 1.5 kg, beli 0.4 kg மட்டும் — 1.1 kg அதிகம்" in out
+    assert "POS jual" not in out
+
+
+def test_render_manager_wastage_points_at_the_pandari():
+    out = ku.render_manager_wastage("SEK-20", "2026-08-06", [_leak_ev()])
+    assert "🔴 Wastage alert — SEK-20 • 2026-08-06" in out
+    assert "பண்டாரிகிட்ட நேர்ல கேளுங்க" in out
+    assert "follow up" in out
+    assert ku.render_manager_wastage("SEK-20", "2026-08-06", []) == ""
+
+
+def test_stage2_manager_wastage_alert_routes_through_delivery_gate(monkeypatch):
+    """Gate OFF: the manager wastage alert lands with the owner as a [TEST]
+    preview. Gate ON with a registered manager: it goes to the manager."""
+    import asyncio
+    import types
+    from tests.fake_supabase import FakeSupabase
+
+    def _run(fake, *, enabled):
+        monkeypatch.setenv("KITCHEN_LOG_ENABLED", "1")
+        monkeypatch.setenv("ALERT_CHAT_ID", "999")
+        if enabled:
+            monkeypatch.setenv("MANAGER_DELIVERY_ENABLED", "true")
+        else:
+            monkeypatch.delenv("MANAGER_DELIVERY_ENABLED", raising=False)
+        monkeypatch.setattr(ku, "_supabase", fake)
+        monkeypatch.setattr(
+            "config.kitchen_groups.configured_groups",
+            lambda client: [(-100, "SEK20")],
+        )
+
+        class _DT:
+            @staticmethod
+            def now(tz=None):
+                return datetime(2026, 6, 25, 9, 0, tzinfo=MY)
+        monkeypatch.setattr(ku, "datetime", _DT)
+        bot = _CaptureBot()
+        asyncio.run(ku.post_comparison_digests(types.SimpleNamespace(bot=bot)))
+        return bot
+
+    # Gate OFF -> [TEST] preview to the owner (chat 999)
+    fake = FakeSupabase()
+    _seed_complete_day(fake)
+    _seed_pos_complete(fake)
+    fake._store["outlet_managers"] = [
+        {"outlet_code": "SEK20", "manager_name": "Ravi", "chat_id": 555},
+    ]
+    bot = _run(fake, enabled=False)
+    owner_msgs = [t for c, t in bot.sent if c == 999]
+    assert len(owner_msgs) == 1
+    assert owner_msgs[0].startswith("[TEST")
+    assert "Wastage alert" in owner_msgs[0]
+    assert not any(c == 555 for c, _ in bot.sent)
+
+    # Gate ON -> straight to the registered manager (chat 555)
+    fake2 = FakeSupabase()
+    _seed_complete_day(fake2)
+    _seed_pos_complete(fake2)
+    fake2._store["outlet_managers"] = [
+        {"outlet_code": "SEK20", "manager_name": "Ravi", "chat_id": 555},
+    ]
+    bot2 = _run(fake2, enabled=True)
+    mgr_msgs = [t for c, t in bot2.sent if c == 555]
+    assert len(mgr_msgs) == 1
+    assert "Wastage alert" in mgr_msgs[0] and "பண்டாரி" in mgr_msgs[0]
+    assert not any(c == 999 for c, _ in bot2.sent)
+
+
+def test_stage2_no_followups_when_nothing_over_used(monkeypatch):
+    """All within tolerance -> summary only, no pandari note, no manager alert."""
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_complete_day(fake)
+    # POS matches usage exactly: ayam_goreng used 100, bawang used 8
+    _seed_pos_complete(fake)
+    fake._store[ku.SALES_ITEMWISE_TABLE] = [
+        {"id": 10, "summary_id": 1, "item_name": "Ayam Goreng", "qty": 100},
+        {"id": 11, "summary_id": 1, "item_name": "Ayam Bawang", "qty": 8},
+    ]
+    bot = _run_stage2(fake, monkeypatch, now=datetime(2026, 6, 25, 9, 0, tzinfo=MY))
+    assert len(bot.sent) == 1
+    _, text = bot.sent[0]
+    assert "Semua padan" in text
+    assert "பண்டாரி" not in text

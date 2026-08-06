@@ -1701,6 +1701,136 @@ def render_mini_summary(outlet_label, business_date, evaluations: list) -> str:
     return "\n".join(lines)
 
 
+# --- wastage follow-up (Tamil) ----------------------------------------------
+# A 🔴 LEAK in the mini summary means the kitchen used more than the POS email
+# says was sold — but a Malay recap alone changes nothing at the stove. So
+# whenever the comparison carries LEAK items, two Tamil follow-ups ride along:
+# one in the SAME kitchen group addressed to the pandari (the chef) — cook to
+# demand, cut the wastage — and one to the outlet's registered manager so it
+# gets followed up in person. Tamil-first is how the kitchen crew reads; the
+# trade words (masak, guna, POS, wastage) stay as-is, same register as the
+# form copy above.
+
+def leak_items(evaluations: list) -> list:
+    """The LEAK-flagged evaluations (guna > POS past both gates)."""
+    return [
+        ev for ev in evaluations or []
+        if isinstance(ev, dict) and ev.get("flag") == "LEAK"
+    ]
+
+
+def _leak_line(ev: dict) -> str:
+    unit = ev.get("unit", "pcs")
+    used = format_value(ev.get("used"), unit)
+    compared = format_value(ev.get("pos"), unit)
+    try:
+        over = format_value(float(ev["used"]) - float(ev["pos"]), unit)
+    except (KeyError, TypeError, ValueError):
+        over = "?"
+    if ev.get("source") == "purchase":
+        return (
+            f"• {ev.get('label', '?')}: guna {used} {unit}, "
+            f"beli {compared} {unit} மட்டும் — {over} {unit} அதிகம்"
+        )
+    return (
+        f"• {ev.get('label', '?')}: guna {used} {unit}, "
+        f"POS jual {compared} {unit} மட்டும் — {over} {unit} அதிகம்"
+    )
+
+
+def render_pandari_wastage(outlet_label, business_date, leaks: list) -> str:
+    """Tamil note to the pandari, posted in the kitchen group right after the
+    mini summary. Returns ``""`` when there is nothing over-used."""
+    if not leaks:
+        return ""
+    lines = [
+        f"👨‍🍳 பண்டாரி கவனிக்கணும் — {outlet_label} • {business_date}",
+        "",
+        "POS-ல வித்ததை விட kitchen-ல guna பண்ணது அதிகம்:",
+    ]
+    lines += [_leak_line(ev) for ev in leaks]
+    lines += [
+        "",
+        "தேவைக்கு மேல masak ஆயிடுச்சு. மிச்சம் = wastage = கடைக்கு loss.",
+        "Sales பாத்து அளவா masak பண்ணுங்க — wastage-அ குறைங்க. 🙏",
+    ]
+    return "\n".join(lines)
+
+
+def render_manager_wastage(outlet_label, business_date, leaks: list) -> str:
+    """Tamil wastage alert for the outlet's manager: the same numbers, plus
+    the instruction to take it up with the pandari. ``""`` when no leaks."""
+    if not leaks:
+        return ""
+    lines = [
+        f"🔴 Wastage alert — {outlet_label} • {business_date}",
+        "",
+        "POS sales-அ விட kitchen guna அதிகம்:",
+    ]
+    lines += [_leak_line(ev) for ev in leaks]
+    lines += [
+        "",
+        "பண்டாரிகிட்ட நேர்ல கேளுங்க — ஏன் இவ்வளவு அதிகம்?",
+        "அளவா masak பண்ண சொல்லி, wastage குறையுதா-னு follow up பண்ணுங்க. 🙏",
+    ]
+    return "\n".join(lines)
+
+
+async def _send_wastage_followups(application, kitchen_chat_id, outlet_code,
+                                  outlet_label, business_date, leaks) -> None:
+    """Deliver both wastage follow-ups for one reconciled day. Never raises —
+    a delivery failure must not stop the remaining STAGE 2 groups.
+
+    The pandari note goes straight to the kitchen group (the bot already posts
+    the summary there). The manager alert goes through the same
+    MANAGER_DELIVERY_ENABLED gate as every other per-manager message: while
+    the flag is off it lands with the owner as a [TEST] preview."""
+    try:
+        pandari_msg = render_pandari_wastage(outlet_label, business_date, leaks)
+        if pandari_msg:
+            with contextlib.suppress(Exception):
+                await application.bot.send_message(
+                    chat_id=kitchen_chat_id, text=pandari_msg
+                )
+
+        manager_msg = render_manager_wastage(outlet_label, business_date, leaks)
+        if not manager_msg:
+            return
+        import manager_registration
+        import weekly_manager_reports as wmr
+
+        mgr = await asyncio.to_thread(
+            manager_registration.get_manager, _supabase, outlet_code
+        )
+        manager_chat_id = mgr.get("chat_id") if mgr else None
+        try:
+            owner_chat_id = int(os.environ["ALERT_CHAT_ID"])
+        except (KeyError, TypeError, ValueError):
+            owner_chat_id = None
+
+        if owner_chat_id is not None:
+            decision = wmr.route_message(
+                wmr.delivery_enabled(), outlet_label, manager_chat_id,
+                owner_chat_id,
+            )
+            with contextlib.suppress(Exception):
+                await application.bot.send_message(
+                    chat_id=decision.target_chat_id,
+                    text=decision.prefix + manager_msg,
+                )
+        elif wmr.delivery_enabled() and manager_chat_id is not None:
+            # No owner chat configured (tests / bare env): live delivery only.
+            with contextlib.suppress(Exception):
+                await application.bot.send_message(
+                    chat_id=int(manager_chat_id), text=manager_msg
+                )
+    except Exception:
+        logger.exception(
+            "kitchen: wastage follow-up failed (outlet=%s, date=%s)",
+            outlet_code, business_date,
+        )
+
+
 # --- digest data + section (pure-ish; client only for fetch) ----------------
 
 def gather_digest_usage(client, business_date) -> list:
@@ -2274,6 +2404,16 @@ async def post_comparison_digests(
                     with contextlib.suppress(Exception):
                         await application.bot.send_message(chat_id=chat_id, text=summary)
                     posted += 1
+                    # Over-use (LEAK) follow-ups: Tamil note to the pandari in
+                    # this group + Tamil alert to the outlet manager. Rides the
+                    # same once-per-day idempotency as the summary — a day is
+                    # only reconciled once, so these can never repeat.
+                    leaks = leak_items(evaluations)
+                    if leaks:
+                        await _send_wastage_followups(
+                            application, chat_id, outlet_code, outlet_label,
+                            d, leaks,
+                        )
             pending = targets["pending"]  # newest first
             if alert_missing_shift:
                 # Final (14:00) pass: any still-incomplete day is an ingestion gap.
