@@ -1834,7 +1834,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # broad except + lazy import, same pattern as PR #23b.
     try:
         from price_aggregation import classify_and_extract_items
-        from price_spike_detection import detect_spikes, format_spike_message
+        from price_spike_detection import (
+            detect_spikes,
+            format_spike_message,
+            format_spike_message_tamil,
+        )
 
         receipt_id = stored.get("id")
         if receipt_id is not None:
@@ -1864,6 +1868,53 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     len(spikes),
                     receipt_id,
                 )
+                # Tamil copy for the outlet's own manager: the price went
+                # up, ask the supplier why, and here's who is still
+                # cheaper. Routed through the MANAGER_DELIVERY_ENABLED
+                # gate (owner gets a [TEST]-prefixed preview while it is
+                # off), same as the weekly reports. Own try/except: a
+                # manager-lookup failure must not undo the director alert
+                # already sent above.
+                try:
+                    from outlet_mapping import (
+                        outlet_display_name,
+                        outlet_from_chat_title,
+                    )
+                    import weekly_manager_reports as wmr
+
+                    outlet_code = outlet_from_chat_title(chat_title)
+                    if outlet_code:
+                        mgr = await asyncio.to_thread(
+                            manager_registration.get_manager,
+                            supabase,
+                            outlet_code,
+                        )
+                        decision = wmr.route_message(
+                            wmr.delivery_enabled(),
+                            outlet_display_name(outlet_code),
+                            mgr.get("chat_id") if mgr else None,
+                            ALERT_CHAT_ID,
+                        )
+                        for spike in spikes:
+                            tamil = format_spike_message_tamil(spike)
+                            if not tamil:
+                                continue
+                            try:
+                                await context.bot.send_message(
+                                    chat_id=decision.target_chat_id,
+                                    text=decision.prefix + tamil,
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "Failed to send Tamil spike alert "
+                                    "(outlet=%s, route=%s)",
+                                    outlet_code,
+                                    decision.reason,
+                                )
+                except Exception:
+                    logger.exception(
+                        "Tamil manager spike alert failed (non-critical)"
+                    )
     except Exception as e:
         logger.warning("Price spike detection failed (non-critical): %s", e)
     # === End price spike detection ===

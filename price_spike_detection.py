@@ -9,7 +9,12 @@ global if there isn't enough merchant history.
 If a new price exceeds 110% of the historical average (and at least 5
 prior samples exist for the chosen scope), a spike record is emitted;
 ``bot.py`` formats it via ``format_spike_message`` and sends it to the
-manager group.
+manager group. The same spike is also rendered in Tamil via
+``format_spike_message_tamil`` and sent to the outlet's registered
+manager (see ``manager_registration``), telling them to ask the
+supplier why the price went up and naming the shops that are still
+cheaper — routed through the MANAGER_DELIVERY_ENABLED gate like every
+other per-manager message.
 
 Every spike also carries a cross-shop price comparison (see
 ``shop_price_comparison``): for the SAME item, what every other shop
@@ -352,4 +357,109 @@ def format_spike_message(spike: dict) -> str:
         return body + "\nDid you ask supplier?"
     except Exception:
         logger.exception("format_spike_message: failed to format")
+        return ""
+
+
+_MAX_CHEAPER_SHOPS = 3
+
+
+def cheaper_shops(spike: dict) -> list[dict]:
+    """Shops from the spike's comparison block that beat today's price.
+
+    Excludes the shop the spike happened at (its own new price is not an
+    alternative), keeps the cheapest-first order ``summarise_shops``
+    already established, and caps the list at ``_MAX_CHEAPER_SHOPS`` —
+    a manager needs one or two phone calls to make, not a league table.
+    Returns ``[]`` on malformed input. Never raises.
+    """
+    try:
+        if not isinstance(spike, dict):
+            return []
+        current = _to_float(spike.get("current_price"))
+        if current is None or current <= 0:
+            return []
+        shop_prices = spike.get("shop_prices")
+        if not isinstance(shop_prices, list):
+            return []
+
+        from shop_price_comparison import shop_key
+
+        merchant = str(spike.get("merchant") or "").strip()
+        own_key = shop_key(merchant) if merchant else ""
+
+        out: list[dict] = []
+        for shop in shop_prices:
+            if not isinstance(shop, dict):
+                continue
+            price = _to_float(shop.get("latest_price"))
+            name = str(shop.get("shop") or "").strip()
+            if price is None or price <= 0 or not name:
+                continue
+            if own_key and shop_key(name) == own_key:
+                continue
+            if price < current:
+                out.append({"shop": name, "latest_price": price})
+            if len(out) >= _MAX_CHEAPER_SHOPS:
+                break
+        return out
+    except Exception:
+        logger.exception("cheaper_shops: unexpected failure")
+        return []
+
+
+def format_spike_message_tamil(spike: dict) -> str:
+    """The outlet manager's version of the spike alert, in Tamil.
+
+    Same facts as ``format_spike_message`` but written the way the shop
+    managers actually read — spoken Tamil with the English trade words
+    kept as-is (same register as the audit warnings in ``bot.py`` and the
+    kitchen-usage prompts). Three beats, per the owner's spec:
+
+    1. this item's price went up at your supplier,
+    2. ask the supplier WHY,
+    3. these other shops are still cheaper — go compare.
+
+    Returns ``""`` on malformed input so the caller can skip silently.
+    Never raises.
+    """
+    try:
+        if not isinstance(spike, dict):
+            return ""
+        canonical = str(spike.get("canonical_item") or "").strip()
+        if not canonical:
+            return ""
+        avg = float(spike["historical_avg"])
+        n = int(spike["sample_count"])
+        current = float(spike["current_price"])
+        percent = float(spike["percent_increase"])
+        merchant = str(spike.get("merchant") or "").strip()
+
+        variant = str(spike.get("shop_variant") or "").strip()
+        title = variant.title() if variant else canonical.replace("_", " ").title()
+        merchant_part = f" — {merchant}" if merchant else ""
+
+        body = (
+            "⚠️ விலை ஏறிடுச்சு! Price naik!\n"
+            "\n"
+            f"{title}{merchant_part}\n"
+            f"முன்னாடி average: RM{avg:.2f} ({n} resit)\n"
+            f"இன்னைக்கு: RM{current:.2f} (+{percent:.1f}%)\n"
+            "\n"
+            "👉 சப்ளையர்கிட்ட ஏன் விலை ஏறுச்சு-னு கேளுங்க.\n"
+        )
+
+        cheaper = cheaper_shops(spike)
+        if cheaper:
+            body += "\nவேற கடையில இன்னும் cheap-ஆ இருக்கு:\n"
+            for shop in cheaper:
+                body += f"• {shop['shop']}: RM{shop['latest_price']:.2f}\n"
+            body += "\nஅங்க rate-அ compare பண்ணி பாருங்க. 🙏"
+        elif isinstance(spike.get("shop_prices"), list) and len(spike["shop_prices"]) >= 2:
+            # There IS a comparison and nobody beats today's price — say so,
+            # or the manager will assume the bot simply didn't check.
+            body += "\nவேற கடையிலயும் இப்போ இதுக்கு cheap-ஆ இல்ல."
+
+        return body.rstrip("\n")
+    except Exception:
+        logger.exception("format_spike_message_tamil: failed to format")
         return ""
