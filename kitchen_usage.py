@@ -1753,6 +1753,8 @@ def render_pandari_wastage(outlet_label, business_date, leaks: list) -> str:
         "",
         "தேவைக்கு மேல masak ஆயிடுச்சு. மிச்சம் = wastage = கடைக்கு loss.",
         "Sales பாத்து அளவா masak பண்ணுங்க — wastage-அ குறைங்க. 🙏",
+        "",
+        "ஏன் இவ்வளவு அதிகம் ஆச்சு? சொல்லுங்க.",
     ]
     return "\n".join(lines)
 
@@ -1786,16 +1788,29 @@ async def _send_wastage_followups(application, kitchen_chat_id, outlet_code,
     MANAGER_DELIVERY_ENABLED gate as every other per-manager message: while
     the flag is off it lands with the owner as a [TEST] preview."""
     try:
-        pandari_msg = render_pandari_wastage(outlet_label, business_date, leaks)
+        import supervisor
+
+        pandari_msg = supervisor.with_reply_footer(
+            render_pandari_wastage(outlet_label, business_date, leaks)
+        )
         if pandari_msg:
             with contextlib.suppress(Exception):
-                await application.bot.send_message(
+                sent = await application.bot.send_message(
                     chat_id=kitchen_chat_id, text=pandari_msg
+                )
+                # The kitchen group is the real audience (the bot already
+                # posts the comparison there), so this question is tracked
+                # and chased like any other.
+                await asyncio.to_thread(
+                    supervisor.log_question,
+                    _supabase, kitchen_chat_id, sent.message_id,
+                    "kitchen_wastage", pandari_msg,
                 )
 
         manager_msg = render_manager_wastage(outlet_label, business_date, leaks)
         if not manager_msg:
             return
+        manager_msg = supervisor.with_reply_footer(manager_msg)
         import manager_registration
         import weekly_manager_reports as wmr
 
@@ -1814,15 +1829,26 @@ async def _send_wastage_followups(application, kitchen_chat_id, outlet_code,
                 owner_chat_id,
             )
             with contextlib.suppress(Exception):
-                await application.bot.send_message(
+                sent = await application.bot.send_message(
                     chat_id=decision.target_chat_id,
                     text=decision.prefix + manager_msg,
                 )
+                if decision.reason == "manager":
+                    await asyncio.to_thread(
+                        supervisor.log_question,
+                        _supabase, decision.target_chat_id, sent.message_id,
+                        "kitchen_wastage", manager_msg,
+                    )
         elif wmr.delivery_enabled() and manager_chat_id is not None:
             # No owner chat configured (tests / bare env): live delivery only.
             with contextlib.suppress(Exception):
-                await application.bot.send_message(
+                sent = await application.bot.send_message(
                     chat_id=int(manager_chat_id), text=manager_msg
+                )
+                await asyncio.to_thread(
+                    supervisor.log_question,
+                    _supabase, int(manager_chat_id), sent.message_id,
+                    "kitchen_wastage", manager_msg,
                 )
     except Exception:
         logger.exception(
