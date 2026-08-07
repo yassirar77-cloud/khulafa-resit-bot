@@ -2708,3 +2708,139 @@ def test_stage2_no_followups_when_nothing_over_used(monkeypatch):
     _, text = bot.sent[0]
     assert "Semua padan" in text
     assert "பண்டாரி" not in text
+
+
+# --- unfilled-form chaser -----------------------------------------------------
+
+def _session(chat=-100, outlet="SEK20", bd="2026-08-06", phase=ku.PHASE_LEFT,
+             status="open", entries=None, message_id=42):
+    return {
+        "id": 1, "chat_id": chat, "outlet_code": outlet,
+        "business_date": bd, "phase": phase, "status": status,
+        "entries": entries or {}, "buffer": "", "message_id": message_id,
+    }
+
+
+def test_form_posted_at_matches_the_fixed_schedule():
+    from datetime import date as _date
+    cooked = ku.form_posted_at(ku.PHASE_COOKED, "2026-08-06")
+    assert (cooked.year, cooked.month, cooked.day, cooked.hour) == (2026, 8, 6, 18)
+    left = ku.form_posted_at(ku.PHASE_LEFT, _date(2026, 8, 6))
+    assert (left.month, left.day, left.hour) == (8, 7, 2)   # next calendar day
+    assert ku.form_posted_at(ku.PHASE_COOKED_NIGHT, "2026-08-06") is None
+    assert ku.form_posted_at(ku.PHASE_COOKED, "garbage") is None
+
+
+def test_untouched_left_form_is_chased_at_1408():
+    """The live case: LEFT form posted 02:00, still all '—' at 14:08."""
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store[ku.SESSION_TABLE] = [_session()]
+    now = datetime(2026, 8, 7, 14, 8, tzinfo=MY)
+    forms = ku.find_unsubmitted_forms(fake, now=now)
+    assert len(forms) == 1
+    f = forms[0]
+    assert f["phase"] == ku.PHASE_LEFT and f["filled"] == 0
+    assert f["total"] > 0 and not f["all_filled"]
+    assert 12.0 < f["age_hours"] < 12.5
+
+
+def test_submitted_and_fresh_and_night_forms_are_not_chased():
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store[ku.SESSION_TABLE] = [
+        _session(status="submitted"),                       # done
+        _session(chat=-2, phase=ku.PHASE_COOKED_NIGHT),     # optional form
+        _session(chat=-3, bd="2026-08-07", phase=ku.PHASE_COOKED),  # 1h old
+        _session(chat=-4, bd="2026-08-01"),                 # outside window
+    ]
+    now = datetime(2026, 8, 7, 19, 0, tzinfo=MY)
+    assert ku.find_unsubmitted_forms(fake, now=now) == []
+
+
+def test_filled_but_unsent_form_gets_the_hantar_nudge():
+    entries = {it["code"]: 1 for it in ku.items_for_outlet("SEK20")}
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store[ku.SESSION_TABLE] = [_session(entries=entries)]
+    now = datetime(2026, 8, 7, 10, 0, tzinfo=MY)
+    forms = ku.find_unsubmitted_forms(fake, now=now)
+    assert forms[0]["all_filled"] is True
+    text = ku.render_form_reminder("SEK-20", forms[0])
+    assert "'Hantar' தட்டுங்க" in text
+    assert "belum Hantar" in text
+
+
+def test_reminder_text_is_simple_and_bilingual():
+    form = {"phase": ku.PHASE_LEFT, "business_date": "2026-08-06",
+            "filled": 0, "total": 11, "all_filled": False, "age_hours": 12.0}
+    text = ku.render_form_reminder("Bistro", form)
+    assert "⏰ Form இன்னும் fill ஆகல!" in text
+    assert "Rekod Baki" in text and "Bistro" in text
+    assert "11 item-ல 11 இன்னும் காலி" in text
+    assert "reminder நின்னுடும்" in text
+    assert "Form belum isi lagi" in text
+
+
+def test_owner_escalation_lists_state_and_age():
+    forms = [
+        {"outlet_code": "BISTRO7", "phase": ku.PHASE_LEFT,
+         "business_date": "2026-08-06", "filled": 0, "total": 11,
+         "all_filled": False, "age_hours": 8.5},
+        {"outlet_code": "SEK20", "phase": ku.PHASE_COOKED,
+         "business_date": "2026-08-06", "filled": 11, "total": 11,
+         "all_filled": True, "age_hours": 9.0},
+    ]
+    out = ku.render_form_escalation(forms)
+    assert "🚨 Kitchen forms still not keyed in:" in out
+    assert "0/11 filled" in out
+    assert "Hantar not tapped" in out
+    assert "every 2 hours" in out
+    assert ku.render_form_escalation([]) == ""
+
+
+def test_form_chase_job_reminds_group_and_escalates_once(monkeypatch):
+    import asyncio
+    import types
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store[ku.SESSION_TABLE] = [_session()]  # LEFT, untouched
+    monkeypatch.setenv("KITCHEN_LOG_ENABLED", "1")
+    monkeypatch.setenv("ALERT_CHAT_ID", "999")
+    monkeypatch.setattr(ku, "_supabase", fake)
+
+    def _run(now):
+        # Subclass so form_posted_at's datetime(...) construction still works.
+        class _DT(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now
+        monkeypatch.setattr(ku, "datetime", _DT)
+        bot = _CaptureBot()
+        asyncio.run(ku.post_form_reminders(types.SimpleNamespace(bot=bot)))
+        return bot
+
+    # 06:45 (age ~4.75h): group nagged, owner NOT escalated yet.
+    bot = _run(datetime(2026, 8, 7, 6, 45, tzinfo=MY))
+    chats = [c for c, _ in bot.sent]
+    assert chats == [-100]
+    assert "Form இன்னும் fill ஆகல" in bot.sent[0][1]
+
+    # 10:45 (age ~8.75h, inside the [8,10) bucket): group nagged AND owner told.
+    bot2 = _run(datetime(2026, 8, 7, 10, 45, tzinfo=MY))
+    chats2 = [c for c, _ in bot2.sent]
+    assert chats2 == [-100, 999]
+    assert "still not keyed in" in bot2.sent[1][1]
+
+    # 12:45 (age ~10.75h): group still nagged, owner left alone.
+    bot3 = _run(datetime(2026, 8, 7, 12, 45, tzinfo=MY))
+    assert [c for c, _ in bot3.sent] == [-100]
+
+    # Form submitted -> the chase stops by itself.
+    fake._store[ku.SESSION_TABLE][0]["status"] = "submitted"
+    bot4 = _run(datetime(2026, 8, 7, 14, 45, tzinfo=MY))
+    assert bot4.sent == []
