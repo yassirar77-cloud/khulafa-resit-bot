@@ -105,6 +105,7 @@ import key_stock_daily
 import missing_bills
 import monthly_consumption
 import overbuy_watch
+import supervisor
 import order_generator
 import reconciliation_service
 import sales_analytics
@@ -1073,10 +1074,13 @@ def insert_audit_question(
     supabase.table(AUDIT_TABLE).insert(payload).execute()
 
 
-def save_audit_reply(chat_id: int, reply_to_message_id: int, manager_reply: str) -> bool:
+def save_audit_reply(chat_id: int, reply_to_message_id: int, manager_reply: str):
+    """Capture a manager's reply to a tracked question. Returns the question
+    row (truthy) when one matched, else ``None`` — the caller uses the row
+    to report the answer upward to the owner."""
     res = (
         supabase.table(AUDIT_TABLE)
-        .select("id")
+        .select("id, chat_id, question_type, question_text")
         .eq("chat_id", chat_id)
         .eq("question_message_id", reply_to_message_id)
         .is_("replied_at", "null")
@@ -1085,15 +1089,25 @@ def save_audit_reply(chat_id: int, reply_to_message_id: int, manager_reply: str)
     )
     rows = res.data or []
     if not rows:
-        return False
-    audit_id = rows[0]["id"]
+        return None
+    row = rows[0]
+    replied_at = datetime.now(timezone.utc).isoformat()
     supabase.table(AUDIT_TABLE).update(
         {
             "manager_reply": manager_reply,
-            "replied_at": datetime.now(timezone.utc).isoformat(),
+            "replied_at": replied_at,
         }
-    ).eq("id", audit_id).execute()
-    return True
+    ).eq("id", row["id"]).execute()
+    # A reply to the daily NUDGE closes the original question it points at,
+    # and the owner note should show the real question, not the nudge.
+    original_id = supervisor.linked_original_id(row)
+    if original_id is not None:
+        original = supervisor.close_question(
+            supabase, original_id, manager_reply, replied_at
+        )
+        if original:
+            return original
+    return row
 
 
 async def ask_audit_questions(
@@ -1107,6 +1121,7 @@ async def ask_audit_questions(
         return
 
     for question_type, question_text in findings:
+        question_text = supervisor.with_reply_footer(question_text)
         try:
             sent = await context.bot.send_message(chat_id=chat_id, text=question_text)
         except Exception:
@@ -1902,11 +1917,25 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                             tamil = format_spike_message_tamil(spike)
                             if not tamil:
                                 continue
+                            tamil = supervisor.with_reply_footer(tamil)
                             try:
-                                await context.bot.send_message(
+                                sent = await context.bot.send_message(
                                     chat_id=decision.target_chat_id,
                                     text=decision.prefix + tamil,
                                 )
+                                # Track the question only when it reached the
+                                # real manager — a [TEST] preview to the owner
+                                # is not a question anyone owes an answer to.
+                                if decision.reason == "manager":
+                                    await asyncio.to_thread(
+                                        supervisor.log_question,
+                                        supabase,
+                                        decision.target_chat_id,
+                                        sent.message_id,
+                                        "price_spike",
+                                        tamil,
+                                        receipt_id,
+                                    )
                             except Exception:
                                 logger.exception(
                                     "Failed to send Tamil spike alert "
@@ -1989,10 +2018,16 @@ async def handle_audit_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.exception("Failed to save audit reply")
         return
     if saved:
+        # Close the loop like a human: thank them in their language, and
+        # report the answer upward so the owner hears it without asking.
         try:
-            await message.reply_text("Terima kasih, jawapan disimpan. ✅")
+            await message.reply_text(supervisor.format_reply_ack())
         except Exception:
             logger.exception("Failed to ack audit reply")
+        note = supervisor.format_owner_reply_note(saved, message.text)
+        if note and message.chat_id != ALERT_CHAT_ID:
+            with contextlib.suppress(Exception):
+                await context.bot.send_message(chat_id=ALERT_CHAT_ID, text=note)
 
 
 HELP_TEXT = (
@@ -2047,7 +2082,10 @@ HELP_TEXT = (
     "/overbuy_now — check which outlets kept ordering the same despite "
     "falling sales\n"
     "/key_stock_now — check yesterday's key-stock buying vs the full 24h "
-    "day's sales"
+    "day's sales\n"
+    "\n"
+    "Questions:\n"
+    "/questions_now — which manager questions are still unanswered"
 )
 
 
@@ -4633,6 +4671,7 @@ async def post_missing_bill_checks(application: Application, *,
         text = missing_bills.format_missing_bill_message(entry)
         if not text:
             continue
+        text = supervisor.with_reply_footer(text)
         if enabled:
             target, prefix = entry["chat_id"], ""
         else:
@@ -4640,8 +4679,16 @@ async def post_missing_bill_checks(application: Application, *,
             target = ALERT_CHAT_ID
             prefix = f"[TEST — would go to the {where} group]\n\n"
         try:
-            await application.bot.send_message(chat_id=target, text=prefix + text)
+            sent_msg = await application.bot.send_message(
+                chat_id=target, text=prefix + text
+            )
             sent += 1
+            if enabled:
+                await asyncio.to_thread(
+                    supervisor.log_question,
+                    supabase, target, sent_msg.message_id,
+                    "missing_bill", text,
+                )
         except Exception:
             logger.exception(
                 "missing bill check: send failed (outlet=%s, supplier=%s)",
@@ -4675,6 +4722,89 @@ async def missing_bills_now_command(update: Update,
     await message.reply_text("Checking supplier upload rhythms…")
     await post_missing_bill_checks(
         context.application, notify_chat_id=_command_owner_id(update)
+    )
+
+
+# === Question follow-up (the human-supervisor memory) =======================
+# Every Tamil question the bot asks a real manager/group is logged in
+# audit_responses (see supervisor.py). This job is the part a human boss
+# does and dashboards don't: it REMEMBERS. Once a day it nudges every
+# question that has sat unanswered since yesterday (one nudge per question,
+# stateless — the 20-44h window can only match a question once), and shows
+# the owner who has answered and who has gone quiet.
+
+async def post_question_reminders(application: Application, *,
+                                  notify_chat_id=None) -> None:
+    """Daily 17:00 MY: nudge yesterday's unanswered questions in their own
+    chats (as a reply, so the original question is quoted), then send the
+    owner the who-went-quiet overview."""
+    try:
+        due = await asyncio.to_thread(
+            supervisor.open_questions_between, supabase
+        )
+    except Exception:
+        logger.exception("question reminders: read failed")
+        due = []
+
+    nudged = 0
+    for q in due:
+        # Single attempt only: allow_sending_without_reply already covers a
+        # deleted original, so a raise here is a transport error — and with
+        # those the message may have been delivered anyway, so a blind
+        # retry risks double-nudging.
+        try:
+            sent = await application.bot.send_message(
+                chat_id=q["chat_id"],
+                text=supervisor.REMINDER_TEXT,
+                reply_to_message_id=q.get("question_message_id"),
+                allow_sending_without_reply=True,
+            )
+            nudged += 1
+            # Log the nudge linked to the original: a manager who replies
+            # to the NUDGE (the newest message) must close the loop too.
+            await asyncio.to_thread(
+                supervisor.log_reminder,
+                supabase, q["chat_id"], sent.message_id, q,
+            )
+        except Exception:
+            logger.exception(
+                "question reminders: send failed (chat=%s)", q.get("chat_id")
+            )
+
+    try:
+        pending = await asyncio.to_thread(
+            supervisor.open_questions_since, supabase
+        )
+    except Exception:
+        logger.exception("question reminders: pending read failed")
+        pending = []
+    summary = supervisor.format_owner_pending(pending)
+    if summary:
+        with contextlib.suppress(Exception):
+            await application.bot.send_message(chat_id=ALERT_CHAT_ID, text=summary)
+    if notify_chat_id is not None and not pending:
+        with contextlib.suppress(Exception):
+            await application.bot.send_message(
+                chat_id=notify_chat_id,
+                text="✅ Every tracked question has been answered — "
+                     "nothing pending.",
+            )
+    logger.info(
+        "Question reminders: %d nudged, %d still pending", nudged, len(pending)
+    )
+
+
+async def questions_now_command(update: Update,
+                                context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only: show the unanswered-question overview on demand (does NOT
+    nudge the groups — the scheduled job does that once a day)."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    pending = await asyncio.to_thread(supervisor.open_questions_since, supabase)
+    summary = supervisor.format_owner_pending(pending)
+    await message.reply_text(
+        summary or "✅ Every tracked question has been answered — nothing pending."
     )
 
 
@@ -4724,6 +4854,7 @@ async def post_key_stock_checks(application: Application, *,
         text = key_stock_daily.format_manager_key_stock(entry)
         if not text:
             continue
+        text = supervisor.with_reply_footer(text)
         mgr = bundle["managers"].get(entry["outlet_code"])
         decision = wmr.route_message(
             enabled,
@@ -4732,10 +4863,16 @@ async def post_key_stock_checks(application: Application, *,
             ALERT_CHAT_ID,
         )
         try:
-            await application.bot.send_message(
+            sent_msg = await application.bot.send_message(
                 chat_id=decision.target_chat_id, text=decision.prefix + text
             )
             sent += 1
+            if decision.reason == "manager":
+                await asyncio.to_thread(
+                    supervisor.log_question,
+                    supabase, decision.target_chat_id, sent_msg.message_id,
+                    "key_stock", text,
+                )
         except Exception:
             logger.exception(
                 "key stock: send failed (outlet=%s)", entry.get("outlet_code")
@@ -4838,6 +4975,7 @@ async def post_overbuy_checks(application: Application, *,
         text = overbuy_watch.format_manager_overbuy(entry)
         if not text:
             continue
+        text = supervisor.with_reply_footer(text)
         route = bundle["routes"].get(entry["outlet"]) or {}
         decision = wmr.route_message(
             enabled,
@@ -4846,10 +4984,16 @@ async def post_overbuy_checks(application: Application, *,
             ALERT_CHAT_ID,
         )
         try:
-            await application.bot.send_message(
+            sent_msg = await application.bot.send_message(
                 chat_id=decision.target_chat_id, text=decision.prefix + text
             )
             sent += 1
+            if decision.reason == "manager":
+                await asyncio.to_thread(
+                    supervisor.log_question,
+                    supabase, decision.target_chat_id, sent_msg.message_id,
+                    "overbuy", text,
+                )
         except Exception:
             logger.exception(
                 "overbuy watch: send failed (outlet=%s)", entry.get("outlet")
@@ -5271,6 +5415,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("missing_bills_now", missing_bills_now_command))
     app.add_handler(CommandHandler("overbuy_now", overbuy_now_command))
     app.add_handler(CommandHandler("key_stock_now", key_stock_now_command))
+    app.add_handler(CommandHandler("questions_now", questions_now_command))
     app.add_handler(CommandHandler("order_drafts_now", order_drafts_now_command))
     app.add_handler(CommandHandler("cash_no_receipt_today", cash_no_receipt_today_command))
     app.add_handler(CommandHandler("reconcile_now", reconcile_now_command))
@@ -5380,6 +5525,18 @@ async def run_bot() -> None:
         minute=0,
         args=[app],
         id="order_drafts",
+        replace_existing=True,
+    )
+    # Question follow-up — daily 17:00 MY. Nudges yesterday's unanswered
+    # manager questions in their own chats (one nudge per question) and shows
+    # the owner who has gone quiet. The memory that makes the bot feel human.
+    scheduler.add_job(
+        post_question_reminders,
+        trigger="cron",
+        hour=17,
+        minute=0,
+        args=[app],
+        id="question_reminders",
         replace_existing=True,
     )
     # Daily key-stock flag — 10:30 MY, after the ~07:05 overnight shift email
