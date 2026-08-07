@@ -101,6 +101,7 @@ import digest
 import food_cost_analytics
 import kitchen_usage
 import manager_registration
+import key_stock_daily
 import missing_bills
 import monthly_consumption
 import overbuy_watch
@@ -2044,7 +2045,9 @@ HELP_TEXT = (
     "\n"
     "Overbuying:\n"
     "/overbuy_now — check which outlets kept ordering the same despite "
-    "falling sales"
+    "falling sales\n"
+    "/key_stock_now — check yesterday's key-stock buying vs the full 24h "
+    "day's sales"
 )
 
 
@@ -4675,6 +4678,107 @@ async def missing_bills_now_command(update: Update,
     )
 
 
+# === Daily key-stock flag (24h business day) ================================
+# The business runs 24h: business day D = two shift emails (D ~19:00 day +
+# D+1 ~07:00 overnight), folded onto D at ingest. Each morning, ONLY for
+# outlets whose day is COMPLETE (both shifts + D-file — the same gate the
+# kitchen comparison uses), the kg of key stock bought that day (ayam,
+# kambing, daging, ikan, ...) is checked against what that outlet usually
+# buys per RM1000 of sales. Over-bought -> the manager is asked in Tamil,
+# with the full-24h framing spelled out. See key_stock_daily.py.
+
+def _gather_key_stock(today=None) -> dict:
+    bundle = key_stock_daily.gather_key_stock_flags(supabase, today=today)
+    managers = {}
+    if bundle["entries"]:
+        try:
+            managers = manager_registration.get_all_managers(supabase)
+        except Exception:
+            logger.exception("key stock: manager lookup failed")
+    bundle["managers"] = managers
+    bundle["enabled"] = wmr.delivery_enabled()
+    return bundle
+
+
+async def post_key_stock_checks(application: Application, *,
+                                notify_chat_id=None) -> None:
+    """Daily 10:30 MY job (overnight shift email normally lands ~07:05, so
+    the just-closed day is complete by then; still-incomplete outlets are
+    skipped, never judged on a half day)."""
+    try:
+        bundle = await asyncio.to_thread(_gather_key_stock)
+    except Exception:
+        logger.exception("key stock: gather failed")
+        if notify_chat_id is not None:
+            with contextlib.suppress(Exception):
+                await application.bot.send_message(
+                    chat_id=notify_chat_id,
+                    text="Failed to run the key-stock check.",
+                )
+        return
+
+    entries = bundle["entries"]
+    enabled = bundle["enabled"]
+    sent = 0
+    for entry in entries:
+        text = key_stock_daily.format_manager_key_stock(entry)
+        if not text:
+            continue
+        mgr = bundle["managers"].get(entry["outlet_code"])
+        decision = wmr.route_message(
+            enabled,
+            entry.get("display") or entry["outlet_code"],
+            mgr.get("chat_id") if mgr else None,
+            ALERT_CHAT_ID,
+        )
+        try:
+            await application.bot.send_message(
+                chat_id=decision.target_chat_id, text=decision.prefix + text
+            )
+            sent += 1
+        except Exception:
+            logger.exception(
+                "key stock: send failed (outlet=%s)", entry.get("outlet_code")
+            )
+
+    summary = key_stock_daily.format_owner_summary(entries)
+    if summary:
+        with contextlib.suppress(Exception):
+            await application.bot.send_message(chat_id=ALERT_CHAT_ID, text=summary)
+    if notify_chat_id is not None and not entries:
+        note = (
+            f"✅ Key stock ok for {bundle.get('business_date') or 'yesterday'} — "
+            "no outlet bought clearly more than its sales needed."
+        )
+        if bundle.get("skipped_incomplete"):
+            note += (
+                f" ({bundle['skipped_incomplete']} outlet(s) skipped — POS day "
+                "not complete yet, both shifts not in.)"
+            )
+        with contextlib.suppress(Exception):
+            await application.bot.send_message(chat_id=notify_chat_id, text=note)
+    logger.info(
+        "Key stock check %s: %d outlet(s) flagged, %d sent, %d incomplete, "
+        "delivery_enabled=%s",
+        bundle.get("business_date"), len(entries), sent,
+        bundle.get("skipped_incomplete", 0), enabled,
+    )
+
+
+async def key_stock_now_command(update: Update,
+                                context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only: run the daily key-stock check on demand (for testing)."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    await message.reply_text(
+        "Checking yesterday's key-stock buying vs the full 24h sales…"
+    )
+    await post_key_stock_checks(
+        context.application, notify_chat_id=_command_owner_id(update)
+    )
+
+
 # === Overbuying watch (sales down, orders not) ==============================
 # Weekly cross-check of the two trends the bot already collects: POS sales
 # (from the shift-close emails, reconciled per outlet per day) and purchases
@@ -5166,6 +5270,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("weekly_report_now", weekly_report_now_command))
     app.add_handler(CommandHandler("missing_bills_now", missing_bills_now_command))
     app.add_handler(CommandHandler("overbuy_now", overbuy_now_command))
+    app.add_handler(CommandHandler("key_stock_now", key_stock_now_command))
     app.add_handler(CommandHandler("order_drafts_now", order_drafts_now_command))
     app.add_handler(CommandHandler("cash_no_receipt_today", cash_no_receipt_today_command))
     app.add_handler(CommandHandler("reconcile_now", reconcile_now_command))
@@ -5275,6 +5380,18 @@ async def run_bot() -> None:
         minute=0,
         args=[app],
         id="order_drafts",
+        replace_existing=True,
+    )
+    # Daily key-stock flag — 10:30 MY, after the ~07:05 overnight shift email
+    # completes yesterday's 24h business day. Outlets whose POS day isn't
+    # complete are skipped, never judged on a half day.
+    scheduler.add_job(
+        post_key_stock_checks,
+        trigger="cron",
+        hour=10,
+        minute=30,
+        args=[app],
+        id="key_stock_daily",
         replace_existing=True,
     )
     # Overbuying watch — Monday 09:30 MY, right after the 09:00 weekly
