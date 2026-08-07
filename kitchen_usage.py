@@ -1857,6 +1857,226 @@ async def _send_wastage_followups(application, kitchen_chat_id, outlet_code,
         )
 
 
+# --- unfilled-form chaser ----------------------------------------------------
+# The 18:00 COOKED and 02:00 LEFT forms get posted to every kitchen group —
+# and some groups leave them sitting at "—" all day (live: a LEFT form still
+# untouched at 14:08). An unfilled form means that outlet's day can NEVER
+# reconcile, silently. So the bot now chases: every two hours, any posted,
+# unsubmitted form gets a simple bilingual reminder in its group — and keeps
+# getting one until the crew keys in and taps Hantar. Once the form is
+# submitted the session status flips and the chase stops by itself.
+
+# Don't chase a form in its first two hours — the crew may simply not have
+# closed the shift yet.
+_CHASE_GRACE_HOURS = 2.0
+# Tell the owner once, when a form has been ignored this long (the 2-hourly
+# job sees each form in the [8, 10) age bucket exactly once — no owner spam).
+_ESCALATE_AGE_HOURS = 8.0
+_ESCALATE_BUCKET_HOURS = 2.0
+
+
+def form_posted_at(phase: str, business_date) -> datetime | None:
+    """When a phase's form was posted, derived from the FIXED schedule
+    (COOKED 18:00 on the business date, LEFT 02:00 the next calendar day) —
+    no DB column needed. ``None`` for unknown phases."""
+    try:
+        bd = business_date if isinstance(business_date, date) else date.fromisoformat(
+            str(business_date).strip()
+        )
+    except (TypeError, ValueError):
+        return None
+    if phase == PHASE_COOKED:
+        return datetime(bd.year, bd.month, bd.day, 18, 0, tzinfo=MY_TZ)
+    if phase == PHASE_LEFT:
+        nxt = bd + timedelta(days=1)
+        return datetime(nxt.year, nxt.month, nxt.day, 2, 0, tzinfo=MY_TZ)
+    return None  # night form is optional — never chased
+
+
+def find_unsubmitted_forms(client, *, now: datetime | None = None) -> list[dict]:
+    """Posted-but-unsubmitted COOKED/LEFT forms worth chasing right now.
+
+    Looks at the current fold date and the previous one (yesterday's LEFT
+    form must be chased all day — its data is lost forever otherwise),
+    skips the optional night form, and applies the grace period. Each
+    entry: ``{chat_id, outlet_code, business_date, phase, message_id,
+    filled, total, all_filled, age_hours}``. Never raises."""
+    try:
+        base_now = now or datetime.now(MY_TZ)
+        bd_today = business_date_for(base_now)
+        dates = [str(bd_today), str(bd_today - timedelta(days=1))]
+        rows = _rows(
+            client.table(SESSION_TABLE)
+            .select("*")
+            .in_("business_date", dates)
+            .neq("status", "submitted")
+            .execute()
+        )
+        out: list[dict] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            phase = row.get("phase")
+            posted = form_posted_at(phase, row.get("business_date"))
+            if posted is None:
+                continue
+            age_hours = (base_now - posted).total_seconds() / 3600.0
+            if age_hours < _CHASE_GRACE_HOURS:
+                continue
+            outlet_code = row.get("outlet_code")
+            items = items_for_outlet(outlet_code)
+            entries = _load_entries(row)
+            filled = sum(
+                1 for it in items if entries.get(it["code"]) is not None
+            )
+            out.append({
+                "chat_id": row.get("chat_id"),
+                "outlet_code": outlet_code,
+                "business_date": str(row.get("business_date")),
+                "phase": phase,
+                "message_id": row.get("message_id"),
+                "filled": filled,
+                "total": len(items),
+                "all_filled": bool(items) and filled == len(items),
+                "age_hours": age_hours,
+            })
+        out.sort(key=lambda f: -f["age_hours"])
+        return out
+    except Exception:
+        logger.exception("kitchen: unsubmitted-form scan failed")
+        return []
+
+
+def render_form_reminder(outlet_label, form: dict) -> str:
+    """The chase message, simple Tamil + Malay. Adapts: an untouched form
+    gets "go tap the items", a filled-but-unsent one gets "just tap
+    Hantar". Never raises; ``""`` on malformed input."""
+    try:
+        title = form_title(form.get("phase") or PHASE_COOKED)
+        missing = int(form["total"]) - int(form["filled"])
+        head = (
+            "⏰ Form இன்னும் fill ஆகல!\n"
+            f"{title} — {outlet_label} • {form.get('business_date')}\n\n"
+        )
+        if form.get("all_filled"):
+            body = (
+                "எல்லா item-um போட்டீங்க 👍 ஆனா அனுப்பல!\n"
+                "மேல form-ல 'Hantar' தட்டுங்க. அப்பதான் முடியும் 🙏\n\n"
+                "Semua dah isi tapi belum Hantar — sila tekan Hantar."
+            )
+        else:
+            body = (
+                f"{form['total']} item-ல {missing} இன்னும் காலி.\n"
+                "மேல இருக்கற form-ல item-அ தட்டி எண் போடுங்க.\n"
+                "எல்லாம் போட்டு 'Hantar' தட்டுங்க. "
+                "Key in பண்ணிட்டா இந்த reminder நின்னுடும் 🙏\n\n"
+                "Form belum isi lagi — sila tekan item kat atas & key in, "
+                "lepas tu Hantar."
+            )
+        return head + body
+    except Exception:
+        logger.exception("kitchen: form reminder render failed")
+        return ""
+
+
+def render_form_escalation(stale: list[dict], label_for=None) -> str:
+    """English owner note for forms ignored past the escalation age.
+    ``""`` when nothing qualifies. Never raises."""
+    try:
+        if not stale:
+            return ""
+        label = label_for if callable(label_for) else (lambda c: str(c or "?"))
+        lines = ["🚨 Kitchen forms still not keyed in:"]
+        for f in stale:
+            if not isinstance(f, dict):
+                continue
+            state = (
+                "filled but not sent (Hantar not tapped)"
+                if f.get("all_filled")
+                else f"{f.get('filled', 0)}/{f.get('total', 0)} filled"
+            )
+            lines.append(
+                f"• {label(f.get('outlet_code'))} — "
+                f"{form_title(f.get('phase') or PHASE_COOKED)} "
+                f"{f.get('business_date')}: {state}, "
+                f"~{float(f.get('age_hours', 0)):.0f}h since posted"
+            )
+        if len(lines) == 1:
+            return ""
+        lines.append("The group is being reminded every 2 hours until they key in.")
+        return "\n".join(lines)
+    except Exception:
+        logger.exception("kitchen: form escalation render failed")
+        return ""
+
+
+async def post_form_reminders(application) -> None:
+    """Every-2-hours chaser: nag each group with a posted, unsubmitted form
+    (reply-quoting the form so it is one tap away), and tell the owner once
+    when a form has been ignored ~8 hours. Stops by itself the moment the
+    form is submitted. Never raises."""
+    try:
+        if not kitchen_log_enabled():
+            return
+        if _supabase is None:
+            logger.warning("kitchen: supabase not initialised — form chase skipped")
+            return
+        forms = await asyncio.to_thread(find_unsubmitted_forms, _supabase)
+        if not forms:
+            return
+        try:
+            from outlet_mapping import outlet_display_name
+        except Exception:
+            outlet_display_name = lambda c: str(c or "?")  # noqa: E731
+
+        sent = 0
+        for form in forms:
+            if form.get("chat_id") is None:
+                continue
+            text = render_form_reminder(
+                outlet_display_name(form.get("outlet_code")), form
+            )
+            if not text:
+                continue
+            try:
+                await application.bot.send_message(
+                    chat_id=form["chat_id"],
+                    text=text,
+                    reply_to_message_id=form.get("message_id"),
+                    allow_sending_without_reply=True,
+                )
+                sent += 1
+            except Exception:
+                logger.exception(
+                    "kitchen: form reminder send failed (chat=%s)",
+                    form.get("chat_id"),
+                )
+
+        stale = [
+            f for f in forms
+            if _ESCALATE_AGE_HOURS
+            <= f["age_hours"]
+            < _ESCALATE_AGE_HOURS + _ESCALATE_BUCKET_HOURS
+        ]
+        note = render_form_escalation(stale, outlet_display_name)
+        if note:
+            try:
+                owner_chat_id = int(os.environ["ALERT_CHAT_ID"])
+            except (KeyError, TypeError, ValueError):
+                owner_chat_id = None
+            if owner_chat_id is not None:
+                with contextlib.suppress(Exception):
+                    await application.bot.send_message(
+                        chat_id=owner_chat_id, text=note
+                    )
+        logger.info(
+            "kitchen form chase: %d unsubmitted, %d reminded, %d escalated",
+            len(forms), sent, len(stale),
+        )
+    except Exception:
+        logger.exception("kitchen: form chase failed")
+
+
 # --- digest data + section (pure-ish; client only for fetch) ----------------
 
 def gather_digest_usage(client, business_date) -> list:

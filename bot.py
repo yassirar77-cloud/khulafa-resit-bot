@@ -2085,7 +2085,9 @@ HELP_TEXT = (
     "day's sales\n"
     "\n"
     "Questions:\n"
-    "/questions_now — which manager questions are still unanswered"
+    "/questions_now — which manager questions are still unanswered\n"
+    "/form_chase_now — remind every group whose kitchen form is still "
+    "not keyed in"
 )
 
 
@@ -4794,6 +4796,34 @@ async def post_question_reminders(application: Application, *,
     )
 
 
+async def form_chase_now_command(update: Update,
+                                 context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only: chase every unfilled kitchen form right now."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    forms = await asyncio.to_thread(
+        kitchen_usage.find_unsubmitted_forms, supabase
+    )
+    if not forms:
+        await message.reply_text(
+            "✅ Every posted kitchen form has been submitted — nothing to chase."
+        )
+        return
+    if not kitchen_usage.kitchen_log_enabled():
+        # Safety gate off: show what WOULD be chased instead of going silent.
+        from outlet_mapping import outlet_display_name
+        await message.reply_text(
+            "[KITCHEN_LOG_ENABLED is off — listing instead of chasing]\n\n"
+            + kitchen_usage.render_form_escalation(forms, outlet_display_name)
+        )
+        return
+    await message.reply_text(
+        f"Chasing {len(forms)} unfilled form(s) in their groups…"
+    )
+    await kitchen_usage.post_form_reminders(context.application)
+
+
 async def questions_now_command(update: Update,
                                 context: ContextTypes.DEFAULT_TYPE) -> None:
     """Owner-only: show the unanswered-question overview on demand (does NOT
@@ -5416,6 +5446,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("overbuy_now", overbuy_now_command))
     app.add_handler(CommandHandler("key_stock_now", key_stock_now_command))
     app.add_handler(CommandHandler("questions_now", questions_now_command))
+    app.add_handler(CommandHandler("form_chase_now", form_chase_now_command))
     app.add_handler(CommandHandler("order_drafts_now", order_drafts_now_command))
     app.add_handler(CommandHandler("cash_no_receipt_today", cash_no_receipt_today_command))
     app.add_handler(CommandHandler("reconcile_now", reconcile_now_command))
@@ -5525,6 +5556,20 @@ async def run_bot() -> None:
         minute=0,
         args=[app],
         id="order_drafts",
+        replace_existing=True,
+    )
+    # Unfilled kitchen-form chaser — every 2 hours at :45. Any posted COOKED/
+    # LEFT form still unsubmitted gets a simple bilingual nag in its group,
+    # repeating until the crew keys in and taps Hantar (live case: a LEFT form
+    # still all "—" at 14:08). The owner is told once when a form has been
+    # ignored ~8 hours. No-ops unless KITCHEN_LOG_ENABLED.
+    scheduler.add_job(
+        kitchen_usage.post_form_reminders,
+        trigger="cron",
+        hour="*/2",
+        minute=45,
+        args=[app],
+        id="kitchen_form_chase",
         replace_existing=True,
     )
     # Question follow-up — daily 17:00 MY. Nudges yesterday's unanswered
