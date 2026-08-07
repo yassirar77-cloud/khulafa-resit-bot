@@ -103,6 +103,7 @@ import kitchen_usage
 import manager_registration
 import missing_bills
 import monthly_consumption
+import overbuy_watch
 import order_generator
 import reconciliation_service
 import sales_analytics
@@ -2039,7 +2040,11 @@ HELP_TEXT = (
     "\n"
     "Missing bills:\n"
     "/missing_bills_now — check which regular suppliers' bills stopped "
-    "being uploaded"
+    "being uploaded\n"
+    "\n"
+    "Overbuying:\n"
+    "/overbuy_now — check which outlets kept ordering the same despite "
+    "falling sales"
 )
 
 
@@ -4670,6 +4675,112 @@ async def missing_bills_now_command(update: Update,
     )
 
 
+# === Overbuying watch (sales down, orders not) ==============================
+# Weekly cross-check of the two trends the bot already collects: POS sales
+# (from the shift-close emails, reconciled per outlet per day) and purchases
+# (from receipts). When an outlet's sales are clearly down but its buying
+# barely moved, the manager gets asked in Tamil why the orders haven't come
+# down with the sales — item detail names the protein categories still bought
+# at the old volume. Monday 09:30 MY, right after the weekly food-cost report.
+# Delivery reuses the MANAGER_DELIVERY_ENABLED gate; the owner always gets an
+# English summary when anything is flagged. See overbuy_watch.py.
+
+def _gather_overbuy(today=None) -> dict:
+    entries = overbuy_watch.gather_overbuy_entries(supabase, today=today)
+    # Manager routing needs the registration outlet CODE for each canonical
+    # name; the display label doubles as the [TEST]/no-manager prefix text.
+    routes = {}
+    if entries:
+        try:
+            outlets = manager_registration.load_active_outlets(supabase)
+            managers = manager_registration.get_all_managers(supabase)
+            for o in outlets:
+                mgr = managers.get(o.code)
+                routes[o.canonical] = {
+                    "display": o.display,
+                    "manager_chat_id": mgr.get("chat_id") if mgr else None,
+                }
+        except Exception:
+            logger.exception("overbuy watch: manager routing lookup failed")
+    return {
+        "entries": entries,
+        "routes": routes,
+        "enabled": wmr.delivery_enabled(),
+    }
+
+
+async def post_overbuy_checks(application: Application, *,
+                              notify_chat_id=None) -> None:
+    """Monday 09:30 MY job. One Tamil question per flagged outlet to its
+    manager (via the delivery gate), then the English summary to the owner.
+    ``notify_chat_id`` additionally reports the all-clear for the on-demand
+    command."""
+    try:
+        bundle = await asyncio.to_thread(_gather_overbuy)
+    except Exception:
+        logger.exception("overbuy watch: gather failed")
+        if notify_chat_id is not None:
+            with contextlib.suppress(Exception):
+                await application.bot.send_message(
+                    chat_id=notify_chat_id,
+                    text="Failed to run the overbuying check.",
+                )
+        return
+
+    entries = bundle["entries"]
+    enabled = bundle["enabled"]
+    sent = 0
+    for entry in entries:
+        text = overbuy_watch.format_manager_overbuy(entry)
+        if not text:
+            continue
+        route = bundle["routes"].get(entry["outlet"]) or {}
+        decision = wmr.route_message(
+            enabled,
+            route.get("display") or entry["outlet"],
+            route.get("manager_chat_id"),
+            ALERT_CHAT_ID,
+        )
+        try:
+            await application.bot.send_message(
+                chat_id=decision.target_chat_id, text=decision.prefix + text
+            )
+            sent += 1
+        except Exception:
+            logger.exception(
+                "overbuy watch: send failed (outlet=%s)", entry.get("outlet")
+            )
+
+    summary = overbuy_watch.format_owner_summary(entries)
+    if summary:
+        with contextlib.suppress(Exception):
+            await application.bot.send_message(chat_id=ALERT_CHAT_ID, text=summary)
+    if notify_chat_id is not None and not entries:
+        with contextlib.suppress(Exception):
+            await application.bot.send_message(
+                chat_id=notify_chat_id,
+                text="✅ No outlet is overbuying — everywhere sales dropped, "
+                     "the ordering came down with it (or sales are steady).",
+            )
+    logger.info(
+        "Overbuy watch: %d outlet(s) flagged, %d message(s) sent, "
+        "delivery_enabled=%s",
+        len(entries), sent, enabled,
+    )
+
+
+async def overbuy_now_command(update: Update,
+                              context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only: run the overbuying check on demand (for testing)."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    await message.reply_text("Comparing sales trend vs buying trend…")
+    await post_overbuy_checks(
+        context.application, notify_chat_id=_command_owner_id(update)
+    )
+
+
 # === Auto order-list generator (Phase 1) ====================================
 # Evening (default 20:00 MY) per-outlet purchase-order drafts. Delivery reuses
 # the weekly-report safety gate: while MANAGER_DELIVERY_ENABLED is False every
@@ -5054,6 +5165,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("register", register_command))
     app.add_handler(CommandHandler("weekly_report_now", weekly_report_now_command))
     app.add_handler(CommandHandler("missing_bills_now", missing_bills_now_command))
+    app.add_handler(CommandHandler("overbuy_now", overbuy_now_command))
     app.add_handler(CommandHandler("order_drafts_now", order_drafts_now_command))
     app.add_handler(CommandHandler("cash_no_receipt_today", cash_no_receipt_today_command))
     app.add_handler(CommandHandler("reconcile_now", reconcile_now_command))
@@ -5163,6 +5275,20 @@ async def run_bot() -> None:
         minute=0,
         args=[app],
         id="order_drafts",
+        replace_existing=True,
+    )
+    # Overbuying watch — Monday 09:30 MY, right after the 09:00 weekly
+    # food-cost report. Flags outlets whose sales dropped over the last 7 days
+    # while their buying barely moved, and asks each manager in Tamil why the
+    # orders didn't come down. Gated by MANAGER_DELIVERY_ENABLED.
+    scheduler.add_job(
+        post_overbuy_checks,
+        trigger="cron",
+        day_of_week="mon",
+        hour=9,
+        minute=30,
+        args=[app],
+        id="overbuy_watch",
         replace_existing=True,
     )
     # Missing supplier-bill watch — nightly 21:00 MY, after the day's receipt
