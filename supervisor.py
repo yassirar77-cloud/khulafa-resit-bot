@@ -217,6 +217,28 @@ def open_questions_since(supabase, *, now: datetime | None = None,
     )
 
 
+def questions_since(supabase, *, now: datetime | None = None,
+                    days: int = 7) -> list[dict]:
+    """ALL questions of the last ``days`` days — answered and not — with
+    their reply timestamps, excluding the bot's own nudge rows. Feeds the
+    weekly response scoreboard. ``[]`` on failure; never raises."""
+    try:
+        base = now or datetime.now(timezone.utc)
+        rows = (
+            supabase.table(_AUDIT_TABLE)
+            .select(
+                "id, chat_id, question_type, question_text, asked_at, replied_at"
+            )
+            .neq("question_type", REMINDER_TYPE)
+            .gte("asked_at", (base - timedelta(days=days)).isoformat())
+            .execute()
+        )
+        return [r for r in (getattr(rows, "data", None) or []) if isinstance(r, dict)]
+    except Exception:
+        logger.exception("supervisor: questions_since read failed")
+        return []
+
+
 def format_reply_ack() -> str:
     """The thank-you a manager sees the moment his answer is captured —
     the loop must FEEL closed or they stop answering."""

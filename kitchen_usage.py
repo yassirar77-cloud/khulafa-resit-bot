@@ -1828,7 +1828,16 @@ async def _send_wastage_followups(application, kitchen_chat_id, outlet_code,
                 wmr.delivery_enabled(), outlet_label, manager_chat_id,
                 owner_chat_id,
             )
+            import human_touch
+            manager_msg = human_touch.personalise(
+                manager_msg,
+                mgr.get("manager_name") if mgr else None,
+                decision.target_chat_id,
+            )
             with contextlib.suppress(Exception):
+                await human_touch.show_typing(
+                    application.bot, decision.target_chat_id
+                )
                 sent = await application.bot.send_message(
                     chat_id=decision.target_chat_id,
                     text=decision.prefix + manager_msg,

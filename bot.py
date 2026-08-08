@@ -104,6 +104,7 @@ import manager_registration
 import key_stock_daily
 import missing_bills
 import monthly_consumption
+import human_touch
 import overbuy_watch
 import supervisor
 import order_generator
@@ -1917,8 +1918,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                             tamil = format_spike_message_tamil(spike)
                             if not tamil:
                                 continue
-                            tamil = supervisor.with_reply_footer(tamil)
+                            tamil = human_touch.personalise(
+                                supervisor.with_reply_footer(tamil),
+                                mgr.get("manager_name") if mgr else None,
+                                decision.target_chat_id,
+                            )
                             try:
+                                await human_touch.show_typing(
+                                    context.bot, decision.target_chat_id
+                                )
                                 sent = await context.bot.send_message(
                                     chat_id=decision.target_chat_id,
                                     text=decision.prefix + tamil,
@@ -1996,6 +2004,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await ask_audit_questions(context, stored, findings)
 
 
+def _manager_name_for_chat(chat_id):
+    """The registered manager name behind a chat, for the personal ack.
+    ``None`` (-> generic 'boss') when the chat isn't a manager DM."""
+    try:
+        for row in manager_registration.get_all_managers(supabase).values():
+            if row.get("chat_id") == chat_id:
+                return row.get("manager_name")
+    except Exception:
+        logger.debug("manager name lookup failed", exc_info=True)
+    return None
+
+
 async def handle_audit_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message or not message.text:
@@ -2018,10 +2038,15 @@ async def handle_audit_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.exception("Failed to save audit reply")
         return
     if saved:
-        # Close the loop like a human: thank them in their language, and
-        # report the answer upward so the owner hears it without asking.
+        # Close the loop like a human: thank them BY NAME in their language
+        # (wording rotates daily so it never reads templated), and report
+        # the answer upward so the owner hears it without asking — which is
+        # exactly what the ack, truthfully, says will happen.
         try:
-            await message.reply_text(supervisor.format_reply_ack())
+            name = await asyncio.to_thread(
+                _manager_name_for_chat, message.chat_id
+            )
+            await message.reply_text(human_touch.ack(name, message.chat_id))
         except Exception:
             logger.exception("Failed to ack audit reply")
         note = supervisor.format_owner_reply_note(saved, message.text)
@@ -2087,7 +2112,8 @@ HELP_TEXT = (
     "Questions:\n"
     "/questions_now — which manager questions are still unanswered\n"
     "/form_chase_now — remind every group whose kitchen form is still "
-    "not keyed in"
+    "not keyed in\n"
+    "/scoreboard_now — 7-day question response scoreboard per chat"
 )
 
 
@@ -4755,6 +4781,7 @@ async def post_question_reminders(application: Application, *,
         # those the message may have been delivered anyway, so a blind
         # retry risks double-nudging.
         try:
+            await human_touch.show_typing(application.bot, q["chat_id"])
             sent = await application.bot.send_message(
                 chat_id=q["chat_id"],
                 text=supervisor.REMINDER_TEXT,
@@ -4838,6 +4865,86 @@ async def questions_now_command(update: Update,
     )
 
 
+# === Weekly praise + response scoreboard ====================================
+# A supervisor who only ever complains reads as a machine; one who notices
+# good work reads as a person. Monday 11:00 MY: every chat that answered ALL
+# its questions this week gets Tamil praise, and the owner gets the response
+# scoreboard (who answers, how fast) — both built from the question ledger,
+# which only ever contains REAL deliveries, so praise can't leak to previews.
+
+def _chat_label(chat_id) -> str:
+    """Readable label for a ledger chat: 'SEK20 (Ravi)' for a manager DM,
+    otherwise the raw chat id."""
+    try:
+        for code, row in manager_registration.get_all_managers(supabase).items():
+            if row.get("chat_id") == chat_id:
+                name = str(row.get("manager_name") or "").strip()
+                return f"{code} ({name})" if name else str(code)
+    except Exception:
+        logger.debug("chat label lookup failed", exc_info=True)
+    return f"chat {chat_id}"
+
+
+async def post_weekly_praise(application: Application, *,
+                             notify_chat_id=None) -> None:
+    """Monday 11:00 MY job: praise the full-responders, show the owner the
+    scoreboard."""
+    try:
+        rows = await asyncio.to_thread(supervisor.questions_since, supabase)
+    except Exception:
+        logger.exception("weekly praise: ledger read failed")
+        rows = []
+    stats = human_touch.engagement_by_chat(rows)
+
+    praised = 0
+    for stat in stats:
+        text = human_touch.praise_message(stat)
+        if not text:
+            continue
+        try:
+            await application.bot.send_message(
+                chat_id=stat["chat_id"], text=text
+            )
+            praised += 1
+        except Exception:
+            logger.exception(
+                "weekly praise: send failed (chat=%s)", stat.get("chat_id")
+            )
+
+    board = human_touch.format_owner_scoreboard(stats, _chat_label)
+    if board:
+        with contextlib.suppress(Exception):
+            await application.bot.send_message(chat_id=ALERT_CHAT_ID, text=board)
+    if notify_chat_id is not None and not board:
+        with contextlib.suppress(Exception):
+            await application.bot.send_message(
+                chat_id=notify_chat_id,
+                text="No tracked questions were asked in the last 7 days — "
+                     "no scoreboard yet.",
+            )
+    logger.info(
+        "Weekly praise: %d chat(s) praised of %d with questions",
+        praised, len([s for s in stats if s.get("asked")]),
+    )
+
+
+async def scoreboard_now_command(update: Update,
+                                 context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only: show the 7-day response scoreboard (praise is NOT sent —
+    the Monday job does that)."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    rows = await asyncio.to_thread(supervisor.questions_since, supabase)
+    board = human_touch.format_owner_scoreboard(
+        human_touch.engagement_by_chat(rows), _chat_label
+    )
+    await message.reply_text(
+        board or "No tracked questions were asked in the last 7 days — "
+                 "no scoreboard yet."
+    )
+
+
 # === Daily key-stock flag (24h business day) ================================
 # The business runs 24h: business day D = two shift emails (D ~19:00 day +
 # D+1 ~07:00 overnight), folded onto D at ingest. Each morning, ONLY for
@@ -4884,7 +4991,6 @@ async def post_key_stock_checks(application: Application, *,
         text = key_stock_daily.format_manager_key_stock(entry)
         if not text:
             continue
-        text = supervisor.with_reply_footer(text)
         mgr = bundle["managers"].get(entry["outlet_code"])
         decision = wmr.route_message(
             enabled,
@@ -4892,7 +4998,13 @@ async def post_key_stock_checks(application: Application, *,
             mgr.get("chat_id") if mgr else None,
             ALERT_CHAT_ID,
         )
+        text = human_touch.personalise(
+            supervisor.with_reply_footer(text),
+            mgr.get("manager_name") if mgr else None,
+            decision.target_chat_id,
+        )
         try:
+            await human_touch.show_typing(application.bot, decision.target_chat_id)
             sent_msg = await application.bot.send_message(
                 chat_id=decision.target_chat_id, text=decision.prefix + text
             )
@@ -4970,6 +5082,7 @@ def _gather_overbuy(today=None) -> dict:
                 routes[o.canonical] = {
                     "display": o.display,
                     "manager_chat_id": mgr.get("chat_id") if mgr else None,
+                    "manager_name": mgr.get("manager_name") if mgr else None,
                 }
         except Exception:
             logger.exception("overbuy watch: manager routing lookup failed")
@@ -5005,7 +5118,6 @@ async def post_overbuy_checks(application: Application, *,
         text = overbuy_watch.format_manager_overbuy(entry)
         if not text:
             continue
-        text = supervisor.with_reply_footer(text)
         route = bundle["routes"].get(entry["outlet"]) or {}
         decision = wmr.route_message(
             enabled,
@@ -5013,7 +5125,13 @@ async def post_overbuy_checks(application: Application, *,
             route.get("manager_chat_id"),
             ALERT_CHAT_ID,
         )
+        text = human_touch.personalise(
+            supervisor.with_reply_footer(text),
+            route.get("manager_name"),
+            decision.target_chat_id,
+        )
         try:
+            await human_touch.show_typing(application.bot, decision.target_chat_id)
             sent_msg = await application.bot.send_message(
                 chat_id=decision.target_chat_id, text=decision.prefix + text
             )
@@ -5447,6 +5565,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("key_stock_now", key_stock_now_command))
     app.add_handler(CommandHandler("questions_now", questions_now_command))
     app.add_handler(CommandHandler("form_chase_now", form_chase_now_command))
+    app.add_handler(CommandHandler("scoreboard_now", scoreboard_now_command))
     app.add_handler(CommandHandler("order_drafts_now", order_drafts_now_command))
     app.add_handler(CommandHandler("cash_no_receipt_today", cash_no_receipt_today_command))
     app.add_handler(CommandHandler("reconcile_now", reconcile_now_command))
@@ -5570,6 +5689,19 @@ async def run_bot() -> None:
         minute=45,
         args=[app],
         id="kitchen_form_chase",
+        replace_existing=True,
+    )
+    # Weekly praise + response scoreboard — Monday 11:00 MY, from the
+    # question ledger. Full-responders get Tamil praise; the owner gets the
+    # who-answers-how-fast scoreboard.
+    scheduler.add_job(
+        post_weekly_praise,
+        trigger="cron",
+        day_of_week="mon",
+        hour=11,
+        minute=0,
+        args=[app],
+        id="weekly_praise",
         replace_existing=True,
     )
     # Question follow-up — daily 17:00 MY. Nudges yesterday's unanswered
