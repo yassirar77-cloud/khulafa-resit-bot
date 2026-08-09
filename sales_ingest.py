@@ -187,7 +187,14 @@ def _daily_top_rows(parsed):
 
 def build_daily_record(email_dict, parsed, outlet_canonical, business_date) -> dict:
     """Assemble the ``sales_daily_summary`` parent + its 5 child lists + the
-    idempotency key (outlet_canonical, business_date) from a parsed D-file."""
+    idempotency key (outlet_canonical, business_date, printed_at) from a parsed
+    D-file.
+
+    ``printed_at`` is part of the key because a 24h outlet that closes its POS
+    day TWICE (the ~19:00 day close and the ~07:00-next-morning overnight close)
+    emails TWO D-files that both fold onto the SAME business_date — each covers
+    one half of the 24h day and the daily total is their SUM. Keying on the
+    print time keeps both, while a re-send of the same close still dedups."""
     h = parsed.get("header", {})
     d = parsed.get("daily_aggregate", {})
     parent = {
@@ -247,7 +254,7 @@ def build_daily_record(email_dict, parsed, outlet_canonical, business_date) -> d
     return _sanitize_record({
         "parent": parent,
         "children": children,
-        "key": (outlet_canonical, business_date.isoformat()),
+        "key": (outlet_canonical, business_date.isoformat(), _iso(h.get("printed_at"))),
     })
 
 
@@ -378,15 +385,21 @@ class SupabaseSalesStore:
         )
         return bool(resp.data)
 
-    def exists_daily(self, outlet_canonical, business_date) -> bool:
-        resp = (
+    def exists_daily(self, outlet_canonical, business_date, printed_at=None) -> bool:
+        """Is THIS daily close already stored? Keyed on (outlet, business_date,
+        printed_at): a 24h outlet's two daily closes (~19:00 and ~07:00 next
+        morning) share a business_date but never a print time, so the second
+        close is a NEW row — not a duplicate. Only a re-send of the same close
+        (same print time) dedups here."""
+        q = (
             self.client.table(DAILY_SUMMARY_TABLE)
             .select("id")
             .eq("outlet_canonical", outlet_canonical)
             .eq("business_date", business_date)
-            .limit(1)
-            .execute()
         )
+        # printed_at can be NULL when the header didn't parse; match explicitly.
+        q = q.is_("printed_at", "null") if printed_at is None else q.eq("printed_at", printed_at)
+        resp = q.limit(1).execute()
         return bool(resp.data)
 
     def save_daily(self, record) -> int:
@@ -523,7 +536,7 @@ def _process_d_file(store, email_dict, canonical, now_my):
         return "error", "no_day_sales_parsed"
     business_date = parsed.get("header", {}).get("business_date") or now_my.date()
     record = build_daily_record(email_dict, parsed, canonical, business_date)
-    if store.exists_daily(canonical, business_date.isoformat()):
+    if store.exists_daily(*record["key"]):
         return "skipped", "duplicate"
     store.save_daily(record)
     # Part 2: confirm before \Seen.
@@ -536,7 +549,9 @@ def process_email(store, email_dict, *, now_my, outlets):
     """Ingest one POS email, routed by type and gated by the ``outlet_canonical``
     registry (``outlets``: S-code -> {canonical_name, active, confirmed}).
 
-    S-files -> sales_daily (per shift); D-files -> sales_daily_summary (per day).
+    S-files -> sales_daily (per shift); D-files -> sales_daily_summary (one row
+    per DAILY CLOSE — a 24h outlet closes twice, ~19:00 + ~07:00 next morning,
+    so a business day can carry two rows whose sales SUM to the day's total).
     Both resolve the outlet by stripping the prefix and looking up the S-code.
 
     Returns ``(status, detail)``:
@@ -614,13 +629,18 @@ _COUNTER_BY_STATUS = {
 }
 
 
-def run(*, store, mailbox, now_my, since=None) -> dict:
+def run(*, store, mailbox, now_my, since=None, unseen_only=True) -> dict:
     """Drive the mailbox end-to-end. Returns a summary dict.
 
     The ``outlet_canonical`` registry is loaded ONCE per run (no per-email
     queries) and used to gate active/confirmed. A message is flagged ``\\Seen``
     only on inserted / duplicate / inactive; unknown-outlet and error messages
-    stay unread for retry/inspection."""
+    stay unread for retry/inspection.
+
+    ``unseen_only=False`` re-scans ALREADY-READ mail too (pair with ``since``).
+    Recovery use: emails wrongly skipped as duplicates in the past were marked
+    read, so the normal UNSEEN poll can never revisit them — a seen sweep can,
+    and the message-id dedup keeps everything already stored idempotent."""
     summary = {
         "fetched": 0, "inserted": 0, "skipped": 0,
         "skipped_inactive": 0, "skipped_unknown": 0, "errors": 0,
@@ -628,8 +648,8 @@ def run(*, store, mailbox, now_my, since=None) -> dict:
     }
     outlets = store.load_outlets()  # one query, reused for the whole batch
     error_counts = _load_error_counts(store)  # prior failures per message-id
-    # subject_token=None: fetch all unread POS mail (S- AND D-), classify in code.
-    for msg_id in mailbox.search(since=since, subject_token=None):
+    # subject_token=None: fetch all matching POS mail (S- AND D-), classify in code.
+    for msg_id in mailbox.search(since=since, subject_token=None, unseen_only=unseen_only):
         try:
             msg = mailbox.fetch(msg_id)
             email_dict = extract_shift_close(msg)
@@ -682,15 +702,17 @@ def _build_client():
     return create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
 
 
-def run_ingest_once(client=None, *, now_my=None, since=None) -> dict:
+def run_ingest_once(client=None, *, now_my=None, since=None, unseen_only=True) -> dict:
     """Connect to the inbox, ingest all unread shift-close emails, return the
-    summary. Used by the APScheduler job in bot.py and the manual command."""
+    summary. Used by the APScheduler job in bot.py and the manual command.
+    ``unseen_only=False`` (with ``since``) is the recovery sweep over read mail."""
     client = client or _build_client()
     now_my = now_my or datetime.now(MALAYSIA_TZ)
     store = SupabaseSalesStore(client)
     mailbox = Mailbox.connect()
     try:
-        summary = run(store=store, mailbox=mailbox, now_my=now_my, since=since)
+        summary = run(store=store, mailbox=mailbox, now_my=now_my, since=since,
+                      unseen_only=unseen_only)
     finally:
         mailbox.close()
     logger.info("Sales ingest: %s", summary)

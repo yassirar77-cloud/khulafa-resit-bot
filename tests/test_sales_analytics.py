@@ -136,3 +136,52 @@ def test_format_ingest_latency_overnight_naive_close_vs_utc_recv_no_phantom_lag(
     assert "16h" not in text
     assert "ALL PROMPT" in text
     assert "07:00" in text and "23:00" not in text  # MYT rendering of both
+
+
+# --- merge_summary_rows: 24h two-daily-close fold -----------------------------
+
+def test_merge_summary_rows_sums_two_closes_of_one_business_day():
+    import sales_analytics as sa
+    rows = [
+        {"outlet_canonical": "SEK-6", "business_date": "2026-08-07",
+         "day_sales": 3500.0, "customers": 300, "average_spent": 11.67,
+         "take_away": 2000.0, "dine_in": 1500.0, "total_shifts": 1},
+        {"outlet_canonical": "SEK-6", "business_date": "2026-08-07",
+         "day_sales": 2100.0, "customers": 200, "average_spent": 10.50,
+         "take_away": 600.0, "dine_in": 1500.0, "total_shifts": 1},
+    ]
+    merged = sa.merge_summary_rows(rows)
+    assert len(merged) == 1
+    m = merged[0]
+    assert m["day_sales"] == 5600.0
+    assert m["customers"] == 500
+    assert m["take_away"] == 2600.0 and m["dine_in"] == 3000.0
+    assert m["total_shifts"] == 2
+    # Recomputed from the summed figures, never averaged across closes.
+    assert m["average_spent"] == round(5600.0 / 500, 2)
+
+
+def test_merge_summary_rows_single_close_passthrough_and_outlet_separation():
+    import sales_analytics as sa
+    rows = [
+        {"outlet_canonical": "Jakel", "business_date": "2026-08-07",
+         "day_sales": 900.0, "customers": 90, "average_spent": 10.0},
+        {"outlet_canonical": "Vista", "business_date": "2026-08-07",
+         "day_sales": 800.0, "customers": 80, "average_spent": 10.0},
+    ]
+    merged = sa.merge_summary_rows(rows)
+    assert len(merged) == 2                      # different outlets never merge
+    assert merged[0]["average_spent"] == 10.0    # untouched single-close row
+
+
+def test_merge_summary_rows_zero_customers_gives_no_average():
+    import sales_analytics as sa
+    rows = [
+        {"outlet_canonical": "SEK-6", "business_date": "2026-08-07",
+         "day_sales": 100.0, "customers": 0, "average_spent": None},
+        {"outlet_canonical": "SEK-6", "business_date": "2026-08-07",
+         "day_sales": 50.0, "customers": 0, "average_spent": None},
+    ]
+    merged = sa.merge_summary_rows(rows)
+    assert merged[0]["day_sales"] == 150.0
+    assert merged[0]["average_spent"] is None

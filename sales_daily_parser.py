@@ -1,14 +1,19 @@
 """POS daily-summary (D-file) parser (PR #60).
 
-The POS sends two email types per outlet per day:
-  * ``S-`` shift-close detail (parsed by sales_parser.py -> sales_daily) — at
-    ~19:00 / ~00:00.
-  * ``D-`` daily summary (THIS module -> sales_daily_summary) — at ~07:00.
+The POS sends two email types per outlet:
+  * ``S-`` shift-close detail (parsed by sales_parser.py -> sales_daily) — one
+    per shift close (~19:00 / ~00:00-07:00).
+  * ``D-`` daily summary (THIS module -> sales_daily_summary) — one per DAILY
+    CLOSE. Most outlets close their POS day once (a single D-file listing every
+    shift), but a 24h outlet can close TWICE — ~19:00 for the 7am-7pm half and
+    ~07:00 next morning for the 7pm-7am half — sending TWO D-files that both
+    fold onto the same business_date; the day's true totals are their SUM
+    (readers aggregate via ``sales_analytics.merge_summary_rows``).
 
-D-files are pre-aggregated (1 row per outlet per day) and carry data the S-files
-don't: customer counts, average spend, takeaway/dine-in split, consolidated
-vendor payouts, a deleted-item audit trail with staff names, TOP-N rankings, and
-itemwise sales by category.
+D-files are pre-aggregated per close and carry data the S-files don't: customer
+counts, average spend, takeaway/dine-in split, consolidated vendor payouts, a
+deleted-item audit trail with staff names, TOP-N rankings, and itemwise sales
+by category.
 
 Layout (verified across the 7 real 26-May-2026 fixtures; tolerant of the 3
 not-yet-uploaded outlets):

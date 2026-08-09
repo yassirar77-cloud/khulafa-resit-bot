@@ -2844,3 +2844,76 @@ def test_form_chase_job_reminds_group_and_escalates_once(monkeypatch):
     fake._store[ku.SESSION_TABLE][0]["status"] = "submitted"
     bot4 = _run(datetime(2026, 8, 7, 14, 45, tzinfo=MY))
     assert bot4.sent == []
+
+
+# --- per-shop D-file shift coverage (24h two-daily-close outlets) -------------
+# A 24h outlet closes its POS day twice (~19:00 + ~07:00 next morning) and each
+# close emails its own D-file. Both S-file shifts can be in while the stored
+# summaries still only cover HALF the day (the morning close's email pending or
+# historically dropped) — the gate must read incomplete, not compare a half-day.
+
+
+def _seed_two_close_day(fake, *, closes=("evening",)):
+    """Both S-file shifts ingested; D summaries per requested close.
+    evening close covers shift 1500 (day), morning close covers 1501 (overnight)."""
+    _seed_complete_day(fake)
+    _seed_pos_shifts(fake, types=("day", "overnight"))  # shift_no 1500 + 1501
+    summaries, breakdown, itemwise = [], [], []
+    if "evening" in closes:
+        summaries.append({"id": 1, "outlet_code": "D-SEK20", "outlet_canonical": "SEK-20",
+                          "business_date": "2026-06-24", "total_shifts": 1})
+        breakdown.append({"id": 21, "summary_id": 1, "shift_index": 1, "shift_id": "1500"})
+        itemwise.append({"id": 10, "summary_id": 1, "item_name": "Ayam Goreng", "qty": 35})
+    if "morning" in closes:
+        summaries.append({"id": 2, "outlet_code": "D-SEK20", "outlet_canonical": "SEK-20",
+                          "business_date": "2026-06-24", "total_shifts": 1})
+        breakdown.append({"id": 22, "summary_id": 2, "shift_index": 1, "shift_id": "1501"})
+        itemwise.append({"id": 11, "summary_id": 2, "item_name": "Ayam Goreng", "qty": 60})
+    fake._store[ku.SALES_SUMMARY_TABLE] = summaries
+    fake._store[ku.SALES_SHIFT_BREAKDOWN_TABLE] = breakdown
+    fake._store[ku.SALES_ITEMWISE_TABLE] = itemwise
+
+
+def test_coverage_incomplete_when_summaries_cover_only_the_day_shift():
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_two_close_day(fake, closes=("evening",))  # morning close missing
+    cov = ku.pos_shift_coverage(fake, "SEK20", "2026-06-24")
+    assert cov["has_day"] and cov["has_overnight"]      # both S-files ARE in...
+    assert cov["summary_present"]
+    assert cov["summaries_cover_shifts"] is False       # ...but D covers half
+    assert cov["uncovered_shift_nos"] == ["1501"]
+    assert cov["complete"] is False                     # never compare a half-day
+    assert ku.pos_complete_for_outlet(fake, "SEK20", "2026-06-24") is False
+    text = ku.render_pos_incomplete("SEK-20", "2026-06-24", cov)
+    assert "POS belum lengkap" in text and "sebahagian shift" in text
+
+
+def test_coverage_complete_once_both_daily_closes_land():
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_two_close_day(fake, closes=("evening", "morning"))
+    cov = ku.pos_shift_coverage(fake, "SEK20", "2026-06-24")
+    assert cov["summaries_cover_shifts"] is True
+    assert cov["uncovered_shift_nos"] == []
+    assert cov["complete"] is True
+    assert cov["total_shifts"] == 2   # summed across the two closes
+    # And the comparison now sees BOTH halves' itemwise: 35 + 60 = 95.
+    itemwise = ku._fetch_itemwise(fake, "SEK20", "2026-06-24")
+    assert ku.pos_qty_for_item("ayam_goreng", itemwise) == 95
+
+
+def test_coverage_falls_back_when_summaries_have_no_breakdown():
+    # Legacy / parse-variance: a summary with NO shift_breakdown rows must not
+    # block forever — the check is skipped (old behaviour preserved).
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_complete_day(fake)
+    _seed_pos_summary(fake)                            # no breakdown children
+    _seed_pos_shifts(fake, types=("day", "overnight"))
+    cov = ku.pos_shift_coverage(fake, "SEK20", "2026-06-24")
+    assert cov["summaries_cover_shifts"] is True
+    assert cov["complete"] is True

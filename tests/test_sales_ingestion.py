@@ -123,8 +123,8 @@ class FakeStore:
             self._mids.add(mid)
         return len(self.saved)
 
-    def exists_daily(self, outlet_canonical, business_date):
-        return (outlet_canonical, business_date) in self._dkeys
+    def exists_daily(self, outlet_canonical, business_date, printed_at=None):
+        return (outlet_canonical, business_date, printed_at) in self._dkeys
 
     def exists_daily_message_id(self, message_id):
         return message_id in self._dmids
@@ -484,6 +484,91 @@ class SkippedUnknownCapTests(unittest.TestCase):
         self.assertEqual(summary["dead_letter"], 1)
         self.assertEqual(store.logs, [])
         self.assertNotIn(b"1", mailbox.seen)  # still unread -> recoverable
+
+
+def _mini_d_content(printed, shift_id, sales="3,500.00"):
+    """A minimal but parseable D-file for one daily close: header, TOTAL SHIFTS,
+    the daily aggregate block, and one SHIFT breakdown block."""
+    return "\n".join([
+        f"   D-SEK20   ON {printed}",
+        "    NASI KANDAR HAJI SHARFUDDIN",
+        "    JALAN TEST",
+        "    (TOTAL SHIFTS :1)",
+        f"DAY SALES        :      {sales}",
+        "TAX 6%           :          .00",
+        f"NET SALES        :      {sales}",
+        f"SHIFT :1 ({shift_id}) ON {printed}",
+        f"TODAY SALES      :      {sales}",
+    ])
+
+
+class TwoDailyClosesTests(unittest.TestCase):
+    """24h outlets close their POS day TWICE (~19:00 + ~07:00 next morning) and
+    email a D-file per close; both fold onto the same business_date and the
+    day's sales are their SUM. The second close must land as its own row — it
+    was previously skipped as a 'duplicate' (and marked read), silently dropping
+    half the day's sales."""
+
+    EVENING = "07/August/2026 19:15:02"       # covers ~7am-7pm of 07 Aug
+    MORNING = "08/August/2026 07:00:05"       # covers 7pm 07 Aug - 7am 08 Aug
+
+    def _mailbox(self):
+        return FakeMailbox([
+            (b"1", make_email(f"D-SEK20 ON {self.EVENING}",
+                              _mini_d_content(self.EVENING, 9001, sales="3,500.00"),
+                              message_id="<d-eve>")),
+            (b"2", make_email(f"D-SEK20 ON {self.MORNING}",
+                              _mini_d_content(self.MORNING, 9002, sales="2,100.00"),
+                              message_id="<d-morn>")),
+        ])
+
+    def test_both_closes_ingest_onto_same_business_date(self):
+        store = FakeStore()
+        mailbox = self._mailbox()
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["inserted"], 2)
+        self.assertEqual(len(store.daily), 2)
+        dates = {r["parent"]["business_date"] for r in store.daily}
+        self.assertEqual(dates, {"2026-08-07"})  # both halves of the SAME day
+        self.assertEqual(
+            sorted(float(r["parent"]["day_sales"]) for r in store.daily),
+            [2100.0, 3500.0],  # sum = the true 24h total
+        )
+        # Distinct idempotency keys — printed_at separates the two closes.
+        keys = {r["key"] for r in store.daily}
+        self.assertEqual(len(keys), 2)
+        self.assertEqual(mailbox.seen, [b"1", b"2"])
+
+    def test_resend_of_same_close_is_still_a_duplicate(self):
+        store = FakeStore()
+        run(store=store, mailbox=self._mailbox(), now_my=NOW)
+        # The POS re-sends the MORNING close under a NEW message id: same
+        # outlet+date+print time -> duplicate, not a third row.
+        resend = FakeMailbox([
+            (b"9", make_email(f"D-SEK20 ON {self.MORNING}",
+                              _mini_d_content(self.MORNING, 9002, sales="2,100.00"),
+                              message_id="<d-morn-resend>")),
+        ])
+        summary = run(store=store, mailbox=resend, now_my=NOW)
+        self.assertEqual(summary["skipped"], 1)
+        self.assertEqual(len(store.daily), 2)
+        self.assertIn(b"9", resend.seen)
+
+    def test_seen_sweep_reaches_already_read_mail(self):
+        # unseen_only=False must flow to the mailbox search so the recovery
+        # sweep can revisit read-but-dropped closes.
+        class RecordingMailbox(FakeMailbox):
+            def __init__(self, messages):
+                super().__init__(messages)
+                self.search_kwargs = None
+
+            def search(self, **kwargs):
+                self.search_kwargs = kwargs
+                return super().search(**kwargs)
+
+        mailbox = RecordingMailbox([])
+        run(store=FakeStore(), mailbox=mailbox, now_my=NOW, unseen_only=False)
+        self.assertEqual(mailbox.search_kwargs.get("unseen_only"), False)
 
 
 if __name__ == "__main__":
