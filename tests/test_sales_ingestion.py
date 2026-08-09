@@ -554,6 +554,23 @@ class TwoDailyClosesTests(unittest.TestCase):
         self.assertEqual(len(store.daily), 2)
         self.assertIn(b"9", resend.seen)
 
+    def test_subject_token_flows_to_the_mailbox_search(self):
+        # The targeted recovery sweep (/activate_outlet) narrows the IMAP
+        # search to one outlet's subjects.
+        class RecordingMailbox(FakeMailbox):
+            def __init__(self, messages):
+                super().__init__(messages)
+                self.search_kwargs = None
+
+            def search(self, **kwargs):
+                self.search_kwargs = kwargs
+                return super().search(**kwargs)
+
+        mailbox = RecordingMailbox([])
+        run(store=FakeStore(), mailbox=mailbox, now_my=NOW,
+            unseen_only=False, subject_token="S-44")
+        self.assertEqual(mailbox.search_kwargs.get("subject_token"), "S-44")
+
     def test_seen_sweep_reaches_already_read_mail(self):
         # unseen_only=False must flow to the mailbox search so the recovery
         # sweep can revisit read-but-dropped closes.
@@ -569,6 +586,66 @@ class TwoDailyClosesTests(unittest.TestCase):
         mailbox = RecordingMailbox([])
         run(store=FakeStore(), mailbox=mailbox, now_my=NOW, unseen_only=False)
         self.assertEqual(mailbox.search_kwargs.get("unseen_only"), False)
+
+
+class NewOutletPlaceholderTests(unittest.TestCase):
+    """A brand-new shop's POS (e.g. S-44) coming online must not spin forever:
+    the first unknown email auto-registers an INACTIVE placeholder, the rest of
+    its mail is skipped-inactive (marked read), and the summary surfaces the
+    new code so the owner is told to /activate_outlet it."""
+
+    class RegisteringStore(FakeStore):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.registered = []
+
+        def register_placeholder_outlet(self, s_code):
+            self.registered.append(s_code)
+            return True
+
+    def test_unknown_outlet_registers_placeholder_and_batch_goes_quiet(self):
+        mailbox = FakeMailbox([
+            (b"1", make_email("S-44 SHIFTCLOSE (10)", _klang_content(), message_id="<44a>")),
+            (b"2", make_email("S-44 SHIFTCLOSE (11)", _klang_content(), message_id="<44b>")),
+        ])
+        store = self.RegisteringStore()
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(store.registered, ["S-44"])
+        self.assertEqual(summary["new_outlets"], ["S-44"])
+        # First email discovered the outlet (left unread); the SECOND already
+        # sees the inactive placeholder -> skipped_inactive + marked read, so
+        # the refetch/warn loop ends within the same batch.
+        self.assertEqual(summary["skipped_unknown"], 1)
+        self.assertEqual(summary["skipped_inactive"], 1)
+        self.assertEqual(mailbox.seen, [b"2"])
+
+    def test_registration_failure_keeps_old_behaviour(self):
+        class FailingStore(FakeStore):
+            def register_placeholder_outlet(self, s_code):
+                return False
+
+        mailbox = FakeMailbox([
+            (b"1", make_email("S-44 SHIFTCLOSE (10)", _klang_content(), message_id="<44a>")),
+        ])
+        summary = run(store=FailingStore(), mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["new_outlets"], [])
+        self.assertEqual(summary["skipped_unknown"], 1)
+        self.assertNotIn(b"1", mailbox.seen)  # still unread for retry
+
+    def test_store_inserts_inactive_unconfirmed_row(self):
+        from tests.fake_supabase import FakeSupabase
+
+        from sales_ingest import SupabaseSalesStore
+
+        fake = FakeSupabase()
+        store = SupabaseSalesStore(fake)
+        self.assertTrue(store.register_placeholder_outlet("S-44"))
+        rows = fake.rows("outlet_canonical")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["code"], "S-44")
+        self.assertEqual(rows[0]["canonical_name"], "44")
+        self.assertFalse(rows[0]["active"])
+        self.assertFalse(rows[0]["confirmed"])
 
 
 if __name__ == "__main__":
