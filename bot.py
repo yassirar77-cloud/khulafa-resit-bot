@@ -102,6 +102,7 @@ import food_cost_analytics
 import kitchen_usage
 import manager_registration
 import key_stock_daily
+import item_sales_watch
 import missing_bills
 import monthly_consumption
 import human_touch
@@ -2108,6 +2109,8 @@ HELP_TEXT = (
     "falling sales\n"
     "/key_stock_now — check yesterday's key-stock buying vs the full 24h "
     "day's sales\n"
+    "/slow_items_now — which items sold under each shop's usual yesterday "
+    "(full 24h day)\n"
     "\n"
     "Questions:\n"
     "/questions_now — which manager questions are still unanswered\n"
@@ -5058,6 +5061,118 @@ async def key_stock_now_command(update: Update,
     )
 
 
+# === Daily slow-item watch (which items sold under the shop's usual) ========
+# Combines BOTH shift-close emails of the 24h business day (day + overnight,
+# folded onto one business date) into per-item-group quantities, compares each
+# group against that shop's own 28-day median, and tells the manager which
+# items moved less than usual — push them today. An item slow 3 data-days
+# running escalates to the taste/quality question. See item_sales_watch.py.
+
+def _gather_slow_items(today=None) -> dict:
+    bundle = item_sales_watch.gather_slow_item_flags(supabase, today=today)
+    managers = {}
+    if bundle["entries"]:
+        try:
+            managers = manager_registration.get_all_managers(supabase)
+        except Exception:
+            logger.exception("slow items: manager lookup failed")
+    bundle["managers"] = managers
+    bundle["enabled"] = wmr.delivery_enabled()
+    return bundle
+
+
+async def post_slow_item_checks(application: Application, *,
+                                notify_chat_id=None) -> None:
+    """Daily 10:45 MY job (right after the key-stock check; the overnight
+    shift email normally lands ~07:05, so the just-closed day is complete by
+    then; still-incomplete outlets are skipped, never judged on a half day)."""
+    try:
+        bundle = await asyncio.to_thread(_gather_slow_items)
+    except Exception:
+        logger.exception("slow items: gather failed")
+        if notify_chat_id is not None:
+            with contextlib.suppress(Exception):
+                await application.bot.send_message(
+                    chat_id=notify_chat_id,
+                    text="Failed to run the slow-item check.",
+                )
+        return
+
+    entries = bundle["entries"]
+    enabled = bundle["enabled"]
+    sent = 0
+    for entry in entries:
+        text = item_sales_watch.format_manager_slow_items(entry)
+        if not text:
+            continue
+        mgr = bundle["managers"].get(entry["outlet_code"])
+        decision = wmr.route_message(
+            enabled,
+            entry.get("display") or entry["outlet_code"],
+            mgr.get("chat_id") if mgr else None,
+            ALERT_CHAT_ID,
+        )
+        text = human_touch.personalise(
+            supervisor.with_reply_footer(text),
+            mgr.get("manager_name") if mgr else None,
+            decision.target_chat_id,
+        )
+        try:
+            await human_touch.show_typing(application.bot, decision.target_chat_id)
+            sent_msg = await application.bot.send_message(
+                chat_id=decision.target_chat_id, text=decision.prefix + text
+            )
+            sent += 1
+            if decision.reason == "manager":
+                await asyncio.to_thread(
+                    supervisor.log_question,
+                    supabase, decision.target_chat_id, sent_msg.message_id,
+                    "slow_items", text,
+                )
+        except Exception:
+            logger.exception(
+                "slow items: send failed (outlet=%s)", entry.get("outlet_code")
+            )
+
+    summary = item_sales_watch.format_owner_summary(entries)
+    if summary:
+        with contextlib.suppress(Exception):
+            await application.bot.send_message(chat_id=ALERT_CHAT_ID, text=summary)
+    if notify_chat_id is not None and not entries:
+        note = (
+            f"✅ Item sales ok for {bundle.get('business_date') or 'yesterday'} — "
+            "no shop had items clearly under its usual level."
+        )
+        if bundle.get("skipped_incomplete"):
+            note += (
+                f" ({bundle['skipped_incomplete']} outlet(s) skipped — POS day "
+                "not complete yet, both shift emails not in.)"
+            )
+        with contextlib.suppress(Exception):
+            await application.bot.send_message(chat_id=notify_chat_id, text=note)
+    logger.info(
+        "Slow-item check %s: %d outlet(s) flagged, %d sent, %d incomplete, "
+        "delivery_enabled=%s",
+        bundle.get("business_date"), len(entries), sent,
+        bundle.get("skipped_incomplete", 0), enabled,
+    )
+
+
+async def slow_items_now_command(update: Update,
+                                 context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only: run the daily slow-item check on demand (for testing)."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    await message.reply_text(
+        "Checking which items sold under each shop's usual yesterday "
+        "(full 24h day)…"
+    )
+    await post_slow_item_checks(
+        context.application, notify_chat_id=_command_owner_id(update)
+    )
+
+
 # === Overbuying watch (sales down, orders not) ==============================
 # Weekly cross-check of the two trends the bot already collects: POS sales
 # (from the shift-close emails, reconciled per outlet per day) and purchases
@@ -5565,6 +5680,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("missing_bills_now", missing_bills_now_command))
     app.add_handler(CommandHandler("overbuy_now", overbuy_now_command))
     app.add_handler(CommandHandler("key_stock_now", key_stock_now_command))
+    app.add_handler(CommandHandler("slow_items_now", slow_items_now_command))
     app.add_handler(CommandHandler("questions_now", questions_now_command))
     app.add_handler(CommandHandler("form_chase_now", form_chase_now_command))
     app.add_handler(CommandHandler("scoreboard_now", scoreboard_now_command))
@@ -5728,6 +5844,20 @@ async def run_bot() -> None:
         minute=30,
         args=[app],
         id="key_stock_daily",
+        replace_existing=True,
+    )
+    # Daily slow-item watch — 10:45 MY, right after the key-stock check.
+    # Combines both shift emails of yesterday's 24h day per shop, flags item
+    # groups selling under the shop's own 28-day usual, and asks the manager
+    # in Tamil to push them today (3-day slumps get the taste/quality
+    # question). Gated by MANAGER_DELIVERY_ENABLED.
+    scheduler.add_job(
+        post_slow_item_checks,
+        trigger="cron",
+        hour=10,
+        minute=45,
+        args=[app],
+        id="slow_items_daily",
         replace_existing=True,
     )
     # Overbuying watch — Monday 09:30 MY, right after the 09:00 weekly
