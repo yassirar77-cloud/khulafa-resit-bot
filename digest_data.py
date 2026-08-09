@@ -339,11 +339,14 @@ def _food_cost_payload(client, recon, recon_date) -> dict:
 def _sales_today(client, date) -> dict:
     rows = _rows(
         client.table(SALES_DAILY_SUMMARY_TABLE)
-        .select("day_sales, customers, take_away, dine_in")
+        .select("outlet_canonical, business_date, day_sales, customers, take_away, dine_in")
         .eq("business_date", date.isoformat())
         .execute()
     )
-    summary = fca.sales_summary(rows)
+    # Fold multi-close days (24h outlets email two D-files per business day) so
+    # the outlet count is right; the money fields sum either way.
+    from sales_analytics import merge_summary_rows
+    summary = fca.sales_summary(merge_summary_rows(rows))
     summary["label"] = date.isoformat()
     return summary
 

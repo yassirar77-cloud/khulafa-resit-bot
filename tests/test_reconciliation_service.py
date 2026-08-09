@@ -214,6 +214,22 @@ class ReconciliationServiceTests(unittest.TestCase):
         self.assertEqual(len(client.store["purchase_reconciliation"]), 1)
         self.assertEqual(len(client.store["purchase_match_log"]), 3)
 
+    def test_two_daily_closes_sum_into_sales_total(self):
+        # A 24h outlet's business day carries TWO summary rows (one per daily
+        # close: ~19:00 and ~07:00 next morning). sales_total must be their SUM
+        # — the old dict comprehension kept whichever row came last.
+        seed = self._seed()
+        seed["sales_daily_summary"] = [
+            {"id": 5001, "outlet_canonical": "Vista", "business_date": "2026-05-29",
+             "day_sales": 600.0, "printed_at": "2026-05-29T19:15:00"},
+            {"id": 5002, "outlet_canonical": "Vista", "business_date": "2026-05-29",
+             "day_sales": 400.0, "printed_at": "2026-05-30T07:00:00"},
+        ]
+        client = FakeClient(seed)
+        rs.run_reconciliation(client, "2026-05-29")
+        row = client.store["purchase_reconciliation"][0]
+        self.assertEqual(row["sales_total"], 1000.0)  # 600 + 400, not 400
+
 
 class IncludeUnknownReceiptsTests(unittest.TestCase):
     """Hotfix: count food spend from un-canonicalised receipts, with safeguards."""

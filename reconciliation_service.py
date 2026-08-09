@@ -295,9 +295,15 @@ def run_reconciliation(client, business_date, *, dry_run=False) -> dict:
 
     receipts_by_outlet = _receipts_by_outlet(receipt_rows, canonical_by_id)
     payouts_by_outlet = _payouts_by_outlet(summaries, payout_rows)
-    sales_by_outlet = {
-        s.get("outlet_canonical"): _float(s.get("day_sales")) for s in summaries
-    }
+    # SUM per outlet: a 24h outlet's business day can carry TWO summary rows
+    # (one per daily close — ~19:00 and ~07:00 next morning); the day's sales
+    # are their sum, not whichever row happened to come last.
+    sales_by_outlet: dict = {}
+    for s in summaries:
+        outlet = s.get("outlet_canonical")
+        sales_by_outlet[outlet] = sales_by_outlet.get(outlet, 0.0) + _float(
+            s.get("day_sales")
+        )
 
     outlets = set(receipts_by_outlet) | set(payouts_by_outlet) | set(sales_by_outlet)
     outlets.discard(None)

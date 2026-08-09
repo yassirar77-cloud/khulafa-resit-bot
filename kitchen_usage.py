@@ -810,6 +810,7 @@ SESSION_TABLE = "kitchen_log_session"
 USAGE_TABLE = "kitchen_daily_usage"
 SALES_SUMMARY_TABLE = "sales_daily_summary"
 SALES_ITEMWISE_TABLE = "sales_daily_itemwise"
+SALES_SHIFT_BREAKDOWN_TABLE = "sales_daily_shift_breakdown"
 SALES_DAILY_TABLE = "sales_daily"  # per-shift S-file rows (shift_type day/overnight)
 RECEIPTS_TABLE = "receipts"
 
@@ -1114,15 +1115,56 @@ def _matching_shift_rows(client, outlet_code, business_date) -> list:
     ]
 
 
+def _norm_shift_id(value) -> str | None:
+    """Normalise a shift number/id ('2414', 2414, ' 02414 ') to a comparable
+    digit string, or None when there are no digits."""
+    digits = re.sub(r"\D", "", str(value or ""))
+    digits = digits.lstrip("0") or ("0" if digits else "")
+    return digits or None
+
+
+def _summary_shift_ids(client, summary_ids) -> set:
+    """The POS shift ids listed inside the stored D-file summaries (their
+    ``sales_daily_shift_breakdown`` child rows), normalised. Empty set when the
+    summaries carry no parsed breakdown (older files / parse variance)."""
+    if not summary_ids:
+        return set()
+    rows = _rows(
+        client.table(SALES_SHIFT_BREAKDOWN_TABLE)
+        .select("summary_id, shift_id")
+        .in_("summary_id", summary_ids)
+        .execute()
+    )
+    out = set()
+    for r in rows:
+        sid = _norm_shift_id(r.get("shift_id"))
+        if sid:
+            out.add(sid)
+    return out
+
+
 def pos_shift_coverage(client, outlet_code, business_date) -> dict:
     """What POS has landed for an outlet's business_date so far. Returns
-    {summary_present, total_shifts, has_day, has_overnight, shift_types, complete}.
+    {summary_present, total_shifts, has_day, has_overnight, shift_types,
+    summaries_cover_shifts, uncovered_shift_nos, complete}.
 
     ``complete`` (the comparison gate) is True only when the D-file daily summary
-    exists (so itemwise quantities are available) AND the 'overnight' shift has
-    been ingested in sales_daily — proof the post-midnight portion of the 24h day
-    closed and was reported (the ~7AM email is in). Until then a comparison would
-    be against a half-day of sales."""
+    exists (so itemwise quantities are available), the 'overnight' shift has been
+    ingested in sales_daily — proof the post-midnight portion of the 24h day
+    closed and was reported (the ~7AM email is in) — AND the stored summaries
+    actually COVER those shifts.
+
+    The coverage check is what adapts the gate to each shop's own close pattern:
+    a shop that closes its POS day once (one D-file listing every shift) passes
+    with that single email, while a 24h shop that closes twice (~19:00 + ~07:00
+    next morning, one D-file each) needs BOTH emails in before its day counts as
+    complete. Each D-file lists the shifts it summarises
+    (``sales_daily_shift_breakdown``); every ingested S-file shift_no of the day
+    must appear in that union, otherwise the summaries only cover part of the
+    24h and the itemwise quantities would be a half-day — the exact condition
+    that used to produce absurdly low POS numbers and false LEAK flags. When
+    neither side has shift numbers to compare (parse variance) the check is
+    skipped rather than blocking forever."""
     shifts = _matching_shift_rows(client, outlet_code, business_date)
     types = {(r.get("shift_type") or "unknown") for r in shifts}
     summary_ids = _matching_summary_ids(client, outlet_code, business_date)
@@ -1136,12 +1178,35 @@ def pos_shift_coverage(client, outlet_code, business_date) -> dict:
                 .execute()
             )
             vals = [s.get("total_shifts") for s in srows if s.get("total_shifts") is not None]
-            total_shifts = max(vals) if vals else None
+            # Each daily close reports its OWN shift count, so a two-close 24h
+            # day is the SUM of its rows (one-close days are unaffected).
+            total_shifts = sum(vals) if vals else None
         except Exception:
             total_shifts = None
     summary_present = bool(summary_ids)
     has_day = "day" in types
     has_overnight = "overnight" in types
+
+    # Do the stored D-file(s) cover every ingested shift of this business day?
+    summaries_cover = True
+    uncovered: list = []
+    if summary_present:
+        try:
+            covered_ids = _summary_shift_ids(client, summary_ids)
+            shift_nos = {
+                _norm_shift_id(r.get("shift_no"))
+                for r in shifts
+                if (r.get("shift_type") in ("day", "overnight"))
+            } - {None}
+            if covered_ids and shift_nos:
+                uncovered = sorted(shift_nos - covered_ids)
+                summaries_cover = not uncovered
+        except Exception:
+            logger.warning(
+                "kitchen: summary shift-coverage check failed for %s %s",
+                outlet_code, business_date, exc_info=True,
+            )
+            summaries_cover = True
     return {
         "summary_present": summary_present,
         "total_shifts": total_shifts,
@@ -1149,11 +1214,16 @@ def pos_shift_coverage(client, outlet_code, business_date) -> dict:
         "has_overnight": has_overnight,
         "shift_types": types,
         "shift_count": len(shifts),
-        # COMPLETE = the FULL 24h is in: BOTH the day and overnight shift, plus the
-        # D-file summary that carries the itemwise quantities. Live SEK-20 25 Jun
-        # had ONLY the overnight shift (day email never ingested) — that must read
-        # incomplete, never compared as a half-day.
-        "complete": summary_present and has_day and has_overnight,
+        "summaries_cover_shifts": summaries_cover,
+        "uncovered_shift_nos": uncovered,
+        # COMPLETE = the FULL 24h is in: BOTH the day and overnight shift, plus
+        # D-file summar(ies) that cover those shifts' itemwise quantities. Live
+        # SEK-20 25 Jun had ONLY the overnight shift (day email never ingested)
+        # — that must read incomplete, never compared as a half-day. Live SEK-6
+        # 07 Aug had both S-files but only the EVENING daily close's D-file (the
+        # morning close was dropped as a "duplicate") — that must also read
+        # incomplete rather than compare against half-day itemwise.
+        "complete": summary_present and has_day and has_overnight and summaries_cover,
     }
 
 
@@ -1631,6 +1701,10 @@ def render_pos_incomplete(outlet_label, business_date, coverage=None) -> str:
         detail = f"Shift {_shift_names_my(missing)} belum masuk."
     elif not cov.get("summary_present"):
         detail = "Ringkasan harian POS belum masuk."
+    elif not cov.get("summaries_cover_shifts", True):
+        # Both shift emails are in, but the daily-close summary so far only
+        # covers part of the 24h day (e.g. the ~7AM close's email pending).
+        detail = "Ringkasan harian POS baru cover sebahagian shift — tunggu email tutup pagi."
     else:
         detail = "Menunggu data POS penuh."
     return (

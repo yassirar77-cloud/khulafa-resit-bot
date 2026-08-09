@@ -5347,7 +5347,9 @@ def _fetch_daily_summary_rows(business_dates):
         .in_("business_date", business_dates)
         .execute()
     )
-    return resp.data or []
+    # A 24h outlet can close its POS day twice (two D-files per business day);
+    # fold them so each outlet shows once with the summed day totals.
+    return sales_analytics.merge_summary_rows(resp.data or [])
 
 
 def _fetch_daily_top_items_rows(business_dates):

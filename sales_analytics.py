@@ -300,6 +300,51 @@ def _cust(row):
         return 0
 
 
+# Summed when a business day carries more than one daily-close row.
+_MERGE_SUM_FIELDS = (
+    "day_sales", "customers", "take_away", "dine_in",
+    "tax", "discount", "deleted_items_total",
+)
+
+
+def merge_summary_rows(rows) -> list:
+    """Collapse sales_daily_summary rows to ONE dict per (outlet, business_date).
+
+    A 24h outlet that closes its POS day twice (~19:00 day close + ~07:00
+    next-morning overnight close) emails TWO D-files that both fold onto the
+    same business_date — each covers half the 24h day, so the day's true totals
+    are their SUM. This merges those rows: day_sales / customers / take_away /
+    dine_in (etc.) are summed and average_spent is recomputed from the summed
+    revenue and customers (never averaged across closes). Single-close outlets
+    pass through unchanged. Input order is preserved by first appearance."""
+    merged: dict = {}
+    order = []
+    for r in rows or []:
+        key = (r.get("outlet_canonical"), str(r.get("business_date")))
+        if key not in merged:
+            merged[key] = dict(r)
+            order.append(key)
+            continue
+        agg = merged[key]
+        for f in _MERGE_SUM_FIELDS:
+            if r.get(f) is None and agg.get(f) is None:
+                continue
+            agg[f] = (_num(agg.get(f)) or 0.0) + (_num(r.get(f)) or 0.0)
+        # A second close means the stored per-close average is meaningless.
+        revenue = _num(agg.get("day_sales")) or 0.0
+        cust = _cust(agg)
+        agg["average_spent"] = round(revenue / cust, 2) if cust else None
+        if agg.get("total_shifts") is not None or r.get("total_shifts") is not None:
+            agg["total_shifts"] = int(_num(agg.get("total_shifts")) or 0) + int(
+                _num(r.get("total_shifts")) or 0
+            )
+    for key in order:
+        cust = merged[key].get("customers")
+        if cust is not None and float(cust) == int(float(cust)):
+            merged[key]["customers"] = int(float(cust))
+    return [merged[k] for k in order]
+
+
 def format_daily_summary(date_label, rows) -> str:
     """Per-outlet daily sales + customers + avg ticket + takeaway/dine-in,
     sorted by sales desc, with a group footer."""
