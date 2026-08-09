@@ -2111,6 +2111,8 @@ HELP_TEXT = (
     "day's sales\n"
     "/slow_items_now — which items sold under each shop's usual yesterday "
     "(full 24h day)\n"
+    "/activate_outlet <code> <name> — activate a newly-detected POS outlet "
+    "and pull in its held emails\n"
     "\n"
     "Questions:\n"
     "/questions_now — which manager questions are still unanswered\n"
@@ -4105,7 +4107,7 @@ async def sales_ingest_manual_command(update: Update, context: ContextTypes.DEFA
         logger.exception("manual sales ingest failed")
         await message.reply_text(f"Ingest failed: {exc}")
         return
-    await message.reply_text(
+    text = (
         "Sales ingest done —\n"
         f"• Fetched: {summary['fetched']}\n"
         f"• Inserted: {summary['inserted']}\n"
@@ -4113,6 +4115,84 @@ async def sales_ingest_manual_command(update: Update, context: ContextTypes.DEFA
         f"• Skipped (inactive): {summary['skipped_inactive']}\n"
         f"• Skipped (unknown): {summary['skipped_unknown']}\n"
         f"• Errors: {summary['errors']}"
+    )
+    new_codes = summary.get("new_outlets") or []
+    if new_codes:
+        text += "\n\n" + _new_outlet_alert_text(new_codes)
+    await message.reply_text(text)
+
+
+async def activate_outlet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only: activate a (new/placeholder) POS outlet and pull in its
+    held emails. Usage: /activate_outlet S-44 Shop Name Here"""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    args = context.args or []
+    if not args:
+        await message.reply_text(
+            "Usage: /activate_outlet <code> [shop name]\n"
+            "Example: /activate_outlet S-44 Khulafa 44"
+        )
+        return
+    code = args[0].strip().upper()
+    if code.startswith("D-"):
+        code = "S-" + code[2:]
+    elif not code.startswith("S-"):
+        code = "S-" + code
+    name = " ".join(args[1:]).strip() or code[2:]
+
+    def _activate():
+        resp = (
+            supabase.table("outlet_canonical")
+            .update({"canonical_name": name, "active": True, "confirmed": True})
+            .eq("code", code)
+            .execute()
+        )
+        return bool(resp.data)
+
+    try:
+        found = await asyncio.to_thread(_activate)
+    except Exception:
+        logger.exception("activate_outlet failed for %s", code)
+        await message.reply_text(f"Failed to activate {code}.")
+        return
+    if not found:
+        await message.reply_text(
+            f"{code} is not in outlet_canonical yet — it appears there "
+            "automatically the first time its POS email arrives."
+        )
+        return
+    await message.reply_text(
+        f"✅ {code} activated as “{name}”. Pulling in its held emails now…"
+    )
+    # Targeted recovery sweep: the outlet's emails were marked read while it
+    # was a placeholder, so re-scan SEEN mail — but only subjects matching this
+    # outlet's S-/D- codes (message-id dedup keeps it idempotent).
+    since = datetime.now(MALAYSIA_TZ) - timedelta(days=30)
+    totals = {"fetched": 0, "inserted": 0, "skipped": 0, "errors": 0}
+    try:
+        for token in (code, "D-" + code[2:]):
+            s = await asyncio.to_thread(
+                run_ingest_once, supabase,
+                since=since, unseen_only=False, subject_token=token,
+            )
+            for k in totals:
+                totals[k] += s.get(k, 0)
+    except Exception as exc:  # noqa: BLE001 - surfaced to the owner
+        logger.exception("activate_outlet recovery sweep failed for %s", code)
+        await message.reply_text(
+            f"{code} is active, but the email sweep failed: {exc}\n"
+            "New emails will still ingest normally from the next poll."
+        )
+        return
+    await message.reply_text(
+        f"Recovery sweep for {code} (last 30 days) —\n"
+        f"• Fetched: {totals['fetched']}\n"
+        f"• Inserted: {totals['inserted']}\n"
+        f"• Skipped (already stored): {totals['skipped']}\n"
+        f"• Errors: {totals['errors']}\n"
+        "From now on this shop counts like every other outlet."
     )
 
 
@@ -5568,7 +5648,31 @@ async def top_items_yesterday_command(update: Update, context: ContextTypes.DEFA
     await message.reply_text(sales_analytics.format_top_items_group(yesterday, rows, 5))
 
 
-async def poll_sales_emails() -> None:
+def _new_outlet_alert_text(new_codes) -> str:
+    codes = ", ".join(new_codes)
+    example = new_codes[0]
+    return (
+        f"🆕 New POS outlet detected: {codes}\n"
+        "Auto-registered as INACTIVE — its sales emails are held (marked read, "
+        "not counted) until you activate it.\n\n"
+        f"To start counting it: /activate_outlet {example} <Shop Name>\n"
+        "Past held emails are pulled in automatically on activation."
+    )
+
+
+async def _notify_new_outlets(application, summary) -> None:
+    """One-time owner alert when the ingest pass auto-registered a brand-new
+    outlet code (e.g. a new shop's POS starts emailing as S-44)."""
+    new_codes = (summary or {}).get("new_outlets") or []
+    if not new_codes or application is None:
+        return
+    with contextlib.suppress(Exception):
+        await application.bot.send_message(
+            chat_id=ALERT_CHAT_ID, text=_new_outlet_alert_text(new_codes)
+        )
+
+
+async def poll_sales_emails(application: Application | None = None) -> None:
     """APScheduler job: ingest unread shift-close emails (every 30 min, 24/7)."""
     if not os.environ.get("GMAIL_INBOX") or not os.environ.get("GMAIL_APP_PASSWORD"):
         logger.info("Sales ingest poll skipped: GMAIL_INBOX/GMAIL_APP_PASSWORD not set")
@@ -5576,6 +5680,7 @@ async def poll_sales_emails() -> None:
     try:
         summary = await asyncio.to_thread(run_ingest_once, supabase)
         logger.info("Sales ingest poll: %s", summary)
+        await _notify_new_outlets(application, summary)
     except Exception:
         logger.exception("Sales ingest poll failed")
 
@@ -5587,7 +5692,7 @@ async def _ingest_then_compare(app, compare_coro) -> None:
     an ingest failure must never block the comparison (it just runs on existing
     data). This is the direct guard against "the 09:00 comparison had stale POS"."""
     try:
-        await poll_sales_emails()
+        await poll_sales_emails(app)
     except Exception:
         logger.exception("pre-comparison sales ingest failed (continuing)")
     await compare_coro(app)
@@ -5669,6 +5774,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("sales_ingest_status", sales_ingest_status_command))
     app.add_handler(CommandHandler("sales_ingest_latency", sales_ingest_latency_command))
     app.add_handler(CommandHandler("sales_ingest_manual", sales_ingest_manual_command))
+    app.add_handler(CommandHandler("activate_outlet", activate_outlet_command))
     app.add_handler(CommandHandler("food_cost_today", food_cost_today_command))
     app.add_handler(CommandHandler("food_cost_week", food_cost_week_command))
     app.add_handler(CommandHandler("food_cost_month", food_cost_month_command))
@@ -5764,6 +5870,7 @@ async def run_bot() -> None:
         poll_sales_emails,
         trigger="cron",
         minute="*/15",
+        args=[app],
         id="sales_ingest",
         replace_existing=True,
     )

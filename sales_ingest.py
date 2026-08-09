@@ -287,6 +287,28 @@ class SupabaseSalesStore:
             }
         return out
 
+    def register_placeholder_outlet(self, s_code) -> bool:
+        """Insert an INACTIVE, unconfirmed placeholder row for a never-seen
+        outlet code (e.g. a brand-new shop's POS starts emailing as S-44).
+
+        Without a row, every poll refetches the outlet's unread emails forever
+        and warns each time. With the placeholder, the very next pass skips
+        them as ``skipped_inactive`` (marked read, no refetch) until the owner
+        activates the outlet — at which point a seen-mail recovery sweep pulls
+        the held emails in. Best-effort: False on any failure."""
+        try:
+            self.client.table(OUTLET_CANONICAL_TABLE).insert({
+                "code": s_code,
+                "canonical_name": s_code[2:],  # bare code until the owner names it
+                "active": False,
+                "confirmed": False,
+            }).execute()
+            return True
+        except Exception:  # noqa: BLE001 - registration must never break ingestion
+            logger.warning("Could not register placeholder outlet %r", s_code,
+                           exc_info=True)
+            return False
+
     def exists_message_id(self, message_id) -> bool:
         """Has THIS exact email already landed in the S-file destination
         (``sales_daily``)? Keyed on ``source_message_id`` so dedup trusts the
@@ -629,7 +651,8 @@ _COUNTER_BY_STATUS = {
 }
 
 
-def run(*, store, mailbox, now_my, since=None, unseen_only=True) -> dict:
+def run(*, store, mailbox, now_my, since=None, unseen_only=True,
+        subject_token=None) -> dict:
     """Drive the mailbox end-to-end. Returns a summary dict.
 
     The ``outlet_canonical`` registry is loaded ONCE per run (no per-email
@@ -637,19 +660,27 @@ def run(*, store, mailbox, now_my, since=None, unseen_only=True) -> dict:
     only on inserted / duplicate / inactive; unknown-outlet and error messages
     stay unread for retry/inspection.
 
-    ``unseen_only=False`` re-scans ALREADY-READ mail too (pair with ``since``).
-    Recovery use: emails wrongly skipped as duplicates in the past were marked
-    read, so the normal UNSEEN poll can never revisit them — a seen sweep can,
-    and the message-id dedup keeps everything already stored idempotent."""
+    A NEVER-seen outlet code (a new shop's POS coming online) is auto-registered
+    as an INACTIVE placeholder and reported in ``summary['new_outlets']`` — so
+    from the next pass its mail is skipped-inactive (marked read, no more
+    per-poll refetch/warn loop) until the owner activates the outlet.
+
+    ``unseen_only=False`` re-scans ALREADY-READ mail too (pair with ``since``,
+    and optionally ``subject_token`` to target one outlet's emails). Recovery
+    use: emails skipped as inactive/duplicate in the past were marked read, so
+    the normal UNSEEN poll can never revisit them — a seen sweep can, and the
+    message-id dedup keeps everything already stored idempotent."""
     summary = {
         "fetched": 0, "inserted": 0, "skipped": 0,
         "skipped_inactive": 0, "skipped_unknown": 0, "errors": 0,
-        "dead_letter": 0,
+        "dead_letter": 0, "new_outlets": [],
     }
     outlets = store.load_outlets()  # one query, reused for the whole batch
     error_counts = _load_error_counts(store)  # prior failures per message-id
-    # subject_token=None: fetch all matching POS mail (S- AND D-), classify in code.
-    for msg_id in mailbox.search(since=since, subject_token=None, unseen_only=unseen_only):
+    # subject_token=None (the default): fetch ALL matching POS mail (S- AND D-),
+    # classify in code. A recovery sweep may narrow it to one outlet's subjects.
+    for msg_id in mailbox.search(since=since, subject_token=subject_token,
+                                 unseen_only=unseen_only):
         try:
             msg = mailbox.fetch(msg_id)
             email_dict = extract_shift_close(msg)
@@ -671,6 +702,19 @@ def run(*, store, mailbox, now_my, since=None, unseen_only=True) -> dict:
         except Exception as exc:  # noqa: BLE001 - unexpected; record, leave unread
             logger.exception("Ingest failed for %r", email_dict.get("subject"))
             status, detail = "error", f"exception: {exc}"
+
+        # A parsed outlet code that is simply NOT in the registry = a new shop's
+        # POS coming online (e.g. S-44). Auto-register it as an inactive
+        # placeholder so the rest of this batch (and every later poll) skips its
+        # mail as inactive instead of refetching + warning forever; surface it
+        # in the summary so the owner is told to activate the outlet.
+        if status == "skipped_unknown" and s_code and s_code not in outlets:
+            register = getattr(store, "register_placeholder_outlet", None)
+            if callable(register) and register(s_code):
+                outlets[s_code] = {
+                    "canonical_name": s_code[2:], "active": False, "confirmed": False,
+                }
+                summary["new_outlets"].append(s_code)
 
         # Part 4: dead-letter cap. Once a message-id has already failed (or
         # been skipped as unknown-outlet) DEAD_LETTER_THRESHOLD times, stop
@@ -702,17 +746,19 @@ def _build_client():
     return create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
 
 
-def run_ingest_once(client=None, *, now_my=None, since=None, unseen_only=True) -> dict:
+def run_ingest_once(client=None, *, now_my=None, since=None, unseen_only=True,
+                    subject_token=None) -> dict:
     """Connect to the inbox, ingest all unread shift-close emails, return the
     summary. Used by the APScheduler job in bot.py and the manual command.
-    ``unseen_only=False`` (with ``since``) is the recovery sweep over read mail."""
+    ``unseen_only=False`` (with ``since``, optionally ``subject_token`` to
+    target one outlet) is the recovery sweep over read mail."""
     client = client or _build_client()
     now_my = now_my or datetime.now(MALAYSIA_TZ)
     store = SupabaseSalesStore(client)
     mailbox = Mailbox.connect()
     try:
         summary = run(store=store, mailbox=mailbox, now_my=now_my, since=since,
-                      unseen_only=unseen_only)
+                      unseen_only=unseen_only, subject_token=subject_token)
     finally:
         mailbox.close()
     logger.info("Sales ingest: %s", summary)
