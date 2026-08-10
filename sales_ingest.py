@@ -498,6 +498,19 @@ def _canonical_code(outlet_code) -> str | None:
     return "S-" + code[2:]
 
 
+def _is_unique_violation(exc) -> bool:
+    """Postgres 23505 (duplicate key), however the client wraps it."""
+    if getattr(exc, "code", None) == "23505":
+        return True
+    text = str(getattr(exc, "message", "") or exc).lower()
+    return "23505" in text or "duplicate key value" in text
+
+
+# Detail string for the pre-migration failure mode; bot.py matches on it to
+# alert the owner that migration 0038 must be applied.
+MIGRATION_0038_DETAIL = "second_daily_close_blocked_apply_migration_0038"
+
+
 def _repair_partial(store, method_name, message_id, build_record) -> list:
     """Run a store's child-repair method against a freshly rebuilt record.
     Best-effort: [] when the store doesn't support repair (test fakes), the
@@ -560,7 +573,22 @@ def _process_d_file(store, email_dict, canonical, now_my):
     record = build_daily_record(email_dict, parsed, canonical, business_date)
     if store.exists_daily(*record["key"]):
         return "skipped", "duplicate"
-    store.save_daily(record)
+    try:
+        store.save_daily(record)
+    except Exception as exc:  # noqa: BLE001 - classify before re-raising
+        if _is_unique_violation(exc):
+            # The DB still has the pre-0038 UNIQUE(outlet, business_date): a
+            # 24h outlet's SECOND daily close of the day cannot be stored, so
+            # half the day's sales are being dropped and the Guna-vs-POS
+            # comparison will wait forever. Name the exact fix.
+            logger.error(
+                "sales_daily_summary rejected a SECOND daily close for %s %s — "
+                "apply migrations/0038_sales_daily_summary_multi_close.sql so "
+                "both closes of a 24h business day can be stored",
+                canonical, business_date,
+            )
+            return "error", MIGRATION_0038_DETAIL
+        raise
     # Part 2: confirm before \Seen.
     if message_id and not store.exists_daily_message_id(message_id):
         return "error", "insert_not_confirmed"
@@ -673,7 +701,7 @@ def run(*, store, mailbox, now_my, since=None, unseen_only=True,
     summary = {
         "fetched": 0, "inserted": 0, "skipped": 0,
         "skipped_inactive": 0, "skipped_unknown": 0, "errors": 0,
-        "dead_letter": 0, "new_outlets": [],
+        "dead_letter": 0, "new_outlets": [], "migration_0038_needed": False,
     }
     outlets = store.load_outlets()  # one query, reused for the whole batch
     error_counts = _load_error_counts(store)  # prior failures per message-id
@@ -715,6 +743,8 @@ def run(*, store, mailbox, now_my, since=None, unseen_only=True,
                     "canonical_name": s_code[2:], "active": False, "confirmed": False,
                 }
                 summary["new_outlets"].append(s_code)
+        if detail == MIGRATION_0038_DETAIL:
+            summary["migration_0038_needed"] = True
 
         # Part 4: dead-letter cap. Once a message-id has already failed (or
         # been skipped as unknown-outlet) DEAD_LETTER_THRESHOLD times, stop
