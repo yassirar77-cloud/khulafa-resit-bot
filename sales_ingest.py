@@ -701,7 +701,8 @@ def run(*, store, mailbox, now_my, since=None, unseen_only=True,
     summary = {
         "fetched": 0, "inserted": 0, "skipped": 0,
         "skipped_inactive": 0, "skipped_unknown": 0, "errors": 0,
-        "dead_letter": 0, "new_outlets": [], "migration_0038_needed": False,
+        "dead_letter": 0, "dead_letter_subjects": [],
+        "new_outlets": [], "migration_0038_needed": False,
     }
     outlets = store.load_outlets()  # one query, reused for the whole batch
     error_counts = _load_error_counts(store)  # prior failures per message-id
@@ -756,6 +757,13 @@ def run(*, store, mailbox, now_my, since=None, unseen_only=True,
             mid = email_dict.get("message_id")
             if mid and error_counts.get(mid, 0) >= DEAD_LETTER_THRESHOLD:
                 summary["dead_letter"] += 1
+                # Name what is stuck (capped): a silent dead_letter count alone
+                # hides WHICH emails keep failing and why — production showed
+                # 40/poll with no way to tell without DB access.
+                if len(summary["dead_letter_subjects"]) < 10:
+                    summary["dead_letter_subjects"].append(
+                        f"{email_dict.get('subject')} [{detail}]"
+                    )
                 continue
             error_counts[mid] = error_counts.get(mid, 0) + 1
 

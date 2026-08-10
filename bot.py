@@ -4116,6 +4116,12 @@ async def sales_ingest_manual_command(update: Update, context: ContextTypes.DEFA
         f"• Skipped (unknown): {summary['skipped_unknown']}\n"
         f"• Errors: {summary['errors']}"
     )
+    dead = summary.get("dead_letter", 0)
+    stuck = summary.get("dead_letter_subjects") or []
+    if dead:
+        text += f"\n• Dead letters (stuck, failing 3+ times): {dead}"
+        for s in stuck[:5]:
+            text += f"\n   - {s}"
     new_codes = summary.get("new_outlets") or []
     if new_codes:
         text += "\n\n" + _new_outlet_alert_text(new_codes)
