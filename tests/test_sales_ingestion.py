@@ -368,6 +368,20 @@ class SelfHealingTests(unittest.TestCase):
         self.assertEqual(store.logs, [])  # suppressed — no per-poll spam
         self.assertNotIn(b"1", mailbox.seen)
 
+    def test_dead_letters_surface_their_subjects(self):
+        # A bare dead_letter COUNT hides which emails keep failing (production:
+        # 40/poll, undiagnosable). The summary must name them (capped).
+        bad = make_email("S-JAKEL SHIFTCLOSE (1)", "garbage no sales",
+                         message_id="<dl-subject>")
+        mailbox = FakeMailbox([(b"1", bad)])
+        store = FakeStore(error_counts={"<dl-subject>": DEAD_LETTER_THRESHOLD})
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["dead_letter"], 1)
+        self.assertEqual(
+            summary["dead_letter_subjects"],
+            ["S-JAKEL SHIFTCLOSE (1) [no_total_parsed]"],
+        )
+
     def test_below_threshold_still_logs_error(self):
         bad = make_email("S-JAKEL SHIFTCLOSE (1)", "garbage with no sales total",
                          message_id="<warming>")
