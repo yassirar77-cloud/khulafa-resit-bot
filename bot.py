@@ -4119,6 +4119,12 @@ async def sales_ingest_manual_command(update: Update, context: ContextTypes.DEFA
     new_codes = summary.get("new_outlets") or []
     if new_codes:
         text += "\n\n" + _new_outlet_alert_text(new_codes)
+    if summary.get("migration_0038_needed"):
+        text += (
+            "\n\n⚠️ Apply migrations/0038_sales_daily_summary_multi_close.sql "
+            "in Supabase — the DB is still rejecting 24h shops' second "
+            "daily-close email, so half those days' sales can't be stored."
+        )
     await message.reply_text(text)
 
 
@@ -5672,6 +5678,34 @@ async def _notify_new_outlets(application, summary) -> None:
         )
 
 
+# Alert the owner ONCE per process (not every 15-min poll) when the database
+# still has the pre-0038 unique constraint blocking a 24h outlet's second
+# daily-close email.
+_migration_0038_alerted = False
+
+
+async def _notify_migration_0038(application, summary) -> None:
+    global _migration_0038_alerted
+    if not (summary or {}).get("migration_0038_needed"):
+        return
+    if _migration_0038_alerted or application is None:
+        return
+    _migration_0038_alerted = True
+    with contextlib.suppress(Exception):
+        await application.bot.send_message(
+            chat_id=ALERT_CHAT_ID,
+            text=(
+                "⚠️ Database migration needed: a 24h shop sent its SECOND "
+                "daily-close email of the day, but the database still allows "
+                "only ONE per shop per day — half that day's sales cannot be "
+                "stored and Guna vs POS will keep waiting.\n\n"
+                "Fix (one time): run migrations/0038_sales_daily_summary_"
+                "multi_close.sql in the Supabase SQL editor. The blocked "
+                "emails stay unread and ingest automatically once it's applied."
+            ),
+        )
+
+
 async def poll_sales_emails(application: Application | None = None) -> None:
     """APScheduler job: ingest unread shift-close emails (every 30 min, 24/7)."""
     if not os.environ.get("GMAIL_INBOX") or not os.environ.get("GMAIL_APP_PASSWORD"):
@@ -5681,6 +5715,7 @@ async def poll_sales_emails(application: Application | None = None) -> None:
         summary = await asyncio.to_thread(run_ingest_once, supabase)
         logger.info("Sales ingest poll: %s", summary)
         await _notify_new_outlets(application, summary)
+        await _notify_migration_0038(application, summary)
     except Exception:
         logger.exception("Sales ingest poll failed")
 

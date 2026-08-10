@@ -588,6 +588,50 @@ class TwoDailyClosesTests(unittest.TestCase):
         self.assertEqual(mailbox.search_kwargs.get("unseen_only"), False)
 
 
+class Migration0038DetectionTests(unittest.TestCase):
+    """Pre-0038 database: the second daily close of a 24h day hits the old
+    UNIQUE(outlet, business_date) constraint. That must surface as a NAMED,
+    actionable detail (and summary flag) — not loop as a generic error."""
+
+    class UniqueViolatingStore(FakeStore):
+        def save_daily(self, record):
+            class FakeAPIError(Exception):
+                code = "23505"
+                message = "duplicate key value violates unique constraint"
+            raise FakeAPIError()
+
+    def test_unique_violation_names_migration_0038(self):
+        from sales_ingest import MIGRATION_0038_DETAIL
+
+        email = make_email(
+            "D-SEK20 ON 08/August/2026 07:00:05",
+            _mini_d_content("08/August/2026 07:00:05", 9002),
+            message_id="<blocked>",
+        )
+        mailbox = FakeMailbox([(b"1", email)])
+        store = self.UniqueViolatingStore()
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["errors"], 1)
+        self.assertTrue(summary["migration_0038_needed"])
+        self.assertNotIn(b"1", mailbox.seen)  # unread -> auto-ingests post-fix
+        self.assertTrue(any(e.get("detail") == MIGRATION_0038_DETAIL for e in store.logs))
+
+    def test_other_save_errors_still_propagate_as_plain_errors(self):
+        class CrashingStore(FakeStore):
+            def save_daily(self, record):
+                raise RuntimeError("boom")
+
+        email = make_email(
+            "D-SEK20 ON 08/August/2026 07:00:05",
+            _mini_d_content("08/August/2026 07:00:05", 9002),
+            message_id="<boom>",
+        )
+        mailbox = FakeMailbox([(b"1", email)])
+        summary = run(store=CrashingStore(), mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["errors"], 1)
+        self.assertFalse(summary["migration_0038_needed"])
+
+
 class NewOutletPlaceholderTests(unittest.TestCase):
     """A brand-new shop's POS (e.g. S-44) coming online must not spin forever:
     the first unknown email auto-registers an INACTIVE placeholder, the rest of
