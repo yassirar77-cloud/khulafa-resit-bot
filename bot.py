@@ -2113,6 +2113,8 @@ HELP_TEXT = (
     "(full 24h day)\n"
     "/activate_outlet <code> <name> — activate a newly-detected POS outlet "
     "and pull in its held emails\n"
+    "/sales_sweep [days] — re-scan already-read POS mail (default 7 days) and "
+    "ingest anything missing\n"
     "\n"
     "Questions:\n"
     "/questions_now — which manager questions are still unanswered\n"
@@ -4107,6 +4109,10 @@ async def sales_ingest_manual_command(update: Update, context: ContextTypes.DEFA
         logger.exception("manual sales ingest failed")
         await message.reply_text(f"Ingest failed: {exc}")
         return
+    await message.reply_text(_format_ingest_summary(summary))
+
+
+def _format_ingest_summary(summary) -> str:
     text = (
         "Sales ingest done —\n"
         f"• Fetched: {summary['fetched']}\n"
@@ -4114,8 +4120,12 @@ async def sales_ingest_manual_command(update: Update, context: ContextTypes.DEFA
         f"• Skipped (duplicate): {summary['skipped']}\n"
         f"• Skipped (inactive): {summary['skipped_inactive']}\n"
         f"• Skipped (unknown): {summary['skipped_unknown']}\n"
+        f"• Skipped (monthly/other POS mail): {summary.get('skipped_other', 0)}\n"
         f"• Errors: {summary['errors']}"
     )
+    expired = summary.get("expired", 0)
+    if expired:
+        text += f"\n• Expired (old stuck emails retired): {expired}"
     dead = summary.get("dead_letter", 0)
     stuck = summary.get("dead_letter_subjects") or []
     if dead:
@@ -4130,6 +4140,47 @@ async def sales_ingest_manual_command(update: Update, context: ContextTypes.DEFA
             "\n\n⚠️ Apply migrations/0038_sales_daily_summary_multi_close.sql "
             "in Supabase — the DB is still rejecting 24h shops' second "
             "daily-close email, so half those days' sales can't be stored."
+        )
+    return text
+
+
+async def sales_sweep_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only recovery sweep: re-scan ALREADY-READ POS mail of the last N
+    days (default 7, max 30) and ingest anything missing. This is how emails
+    wrongly marked read in the past (e.g. a 24h shop's second daily close
+    skipped as a 'duplicate' before the multi-close fix) are pulled back in —
+    message-id dedup makes it safe to run any time. Usage: /sales_sweep [days]"""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    try:
+        days = int((context.args or ["7"])[0])
+    except (TypeError, ValueError):
+        days = 7
+    days = max(1, min(days, 30))
+    await message.reply_text(
+        f"Sweeping the last {days} day(s) of POS mail (including already-read "
+        "emails)… this can take a few minutes."
+    )
+    since = datetime.now(MALAYSIA_TZ) - timedelta(days=days)
+    try:
+        summary = await asyncio.to_thread(
+            run_ingest_once, supabase, since=since, unseen_only=False
+        )
+    except KeyError as exc:
+        await message.reply_text(
+            f"Missing env var {exc}. Set GMAIL_INBOX and GMAIL_APP_PASSWORD on the service."
+        )
+        return
+    except Exception as exc:  # noqa: BLE001 - surfaced to the owner
+        logger.exception("sales sweep failed")
+        await message.reply_text(f"Sweep failed: {exc}")
+        return
+    text = _format_ingest_summary(summary)
+    if summary.get("inserted"):
+        text += (
+            "\n\nRecovered emails are stored — deferred Guna vs POS "
+            "comparisons will complete on the next scheduled pass."
         )
     await message.reply_text(text)
 
@@ -5815,6 +5866,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("sales_ingest_status", sales_ingest_status_command))
     app.add_handler(CommandHandler("sales_ingest_latency", sales_ingest_latency_command))
     app.add_handler(CommandHandler("sales_ingest_manual", sales_ingest_manual_command))
+    app.add_handler(CommandHandler("sales_sweep", sales_sweep_command))
     app.add_handler(CommandHandler("activate_outlet", activate_outlet_command))
     app.add_handler(CommandHandler("food_cost_today", food_cost_today_command))
     app.add_handler(CommandHandler("food_cost_week", food_cost_week_command))

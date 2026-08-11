@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from zoneinfo import ZoneInfo
 
@@ -595,6 +596,13 @@ def _process_d_file(store, email_dict, canonical, now_my):
     return "inserted", None
 
 
+# The POS also emails a MONTHLY REPORT per outlet ("MONTHLY REPORT-SEK15  ON
+# Jun -2026"). It is not shift/daily data and is NOT ingested — but it must be
+# RECOGNISED, or it sits unread and is refetched every poll forever (production:
+# ~10 of these per month were the bulk of a permanent 40-email dead-letter loop).
+_MONTHLY_SUBJECT_RE = re.compile(r"^\s*MONTHLY\s+REPORT\b", re.IGNORECASE)
+
+
 def process_email(store, email_dict, *, now_my, outlets):
     """Ingest one POS email, routed by type and gated by the ``outlet_canonical``
     registry (``outlets``: S-code -> {canonical_name, active, confirmed}).
@@ -610,6 +618,12 @@ def process_email(store, email_dict, *, now_my, outlets):
       * ``skipped_unknown``  — unrecognised subject or outlet not in registry
       * ``error``            — empty attachment / unparseable
     """
+    # Recognised-but-not-ingested POS mail: monthly reports. Marked seen (via
+    # the skipped_other status) so they never loop; the data is monthly-level
+    # and already covered by the bot's own monthly reporting.
+    if _MONTHLY_SUBJECT_RE.match(email_dict.get("subject") or ""):
+        return "skipped_other", "monthly_report_not_ingested"
+
     content = email_dict.get("content") or ""
     if not content.strip():
         return "error", "empty_attachment"
@@ -669,14 +683,40 @@ DEAD_LETTER_THRESHOLD = 3
 
 # Statuses whose email we flag \Seen (terminal decisions). skipped_unknown and
 # error are left UNREAD so they retry once the outlet is registered / fixed.
-_MARK_SEEN_STATUSES = frozenset({"inserted", "skipped", "skipped_inactive"})
+_MARK_SEEN_STATUSES = frozenset({"inserted", "skipped", "skipped_inactive", "skipped_other"})
 _COUNTER_BY_STATUS = {
     "inserted": "inserted",
     "skipped": "skipped",
     "skipped_inactive": "skipped_inactive",
     "skipped_unknown": "skipped_unknown",
+    "skipped_other": "skipped_other",
     "error": "errors",
 }
+
+# A dead-lettered email older than this is EXPIRED: its business day is long
+# past, no retry will ever produce a useful row, and leaving it unread means
+# refetching it every poll forever (production carried May/June parse failures
+# into August). Expired dead letters are marked seen with a skipped_expired
+# audit row; a seen-mail recovery sweep can still reach them if a fix lands.
+DEAD_LETTER_EXPIRE_DAYS = 14
+
+
+def _is_expired(received_at_raw, now_my) -> bool:
+    """True when an email's Date header is older than DEAD_LETTER_EXPIRE_DAYS.
+    Unparseable/missing dates are NEVER expired (when unsure, keep retrying)."""
+    if not received_at_raw:
+        return False
+    try:
+        received = parsedate_to_datetime(received_at_raw)
+    except (TypeError, ValueError, IndexError):
+        return False
+    if received is None:
+        return False
+    if received.tzinfo is None:
+        received = received.replace(tzinfo=MALAYSIA_TZ)
+    if now_my.tzinfo is None:
+        now_my = now_my.replace(tzinfo=MALAYSIA_TZ)
+    return received < now_my - timedelta(days=DEAD_LETTER_EXPIRE_DAYS)
 
 
 def run(*, store, mailbox, now_my, since=None, unseen_only=True,
@@ -700,9 +740,9 @@ def run(*, store, mailbox, now_my, since=None, unseen_only=True,
     message-id dedup keeps everything already stored idempotent."""
     summary = {
         "fetched": 0, "inserted": 0, "skipped": 0,
-        "skipped_inactive": 0, "skipped_unknown": 0, "errors": 0,
-        "dead_letter": 0, "dead_letter_subjects": [],
-        "new_outlets": [], "migration_0038_needed": False,
+        "skipped_inactive": 0, "skipped_unknown": 0, "skipped_other": 0,
+        "errors": 0, "dead_letter": 0, "dead_letter_subjects": [],
+        "expired": 0, "new_outlets": [], "migration_0038_needed": False,
     }
     outlets = store.load_outlets()  # one query, reused for the whole batch
     error_counts = _load_error_counts(store)  # prior failures per message-id
@@ -756,6 +796,23 @@ def run(*, store, mailbox, now_my, since=None, unseen_only=True,
         if status in ("error", "skipped_unknown"):
             mid = email_dict.get("message_id")
             if mid and error_counts.get(mid, 0) >= DEAD_LETTER_THRESHOLD:
+                # EXPIRE stale dead letters: an email weeks past its business
+                # day will never yield a useful row — mark it seen (with an
+                # audit row) so it stops being refetched every poll. A seen
+                # sweep can still recover it if a parser fix lands later.
+                if _is_expired(email_dict.get("received_at"), now_my):
+                    summary["expired"] += 1
+                    logger.info(
+                        "Expiring dead letter %r (%s) — older than %d days",
+                        email_dict.get("subject"), detail, DEAD_LETTER_EXPIRE_DAYS,
+                    )
+                    _maybe_log(store, _log_entry(
+                        email_dict, "skipped_expired", detail, outlet_name))
+                    try:
+                        mailbox.mark_seen(msg_id)
+                    except Exception:  # noqa: BLE001
+                        logger.warning("Could not mark %r seen", msg_id, exc_info=True)
+                    continue
                 summary["dead_letter"] += 1
                 # Name what is stuck (capped): a silent dead_letter count alone
                 # hides WHICH emails keep failing and why — production showed

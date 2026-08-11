@@ -602,6 +602,67 @@ class TwoDailyClosesTests(unittest.TestCase):
         self.assertEqual(mailbox.search_kwargs.get("unseen_only"), False)
 
 
+class MonthlyReportTests(unittest.TestCase):
+    """The POS also emails a per-outlet MONTHLY REPORT. It is not ingested, but
+    it must be RECOGNISED and marked read — unrecognised, it was refetched every
+    poll forever (production: ~10/month were the bulk of a 40-email loop)."""
+
+    def test_monthly_report_marked_seen_not_looped(self):
+        email = make_email("MONTHLY REPORT-SEK15   ON Jun -2026",
+                           "monthly totals ...", message_id="<m1>")
+        mailbox = FakeMailbox([(b"1", email)])
+        store = FakeStore()
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["skipped_other"], 1)
+        self.assertEqual(summary["skipped_unknown"], 0)
+        self.assertEqual(len(store.daily) + len(store.saved), 0)  # not ingested
+        self.assertIn(b"1", mailbox.seen)                          # never refetched
+        self.assertTrue(any(
+            e.get("detail") == "monthly_report_not_ingested" for e in store.logs
+        ))
+
+
+class DeadLetterExpiryTests(unittest.TestCase):
+    """Dead letters weeks past their business day are retired (marked seen with
+    an audit row) instead of being refetched every poll forever."""
+
+    def test_old_dead_letter_expires_and_is_marked_seen(self):
+        from datetime import datetime as dt
+
+        from sales_ingest import DEAD_LETTER_THRESHOLD as T
+
+        bad = make_email("S-SEK15  SHIFTCLOSE (3350)", "garbage no sales",
+                         message_id="<old>")  # Date header: 26 May 2026
+        mailbox = FakeMailbox([(b"1", bad)])
+        store = FakeStore(error_counts={"<old>": T})
+        late_june = dt(2026, 6, 15, 12, 0, 0)
+        summary = run(store=store, mailbox=mailbox, now_my=late_june)
+        self.assertEqual(summary["expired"], 1)
+        self.assertEqual(summary["dead_letter"], 0)
+        self.assertIn(b"1", mailbox.seen)
+        self.assertTrue(any(
+            e.get("status") == "skipped_expired" for e in store.logs
+        ))
+
+    def test_recent_dead_letter_stays_unread_for_retry(self):
+        from sales_ingest import DEAD_LETTER_THRESHOLD as T
+
+        bad = make_email("S-SEK15  SHIFTCLOSE (3350)", "garbage no sales",
+                         message_id="<fresh>")  # Date: 26 May; NOW is 26 May
+        mailbox = FakeMailbox([(b"1", bad)])
+        store = FakeStore(error_counts={"<fresh>": T})
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["expired"], 0)
+        self.assertEqual(summary["dead_letter"], 1)
+        self.assertNotIn(b"1", mailbox.seen)
+
+    def test_missing_date_never_expires(self):
+        from sales_ingest import _is_expired
+
+        self.assertFalse(_is_expired(None, NOW))
+        self.assertFalse(_is_expired("not a date", NOW))
+
+
 class Migration0038DetectionTests(unittest.TestCase):
     """Pre-0038 database: the second daily close of a 24h day hits the old
     UNIQUE(outlet, business_date) constraint. That must surface as a NAMED,
