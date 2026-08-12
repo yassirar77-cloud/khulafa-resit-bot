@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from zoneinfo import ZoneInfo
 
@@ -836,6 +836,98 @@ def run(*, store, mailbox, now_my, since=None, unseen_only=True,
     return summary
 
 
+# --- self-healing itemwise backfill (recent days) -----------------------------
+
+# Shifts ingested BEFORE the S-file itemwise parser / migration 0040 carry no
+# sales_shift_itemwise rows, so the Guna-vs-POS S-file fallback cannot see them
+# and days keep alerting "POS ringkasan harian hilang" even though both shift
+# emails are stored. The owner deploys from GitHub with no easy shell, so
+# instead of requiring scripts/backfill_shift_itemwise.py by hand, every poll
+# self-heals the recent window from the stored raw_content. Cheap when there is
+# nothing to do (two small queries); bounded per poll otherwise.
+BACKFILL_ITEMWISE_LOOKBACK_DAYS = 7
+_BACKFILL_MAX_SHIFTS_PER_RUN = 40
+
+SHIFT_ITEMWISE_TABLE = "sales_shift_itemwise"
+
+
+def _shift_itemwise_rows(sales_daily_id, parsed) -> list:
+    return [
+        {
+            "sales_daily_id": sales_daily_id,
+            "category": _strip_nulls(r.get("category")),
+            "item_name": _strip_nulls(r["name"]),
+            "qty": r["qty"],
+            "amount": r["amount"],
+        }
+        for r in parsed.get("itemwise", [])
+        if is_nasi_kandar_item(r.get("name"))
+    ]
+
+
+def backfill_recent_shift_itemwise(
+    client, *, now_my,
+    days: int = BACKFILL_ITEMWISE_LOOKBACK_DAYS,
+    limit: int = _BACKFILL_MAX_SHIFTS_PER_RUN,
+) -> dict:
+    """Ensure every recent sales_daily shift has its per-dish nasi kandar rows.
+
+    Re-parses ``raw_content`` for shifts of the last ``days`` business days that
+    have NO sales_shift_itemwise rows yet, newest first, at most ``limit`` per
+    run (the rest heals on the next poll). A shift whose report carries no
+    itemwise section stays row-less and is re-checked next poll — the re-parse
+    costs milliseconds and the window ages out. Returns
+    {checked, backfilled_shifts, rows}."""
+    stats = {"checked": 0, "backfilled_shifts": 0, "rows": 0}
+    start = (now_my.date() - timedelta(days=days)).isoformat()
+    shifts = (
+        client.table(SALES_DAILY_TABLE)
+        .select("id")
+        .gte("shift_business_date", start)
+        .order("id", desc=True)
+        .execute()
+        .data
+    ) or []
+    ids = [r.get("id") for r in shifts if r.get("id") is not None]
+    stats["checked"] = len(ids)
+    if not ids:
+        return stats
+    have: set = set()
+    page, offset = 1000, 0
+    while True:
+        chunk = (
+            client.table(SHIFT_ITEMWISE_TABLE)
+            .select("sales_daily_id")
+            .in_("sales_daily_id", ids)
+            .range(offset, offset + page - 1)
+            .execute()
+            .data
+        ) or []
+        have.update(r.get("sales_daily_id") for r in chunk)
+        if len(chunk) < page:
+            break
+        offset += page
+    for sid in [i for i in ids if i not in have][:limit]:
+        raw_rows = (
+            client.table(SALES_DAILY_TABLE)
+            .select("raw_content")
+            .eq("id", sid)
+            .limit(1)
+            .execute()
+            .data
+        ) or []
+        raw = (raw_rows[0].get("raw_content") if raw_rows else None) or ""
+        if not str(raw).strip():
+            continue
+        rows = _shift_itemwise_rows(sid, parse_shift_close(raw))
+        if not rows:
+            continue
+        client.table(SHIFT_ITEMWISE_TABLE).insert(rows).execute()
+        stats["backfilled_shifts"] += 1
+        stats["rows"] += len(rows)
+    return stats
+
+
 # --- convenience entry point -------------------------------------------------
 
 def _build_client():
@@ -858,5 +950,16 @@ def run_ingest_once(client=None, *, now_my=None, since=None, unseen_only=True,
                       unseen_only=unseen_only, subject_token=subject_token)
     finally:
         mailbox.close()
+    # Self-heal: shifts stored before the itemwise parser get their per-dish
+    # rows re-parsed from raw_content so the Guna-vs-POS S-file fallback works
+    # without a manual backfill run. Best-effort — never fails the poll.
+    try:
+        summary["itemwise_backfill"] = backfill_recent_shift_itemwise(
+            client, now_my=now_my)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Recent shift-itemwise backfill failed — is migration 0040 applied?",
+            exc_info=True,
+        )
     logger.info("Sales ingest: %s", summary)
     return summary

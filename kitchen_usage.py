@@ -2847,9 +2847,11 @@ async def post_left_forms(application) -> None:
 
 
 # How many days back STAGE 2 scans for a complete-but-unreconciled day. Covers
-# yesterday plus a couple of days of catch-up (bot downtime / late POS) without
-# re-touching long-settled days.
-RECONCILE_LOOKBACK_DAYS = 3
+# yesterday plus several days of catch-up (bot downtime / late POS / the
+# self-healing itemwise backfill completing an older day) without re-touching
+# long-settled days — already-handled days are skipped by the pos_qty stamp, so
+# a wider window never repeats a message, it only lets stuck days recover.
+RECONCILE_LOOKBACK_DAYS = 5
 
 
 async def post_comparison_digests(
