@@ -631,13 +631,19 @@ def process_email(store, email_dict, *, now_my, outlets):
     email_type = email_dict.get("email_type")
     code = (email_dict.get("outlet_code") or "").upper() or None
     if not email_type or not code:
-        # MONTHLY REPORT emails are a known POS report we don't ingest. They
-        # must be a TERMINAL skip (marked \Seen) — treated as skipped_unknown
-        # they stay unread and refetch + dead-letter on every poll forever
-        # (the production "dead_letter: 40" loop was mostly these).
+        # A subject that is neither an S- (SHIFTCLOSE) nor a D- (daily) report
+        # is a POS report type we don't ingest — MONTHLY REPORT, the blank/
+        # "- ITEMSALE.TXT" item-sale reports, and whatever the POS invents
+        # next. These must be TERMINAL skips (marked \Seen): treated as
+        # skipped_unknown they stay unread and refetch + dead-letter on every
+        # poll forever (the production "dead_letter: 40" loop). A subject that
+        # can never yield an outlet can never become ingestable without a code
+        # change — after which a seen-mail recovery sweep can pull them back.
+        # (skipped_unknown remains ONLY for parseable-but-unregistered outlet
+        # codes, which auto-register as inactive placeholders below.)
         if is_monthly_report_subject(email_dict.get("subject")):
             return "skipped_report", "monthly_report_not_ingested"
-        return "skipped_unknown", "unrecognised subject"
+        return "skipped_report", "unsupported_pos_report"
 
     s_code = _canonical_code(code)
     info = outlets.get(s_code) if s_code else None
@@ -687,6 +693,18 @@ def _load_error_counts(store) -> dict:
 # email stays UNREAD so a code fix recovers it automatically on the next poll.
 DEAD_LETTER_THRESHOLD = 3
 
+# Parse outcomes that are DETERMINISTIC properties of the email content: the
+# same bytes fail the same way on every retry, so once a message has burned
+# through the dead-letter threshold *with the current parser* it is PARKED —
+# marked \Seen with a final "dead_letter_parked:" log row — instead of being
+# refetched every poll forever (production: three May/June S-files whose
+# attachment carries no sales total at all). Genuinely transient failures
+# (exceptions, insert_not_confirmed) keep retrying unread. Parked emails are
+# recoverable after a parser fix via a seen-mail sweep (unseen_only=False).
+_DETERMINISTIC_ERROR_DETAILS = frozenset({
+    "no_total_parsed", "no_day_sales_parsed", "empty_attachment",
+})
+
 # Statuses whose email we flag \Seen (terminal decisions). skipped_unknown and
 # error are left UNREAD so they retry once the outlet is registered / fixed.
 _MARK_SEEN_STATUSES = frozenset({"inserted", "skipped", "skipped_inactive",
@@ -725,6 +743,7 @@ def run(*, store, mailbox, now_my, since=None, unseen_only=True,
         "skipped_inactive": 0, "skipped_report": 0, "skipped_unknown": 0,
         "errors": 0,
         "dead_letter": 0, "dead_letter_subjects": [],
+        "parked": 0, "parked_subjects": [],
         "new_outlets": [], "migration_0038_needed": False,
     }
     outlets = store.load_outlets()  # one query, reused for the whole batch
@@ -779,6 +798,23 @@ def run(*, store, mailbox, now_my, since=None, unseen_only=True,
         if status in ("error", "skipped_unknown"):
             mid = email_dict.get("message_id")
             if mid and error_counts.get(mid, 0) >= DEAD_LETTER_THRESHOLD:
+                if status == "error" and detail in _DETERMINISTIC_ERROR_DETAILS:
+                    # Same bytes → same parse result forever: park it (final
+                    # log row + \Seen) so it stops refetching every poll.
+                    _maybe_log(store, _log_entry(
+                        email_dict, "error", f"dead_letter_parked:{detail}",
+                        outlet_name))
+                    summary["parked"] += 1
+                    if len(summary["parked_subjects"]) < 10:
+                        summary["parked_subjects"].append(
+                            f"{email_dict.get('subject')} [{detail}]"
+                        )
+                    try:
+                        mailbox.mark_seen(msg_id)
+                    except Exception:  # noqa: BLE001
+                        logger.warning("Could not mark parked %r seen", msg_id,
+                                       exc_info=True)
+                    continue
                 summary["dead_letter"] += 1
                 # Name what is stuck (capped): a silent dead_letter count alone
                 # hides WHICH emails keep failing and why — production showed

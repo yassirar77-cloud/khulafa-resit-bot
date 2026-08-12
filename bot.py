@@ -4123,6 +4123,13 @@ async def sales_ingest_manual_command(update: Update, context: ContextTypes.DEFA
         text += f"\n• Dead letters (stuck, failing 3+ times): {dead}"
         for s in stuck[:5]:
             text += f"\n   - {s}"
+    parked = summary.get("parked", 0)
+    if parked:
+        text += (
+            f"\n• Parked (unparseable content, marked read, won't retry): {parked}"
+        )
+        for s in (summary.get("parked_subjects") or [])[:5]:
+            text += f"\n   - {s}"
     new_codes = summary.get("new_outlets") or []
     if new_codes:
         text += "\n\n" + _new_outlet_alert_text(new_codes)

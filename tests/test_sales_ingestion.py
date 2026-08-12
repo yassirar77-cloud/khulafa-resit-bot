@@ -354,33 +354,44 @@ class SelfHealingTests(unittest.TestCase):
 
     # --- Part 4: dead-letter after DEAD_LETTER_THRESHOLD failures ------------
 
-    def test_dead_letter_caps_log_spam(self):
-        # <stuck> has already failed the threshold number of times: a fresh
-        # failure is NOT re-logged (no spam) and is counted as a dead letter,
-        # still left UNREAD.
+    def test_deterministic_failure_past_threshold_is_parked(self):
+        # <stuck> has failed no_total_parsed the threshold number of times:
+        # the same bytes will fail the same way forever, so it is PARKED —
+        # one final log row, marked \Seen, never refetched again.
         bad = make_email("S-JAKEL SHIFTCLOSE (1)", "garbage with no sales total",
                          message_id="<stuck>")
         mailbox = FakeMailbox([(b"1", bad)])
         store = FakeStore(error_counts={"<stuck>": DEAD_LETTER_THRESHOLD})
         summary = run(store=store, mailbox=mailbox, now_my=NOW)
-        self.assertEqual(summary["dead_letter"], 1)
+        self.assertEqual(summary["parked"], 1)
+        self.assertEqual(summary["parked_subjects"],
+                         ["S-JAKEL SHIFTCLOSE (1) [no_total_parsed]"])
+        self.assertEqual(summary["dead_letter"], 0)
         self.assertEqual(summary["errors"], 0)
-        self.assertEqual(store.logs, [])  # suppressed — no per-poll spam
-        self.assertNotIn(b"1", mailbox.seen)
+        self.assertIn(b"1", mailbox.seen)  # parked: no more per-poll refetch
+        self.assertTrue(any(
+            e["detail"] == "dead_letter_parked:no_total_parsed"
+            for e in store.logs
+        ))
 
-    def test_dead_letters_surface_their_subjects(self):
-        # A bare dead_letter COUNT hides which emails keep failing (production:
-        # 40/poll, undiagnosable). The summary must name them (capped).
-        bad = make_email("S-JAKEL SHIFTCLOSE (1)", "garbage no sales",
-                         message_id="<dl-subject>")
-        mailbox = FakeMailbox([(b"1", bad)])
-        store = FakeStore(error_counts={"<dl-subject>": DEAD_LETTER_THRESHOLD})
+    def test_transient_failure_past_threshold_stays_dead_letter_unread(self):
+        # A failure that is NOT a deterministic property of the content (here:
+        # the insert never lands) keeps retrying UNREAD and surfaces as a dead
+        # letter with its subject — never parked.
+        email = make_email("S-KLANG  SHIFTCLOSE (1499)", _klang_content(),
+                           message_id="<flaky>")
+        mailbox = FakeMailbox([(b"1", email)])
+        store = FakeStore(error_counts={"<flaky>": DEAD_LETTER_THRESHOLD},
+                          drop_saves=True)
         summary = run(store=store, mailbox=mailbox, now_my=NOW)
         self.assertEqual(summary["dead_letter"], 1)
+        self.assertEqual(summary["parked"], 0)
         self.assertEqual(
             summary["dead_letter_subjects"],
-            ["S-JAKEL SHIFTCLOSE (1) [no_total_parsed]"],
+            ["S-KLANG  SHIFTCLOSE (1499) [insert_not_confirmed]"],
         )
+        self.assertEqual(store.logs, [])  # suppressed — no per-poll spam
+        self.assertNotIn(b"1", mailbox.seen)
 
     def test_below_threshold_still_logs_error(self):
         bad = make_email("S-JAKEL SHIFTCLOSE (1)", "garbage with no sales total",
@@ -724,13 +735,27 @@ class NewOutletPlaceholderTests(unittest.TestCase):
         self.assertEqual(summary["dead_letter"], 0)
         self.assertIn(b"1", mailbox.seen)
 
-    def test_truly_unrecognised_subject_still_skipped_unknown(self):
-        mailbox = FakeMailbox([(b"1", make_email("WEEKLY WHATEVER", "x"))])
-        store = FakeStore()
-        summary = run(store=store, mailbox=mailbox, now_my=NOW)
-        self.assertEqual(summary["skipped_unknown"], 1)
-        self.assertEqual(summary.get("skipped_report", 0), 0)
-        self.assertNotIn(b"1", mailbox.seen)
+    def test_unsupported_report_subjects_are_terminal_skips(self):
+        """Any subject that can never yield an outlet (the blank-subject
+        "- ITEMSALE.TXT" item-sale reports, or whatever the POS invents next)
+        is a terminal skip — it can never become ingestable without a code
+        change, so leaving it unread only refetches + dead-letters forever."""
+        for subject in ("- ITEMSALE.TXT", "WEEKLY WHATEVER", ""):
+            mailbox = FakeMailbox([
+                (b"1", make_email(subject, "item sale body",
+                                  filename="ITEMSALE.TXT", message_id="<is1>")),
+            ])
+            store = FakeStore()
+            summary = run(store=store, mailbox=mailbox, now_my=NOW)
+            self.assertEqual(summary["skipped_report"], 1, subject)
+            self.assertEqual(summary["skipped_unknown"], 0, subject)
+            self.assertEqual(summary["dead_letter"], 0, subject)
+            self.assertIn(b"1", mailbox.seen, subject)  # never refetched again
+            self.assertTrue(any(
+                e["status"] == "skipped_report"
+                and e["detail"] == "unsupported_pos_report"
+                for e in store.logs
+            ), subject)
 
     def test_shift_itemwise_child_rows_nasi_kandar_only(self):
         """The S-file's per-dish rows land in sales_shift_itemwise, filtered to
