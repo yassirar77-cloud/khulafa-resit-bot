@@ -779,6 +779,47 @@ class NewOutletPlaceholderTests(unittest.TestCase):
         self.assertTrue(all("category" in r for r in rows))
         self.assertTrue(any(r["category"] for r in rows))
 
+    def test_backfill_recent_shift_itemwise_self_heals(self):
+        """Shifts stored BEFORE the itemwise parser (no sales_shift_itemwise
+        rows) get their per-dish rows re-parsed from raw_content on the next
+        poll — no manual script run needed. Shifts that already have rows and
+        shifts with empty raw_content are left alone."""
+        from tests.fake_supabase import FakeSupabase
+
+        from sales_ingest import backfill_recent_shift_itemwise
+
+        fake = FakeSupabase()
+        content = _klang_content()
+        fake._store["sales_daily"] = [
+            {"id": 1, "shift_business_date": "2026-05-25", "raw_content": content},
+            {"id": 2, "shift_business_date": "2026-05-25", "raw_content": content},
+            {"id": 3, "shift_business_date": "2026-05-25", "raw_content": ""},
+            # outside the lookback window -> untouched
+            {"id": 4, "shift_business_date": "2026-04-01", "raw_content": content},
+        ]
+        fake._store["sales_shift_itemwise"] = [
+            {"id": 900, "sales_daily_id": 2, "item_name": "Ayam Goreng", "qty": 1},
+        ]
+        stats = backfill_recent_shift_itemwise(fake, now_my=NOW)
+        self.assertEqual(stats["backfilled_shifts"], 1)  # only shift 1
+        self.assertGreater(stats["rows"], 10)
+        rows = fake.rows("sales_shift_itemwise")
+        by_shift = {}
+        for r in rows:
+            by_shift.setdefault(r["sales_daily_id"], []).append(r)
+        self.assertGreater(len(by_shift.get(1, [])), 10)   # backfilled
+        self.assertEqual(len(by_shift.get(2, [])), 1)      # untouched
+        self.assertNotIn(3, by_shift)                       # empty raw skipped
+        self.assertNotIn(4, by_shift)                       # outside window
+        names = [r["item_name"].lower() for r in by_shift[1]]
+        self.assertTrue(all(
+            any(b in n for b in ("ayam", "ikan", "kambing", "daging"))
+            for n in names
+        ))
+        # second run: nothing left to heal
+        stats2 = backfill_recent_shift_itemwise(fake, now_my=NOW)
+        self.assertEqual(stats2["backfilled_shifts"], 0)
+
     def test_store_inserts_inactive_unconfirmed_row(self):
         from tests.fake_supabase import FakeSupabase
 
