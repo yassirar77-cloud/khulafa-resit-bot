@@ -1059,15 +1059,82 @@ def test_ayam_bawang_counts_nasi_separuh_and_briyani():
     assert ku.pos_qty_for_item("ayam_bawang", rows) == 21  # 5+4+3+2+6+1
 
 
-def test_plain_isi_ayam_matches_nothing():
+def test_plain_nasi_kandar_ayam_counts_toward_ayam_goreng():
+    """Owner rule (Aug 2026): a PLAIN nasi-kandar ayam plate (Nasi Ayam, Nasi
+    Separuh Ayam, Nasi Putih Ayam, Briyani Ayam, sets) is served with the
+    whole-cut fried chicken the chef logs — it counts toward Ayam Goreng.
+    Excluding these was why POS read absurdly low (guna 130 vs POS 29) and
+    every day false-flagged LEAK."""
     rows = [
         {"item_name": "Nasi Ayam", "qty": 30},
+        {"item_name": "Nasi Ayam Sayur", "qty": 5},
+        {"item_name": "Nasi Ayam 9.90 Set", "qty": 8},
         {"item_name": "Nasi Separuh Ayam", "qty": 20},
-        {"item_name": "Isi Ayam", "qty": 10},
+        {"item_name": "Nasi Putih Ayam Rempah", "qty": 6},  # styled -> rempah, not here
+        {"item_name": "Briyani Ayam", "qty": 2},
+        {"item_name": "Nasi Briyani Ayam SET", "qty": 3},
+        {"item_name": "Briyani Ayam Bawang Set", "qty": 9},  # styled -> bawang
+        {"item_name": "Isi Ayam", "qty": 10},                # still matches nothing
+        {"item_name": "Ayam Kari", "qty": 4},                # untracked style
+        {"item_name": "Hati Ayam", "qty": 7},                # liver, not the whole cut
     ]
-    for code in ("ayam_goreng", "ayam_bawang", "ayam_kicap",
-                 "ayam_madu", "ayam_tandoori", "ayam_rempah"):
+    assert ku.pos_qty_for_item("ayam_goreng", rows) == 68  # 30+5+8+20+2+3
+    # the styled plates keep flowing to their own items, never double counted
+    assert ku.pos_qty_for_item("ayam_bawang", rows) == 9
+    assert ku.pos_qty_for_item("ayam_rempah", rows) == 6
+    for code in ("ayam_kicap", "ayam_madu", "ayam_tandoori"):
         assert ku.pos_qty_for_item(code, rows) == 0.0, code
+
+
+def test_plain_nasi_ayam_carb_fried_still_excluded():
+    """The mamak/Thai carb dishes stay excluded from ayam_goreng even now that
+    plain nasi-kandar plates count — 'goreng ayam' (trailing) is isi ayam."""
+    rows = [
+        {"item_name": "Nasi Goreng Ayam", "qty": 50},
+        {"item_name": "Nasi G Ayam  Mamak", "qty": 8},
+        {"item_name": "Nasi G Ayam Telur Mata", "qty": 3},
+        {"item_name": "Maggi G  Ayam Mamak", "qty": 6},
+        {"item_name": "Mee G Ayam Mamak", "qty": 4},
+        {"item_name": "Kuey Teow G Ayam T Mata", "qty": 2},
+        {"item_name": "Nasi G Ayam", "qty": 2, "category": "NASI GORENG THAI"},
+        {"item_name": "Sup   Ayam", "qty": 1, "category": "SUP THAI"},
+    ]
+    assert ku.pos_qty_for_item("ayam_goreng", rows) == 0.0
+
+
+def test_pos_name_whitespace_normalised_before_matching():
+    """The POS pads names with doubled spaces ('Ikan  Goreng') — matching must
+    collapse them or the adjacency phrases silently read 0 sold."""
+    rows = [
+        {"item_name": "Ikan  Goreng", "qty": 3},
+        {"item_name": "Ayam  Goreng", "qty": 20},
+    ]
+    assert ku.pos_qty_for_item("ikan_goreng", rows) == 3
+    assert ku.pos_qty_for_item("ayam_goreng", rows) == 20
+
+
+def test_plain_nasi_ikan_counts_toward_ikan_kari():
+    rows = [
+        {"item_name": "Ikan Masak Kari", "qty": 3},
+        {"item_name": "Nasi Ikan Sayur", "qty": 10},
+        {"item_name": "Nasi Putih Ikan", "qty": 2},
+        {"item_name": "Nasi Separuh Ikan", "qty": 1},
+        {"item_name": "Ikan  Goreng", "qty": 5},               # fried -> ikan_goreng
+        {"item_name": "Telur Ikan Ikut Saiz", "qty": 4},       # roe, purchase-compared
+        {"item_name": "Kailan Ikan Masin", "qty": 2, "category": "SAYUR THAI"},
+    ]
+    assert ku.pos_qty_for_item("ikan_kari", rows) == 16  # 3+10+2+1
+    assert ku.pos_qty_for_item("ikan_goreng", rows) == 5
+
+
+def test_goat_milk_drinks_not_counted_as_kambing():
+    rows = [
+        {"item_name": "Nasi Kambing Sayur", "qty": 4},
+        {"item_name": "Kambing Mysur", "qty": 6},
+        {"item_name": "Susukambing Higoat Ais( T )", "qty": 9},  # goat MILK drink
+    ]
+    # 10 portions x 180 g = 1.8 kg; the drink must not add phantom meat
+    assert ku.pos_qty_for_item("kambing", rows) == 1.8
 
 
 def test_ayam_kicap_matches_masak_kicap():
@@ -2469,6 +2536,82 @@ def test_pos_shift_coverage_and_completeness():
     assert cov3["has_overnight"] and not cov3["has_day"]
     assert cov3["complete"] is False
     assert ku.missing_pos_shifts(cov3) == ["day"]
+
+
+def _seed_shift_itemwise(fake, shift_ids, ag_qty=40):
+    """S-file per-dish rows (sales_shift_itemwise) for the given shift ids."""
+    rows = fake._store.setdefault(ku.SALES_SHIFT_ITEMWISE_TABLE, [])
+    for n, sid in enumerate(shift_ids):
+        rows.append({"id": 500 + n, "sales_daily_id": sid, "category": "AYAM",
+                     "item_name": "Ayam Goreng", "qty": ag_qty})
+
+
+def test_coverage_falls_back_to_shift_itemwise_when_d_file_missing():
+    """The 'POS hilang / ingestion gap' case: no D-file summary ever arrives,
+    but BOTH shift-close S-files landed and carry their own per-dish rows —
+    the day must count complete via itemwise_source='shift' and the comparison
+    must sum the two shifts."""
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_pos_shifts(fake, types=("day", "overnight"))  # ids 100, 101; no summary
+    # Without S-file itemwise the day stays incomplete (pre-migration rows).
+    cov0 = ku.pos_shift_coverage(fake, "SEK20", "2026-06-24")
+    assert cov0["complete"] is False and cov0["itemwise_source"] is None
+
+    _seed_shift_itemwise(fake, [100, 101], ag_qty=40)
+    cov = ku.pos_shift_coverage(fake, "SEK20", "2026-06-24")
+    assert cov["summary_present"] is False
+    assert cov["itemwise_source"] == "shift"
+    assert cov["complete"] is True
+    assert ku.pos_complete_for_outlet(fake, "SEK20", "2026-06-24") is True
+    # the fetch sums BOTH shifts' rows (full 24h)
+    rows = ku._fetch_itemwise(fake, "SEK20", "2026-06-24")
+    assert sum(float(r["qty"]) for r in rows) == 80.0
+
+
+def test_shift_itemwise_fallback_needs_both_shifts_covered():
+    """Half a day of S-file itemwise (only one shift carries rows) must NOT
+    complete the day — that would compare Used against a half-day of sales."""
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_pos_shifts(fake, types=("day", "overnight"))
+    _seed_shift_itemwise(fake, [100])  # only the day shift has rows
+    cov = ku.pos_shift_coverage(fake, "SEK20", "2026-06-24")
+    assert cov["itemwise_source"] is None
+    assert cov["complete"] is False
+
+
+def test_summary_still_preferred_over_shift_itemwise():
+    """When the D-file is present and covers the shifts, it stays the source —
+    the S-file rows are only the fallback."""
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_pos_summary(fake, ag_qty=77)
+    _seed_pos_shifts(fake, types=("day", "overnight"))
+    _seed_shift_itemwise(fake, [100, 101], ag_qty=40)
+    cov = ku.pos_shift_coverage(fake, "SEK20", "2026-06-24")
+    assert cov["itemwise_source"] == "summary" and cov["complete"] is True
+    rows = ku._fetch_itemwise(fake, "SEK20", "2026-06-24")
+    assert [float(r["qty"]) for r in rows] == [77.0]
+
+
+def test_evaluate_outlet_day_compares_from_shift_itemwise_without_d_file():
+    """End-to-end: kitchen day complete + both S-files with their own itemwise,
+    NO D-file — the comparison runs and writes pos_qty from the summed shifts."""
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_complete_day(fake, date="2026-06-24")           # ayam_goreng cooked 100 left 0
+    _seed_pos_shifts(fake, types=("day", "overnight"))
+    _seed_shift_itemwise(fake, [100, 101], ag_qty=48)     # 48 + 48 = 96 sold
+    evals = ku.evaluate_outlet_day(fake, "SEK20", "2026-06-24")
+    ag = next(e for e in evals if e["code"] == "ayam_goreng")
+    assert ag["pos"] == 96.0
+    row = next(r for r in fake.rows("kitchen_daily_usage") if r["item_code"] == "ayam_goreng")
+    assert row["pos_qty"] == 96.0
 
 
 def test_missing_pos_shifts_and_alert_wording():

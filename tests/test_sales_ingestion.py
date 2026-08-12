@@ -690,6 +690,70 @@ class NewOutletPlaceholderTests(unittest.TestCase):
         self.assertEqual(summary["skipped_unknown"], 1)
         self.assertNotIn(b"1", mailbox.seen)  # still unread for retry
 
+    def test_monthly_report_email_is_terminal_skip(self):
+        """MONTHLY REPORT emails are a known POS report we don't ingest — they
+        must be marked read (terminal) instead of refetching + dead-lettering
+        on every poll forever (the production dead_letter:40 loop)."""
+        mailbox = FakeMailbox([
+            (b"1", make_email("MONTHLY REPORT-SEK15   ON Jun -2026",
+                              "monthly report body", message_id="<mr1>")),
+        ])
+        store = FakeStore()
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["skipped_report"], 1)
+        self.assertEqual(summary["skipped_unknown"], 0)
+        self.assertEqual(summary["dead_letter"], 0)
+        self.assertEqual(store.saved, [])
+        self.assertIn(b"1", mailbox.seen)  # terminal: never refetched again
+        self.assertTrue(any(
+            e["status"] == "skipped_report"
+            and e["detail"] == "monthly_report_not_ingested"
+            for e in store.logs
+        ))
+
+    def test_monthly_report_past_dead_letter_threshold_still_resolves(self):
+        """A monthly email that ALREADY dead-lettered many times must resolve
+        on the first poll after the fix — marked seen, not counted dead."""
+        mailbox = FakeMailbox([
+            (b"1", make_email("MONTHLY REPORT-VISTA   ON Jun -2026",
+                              "monthly report body", message_id="<mr2>")),
+        ])
+        store = FakeStore(error_counts={"<mr2>": DEAD_LETTER_THRESHOLD + 5})
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["skipped_report"], 1)
+        self.assertEqual(summary["dead_letter"], 0)
+        self.assertIn(b"1", mailbox.seen)
+
+    def test_truly_unrecognised_subject_still_skipped_unknown(self):
+        mailbox = FakeMailbox([(b"1", make_email("WEEKLY WHATEVER", "x"))])
+        store = FakeStore()
+        summary = run(store=store, mailbox=mailbox, now_my=NOW)
+        self.assertEqual(summary["skipped_unknown"], 1)
+        self.assertEqual(summary.get("skipped_report", 0), 0)
+        self.assertNotIn(b"1", mailbox.seen)
+
+    def test_shift_itemwise_child_rows_nasi_kandar_only(self):
+        """The S-file's per-dish rows land in sales_shift_itemwise, filtered to
+        the nasi kandar proteins (ayam/ikan/kambing/daging dishes only)."""
+        email = make_email("S-KLANG  SHIFTCLOSE (1654)", _klang_content())
+        from sales_email_fetcher import extract_shift_close
+
+        email_dict = extract_shift_close(email)
+        parsed = parse_shift_close(email_dict["content"])
+        record = build_sales_record(email_dict, parsed, "Klang B.Emas", NOW)
+        rows = record["children"]["sales_shift_itemwise"]
+        self.assertTrue(rows)
+        names = [r["item_name"].lower() for r in rows]
+        self.assertTrue(all(
+            any(b in n for b in ("ayam", "ikan", "kambing", "daging"))
+            for n in names
+        ))
+        # untracked dishes (roti/teh/...) are NOT stored
+        self.assertFalse(any("roti" in n or "teh " in n for n in names))
+        # category comes from the subgroup name
+        self.assertTrue(all("category" in r for r in rows))
+        self.assertTrue(any(r["category"] for r in rows))
+
     def test_store_inserts_inactive_unconfirmed_row(self):
         from tests.fake_supabase import FakeSupabase
 

@@ -36,6 +36,20 @@ IMAP_TIMEOUT_SECONDS = 30
 
 _S_SUBJECT_RE = re.compile(r"^\s*(S-[\w\s]+?)\s+SHIFTCLOSE", re.IGNORECASE)
 _D_SUBJECT_RE = re.compile(r"^\s*(D-[\w\s]+?)\s+ON\s+\d", re.IGNORECASE)
+# The POS also emails a "MONTHLY REPORT-SEK15   ON Jun -2026" per outlet each
+# month. These are NOT ingested (no destination table), but they must be
+# RECOGNISED: an unrecognised subject is left unread and refetched every poll
+# forever — production showed the whole monthly batch dead-lettering on every
+# 15-minute poll. Recognising them lets the ingest layer skip them terminally
+# (marked \Seen). If monthly ingestion is ever built, recover the old emails
+# with a seen-mail sweep (unseen_only=False).
+_MONTHLY_SUBJECT_RE = re.compile(r"^\s*MONTHLY\s+REPORT\b", re.IGNORECASE)
+
+
+def is_monthly_report_subject(subject) -> bool:
+    """True for the POS monthly-report emails (``MONTHLY REPORT-SEK15 ON ...``),
+    which are deliberately not ingested but must not dead-letter forever."""
+    return bool(isinstance(subject, str) and _MONTHLY_SUBJECT_RE.match(subject))
 
 
 def detect_email_type(subject) -> tuple[str, str] | None:

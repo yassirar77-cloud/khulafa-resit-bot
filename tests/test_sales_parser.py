@@ -169,5 +169,90 @@ class PaymentRoutingTests(unittest.TestCase):
         self.assertEqual(p["shift_no"], "1499")
 
 
+class TotalSalesFallbackTests(unittest.TestCase):
+    """When the flat ``TODAY SALES :`` line is damaged/absent, the tender-grid
+    ``| TOTAL SALE| x |`` row still yields a total — production had S-files
+    dead-lettering as no_total_parsed with an intact grid."""
+
+    def test_grid_total_sale_used_when_today_sales_missing(self):
+        content = read_shift_close_file(path_for_code("S-KLANG"))
+        damaged = "\n".join(
+            l for l in content.split("\n") if "TODAY SALES" not in l
+        )
+        p = parse_shift_close(damaged)
+        self.assertAlmostEqual(p["total_sales"], 4758.20, places=2)
+
+    def test_today_sales_still_wins_when_present(self):
+        p = parse_shift_close(read_shift_close_file(path_for_code("S-KLANG")))
+        self.assertAlmostEqual(p["total_sales"], 4758.20, places=2)
+
+    def test_no_grid_no_summary_stays_none(self):
+        self.assertIsNone(parse_shift_close("random text\nno totals here")["total_sales"])
+
+
+class ItemwiseParsingTests(unittest.TestCase):
+    """The per-dish SUB GROUP ITEMWISE SALES section (nasi kandar tracking)."""
+
+    def test_itemwise_parsed_with_subgroup_categories_all_fixtures(self):
+        from tests.sales_fixtures import EXPECTED
+
+        for e in EXPECTED:
+            p = _parsed(e["code"])
+            self.assertTrue(p["itemwise"], e["code"])
+            self.assertIn("itemwise", p["sections_present"], e["code"])
+            # every row carries a subgroup-derived category and a sane shape
+            for r in p["itemwise"]:
+                self.assertTrue(r["name"], e["code"])
+                self.assertIsNotNone(r["qty"], e["code"])
+                self.assertIsNotNone(r["category"], e["code"])
+
+    def test_itemwise_rows_match_known_dishes_KLANG(self):
+        rows = _parsed("S-KLANG")["itemwise"]
+        by_name = {r["name"]: r for r in rows}
+        ag = by_name.get("Ayam Goreng")
+        self.assertIsNotNone(ag)
+        self.assertEqual(ag["category"], "AYAM")
+        self.assertGreater(ag["qty"], 0)
+
+    def test_itemwise_never_spills_into_machine_sales(self):
+        # MACHINE SALES rows are all-numeric — none may parse as a "dish".
+        for code in ("S-KLANG", "S-SEK20", "S-VISTA"):
+            for r in _parsed(code)["itemwise"]:
+                self.assertTrue(
+                    any(c.isalpha() for c in r["name"]), (code, r["name"])
+                )
+
+    def test_nasi_kandar_filter(self):
+        from sales_parser import is_nasi_kandar_item
+
+        self.assertTrue(is_nasi_kandar_item("Nasi Ayam Sayur"))
+        self.assertTrue(is_nasi_kandar_item("Ikan  Goreng"))
+        self.assertTrue(is_nasi_kandar_item("Kambing Mysur"))
+        self.assertTrue(is_nasi_kandar_item("Nasi Daging"))
+        self.assertFalse(is_nasi_kandar_item("Roti Canai"))
+        self.assertFalse(is_nasi_kandar_item("Teh O Ais ( T )"))
+        self.assertFalse(is_nasi_kandar_item(None))
+
+
+class MonthlyReportSubjectTests(unittest.TestCase):
+    def test_monthly_report_subjects_recognised(self):
+        from sales_email_fetcher import detect_email_type, is_monthly_report_subject
+
+        for s in (
+            "MONTHLY REPORT-SEK15   ON Jun -2026",
+            "MONTHLY REPORT-ST KHU   ON Jun -2026",
+            "  monthly report-VISTA ON Jul -2026",
+        ):
+            self.assertTrue(is_monthly_report_subject(s), s)
+            self.assertIsNone(detect_email_type(s), s)  # still not S/D
+
+    def test_shiftclose_and_daily_subjects_not_monthly(self):
+        from sales_email_fetcher import is_monthly_report_subject
+
+        self.assertFalse(is_monthly_report_subject("S-KLANG  SHIFTCLOSE (1499)"))
+        self.assertFalse(is_monthly_report_subject("D-SEK20  ON 25/May/2026"))
+        self.assertFalse(is_monthly_report_subject(None))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -351,6 +351,22 @@ def _extract_summary(lines):
     return out
 
 
+# The cash-denomination pipe grid repeats the day's total as
+# ``|          TOTAL SALE|        2374.90 |``. Used ONLY as a fallback when the
+# flat ``TODAY SALES :`` summary line is damaged/absent — production had a few
+# S-files dead-lettering as ``no_total_parsed`` whose grid was intact, and
+# without a total the shift can never ingest.
+_GRID_TOTAL_SALE_RE = re.compile(r"(?i)TOTAL\s*SALE\s*\|\s*(-?[\d,]+(?:\.\d+)?)")
+
+
+def _fallback_total_sales(lines):
+    for line in lines:
+        m = _GRID_TOTAL_SALE_RE.search(line)
+        if m:
+            return parse_money(m.group(1))
+    return None
+
+
 def _extract_meta(lines):
     info = {
         "header_outlet_raw": None,
@@ -510,6 +526,114 @@ def _parse_cashdrawer(lines, banner_idx):
     return out
 
 
+# --- per-dish itemwise (nasi kandar tracking) --------------------------------
+
+# Bases of the kitchen-tracked nasi kandar items (whole-cut proteins the chef
+# logs cooked/left for). Per-dish rows are stored ONLY for dishes naming one of
+# these — the full ~150-dish menu isn't needed, just the rows the Guna-vs-POS
+# comparison can use when the D-file daily summary never arrives.
+NASI_KANDAR_BASES = ("ayam", "ikan", "kambing", "daging")
+
+
+def is_nasi_kandar_item(name) -> bool:
+    """True when a POS dish name involves a tracked nasi kandar protein."""
+    n = re.sub(r"\s+", " ", str(name or "").lower())
+    return any(b in n for b in NASI_KANDAR_BASES)
+
+
+# The S-file's per-dish sections:
+#   ``SUB GROUP ITEMWISE  SALES`` — dishes grouped under centered subgroup name
+#     lines (AYAM, KAMBING, NASI GORENG THAI, ...) with a ``Sub Group Total``
+#     after each block. The subgroup doubles as the dish's category (the
+#     comparison layer uses it for the THAI-FOOD exclusion).
+#   ``ITEMWISE  SALES`` — the same dishes as one flat list (no category).
+# The subgroup section is preferred; the flat list is the fallback.
+_SUBGROUP_BANNER_RE = re.compile(r"(?i)SUB\s*GROUP\s+ITEMWISE\s+SALES")
+_FLAT_ITEMWISE_BANNER_RE = re.compile(r"(?i)^\s*ITEMWISE\s+SALES\s*$")
+_ITEMWISE_HEADER_RE = re.compile(r"(?i)^itemname\b")
+_SUBGROUP_TOTAL_RE = re.compile(r"(?i)^sub\s*group\s*total\b")
+# Hard stop if the expected end banner is missing — never spill into the
+# MACHINE/STAFF/TABLE sections whose numeric rows would parse as "dishes".
+_ITEMWISE_END_RE = re.compile(
+    r"(?i)MACHINE\s+SALES|STAFF\s*WISE|TABLE\s*WISE|CASHDRAWER|MOBILE\s+CASH"
+    r"|PURCHASE\s+DETAILS|^\s*TOTAL\b.*:"
+)
+
+
+def _find_subgroup_banner(lines):
+    for i, l in enumerate(lines):
+        if _SUBGROUP_BANNER_RE.search(l):
+            return i
+    return None
+
+
+def _find_flat_itemwise_banner(lines, start=0):
+    for i in range(start, len(lines)):
+        if _FLAT_ITEMWISE_BANNER_RE.match(lines[i]):
+            return i
+    return None
+
+
+def _itemwise_row(cols, category):
+    return {
+        "category": category,
+        "name": " ".join(cols[:-2]).strip(),
+        "qty": parse_money(cols[-2]),
+        "amount": parse_money(cols[-1]),
+    }
+
+
+def _parse_subgroup_itemwise(lines, banner_idx, end_idx):
+    """SUB GROUP ITEMWISE SALES -> [{category, name, qty, amount}].
+
+    A single-column line with letters is the next subgroup's name; NAME QTY
+    AMOUNT rows belong to the current subgroup. Rulers, the column header and
+    the ``Sub Group Total`` lines interleave freely and are skipped."""
+    rows = []
+    category = None
+    for raw in lines[banner_idx + 1:end_idx]:
+        s = raw.strip()
+        if not s or _is_separator(s):
+            continue
+        if _ITEMWISE_HEADER_RE.match(s) or _SUBGROUP_TOTAL_RE.match(s):
+            continue
+        if _ITEMWISE_END_RE.search(s):
+            break
+        cols = _columns(s)
+        if len(cols) >= 3 and _looks_int(cols[-2]) and _looks_money(cols[-1]):
+            rows.append(_itemwise_row(cols, category))
+        elif len(cols) == 1 and ":" not in s:
+            category = s
+    return rows
+
+
+def _parse_flat_itemwise(lines, banner_idx):
+    """Fallback: the flat ITEMWISE SALES list (no subgroup/category)."""
+    rows = []
+    for raw in lines[banner_idx + 1:]:
+        s = raw.strip()
+        if not s or _is_separator(s) or _ITEMWISE_HEADER_RE.match(s):
+            continue
+        if _ITEMWISE_END_RE.search(s):
+            break
+        cols = _columns(s)
+        if len(cols) >= 3 and _looks_int(cols[-2]) and _looks_money(cols[-1]):
+            rows.append(_itemwise_row(cols, None))
+    return rows
+
+
+def _parse_itemwise(lines):
+    sub_idx = _find_subgroup_banner(lines)
+    if sub_idx is not None:
+        flat_idx = _find_flat_itemwise_banner(lines, sub_idx + 1)
+        end_idx = flat_idx if flat_idx is not None else len(lines)
+        return _parse_subgroup_itemwise(lines, sub_idx, end_idx)
+    flat_idx = _find_flat_itemwise_banner(lines)
+    if flat_idx is not None:
+        return _parse_flat_itemwise(lines, flat_idx)
+    return []
+
+
 # A MOBILE CASH row: TRNO, a M/D/YYYY h:mm:ss AM/PM datetime, then the amount.
 # Matched by regex (not 2+-space columns) because the TRNO->datetime gap is a
 # single space when the TRNO is wide (e.g. SEK20's 7-digit ids).
@@ -577,6 +701,12 @@ def parse_shift_close(content: str) -> dict:
 
     meta = _extract_meta(lines)
     summary = _extract_summary(lines)
+    if summary.get("total_sales") is None:
+        grid_total = _fallback_total_sales(lines)
+        if grid_total is not None:
+            summary["total_sales"] = grid_total
+            logger.info("TODAY SALES missing — using tender-grid TOTAL SALE %.2f",
+                        grid_total)
 
     sections_present = []
 
@@ -584,6 +714,10 @@ def parse_shift_close(content: str) -> dict:
     items = _parse_items(_section_rows(lines, item_idx)) if item_idx is not None else []
     if items:
         sections_present.append("items")
+
+    itemwise = _parse_itemwise(lines)
+    if itemwise:
+        sections_present.append("itemwise")
 
     cat_idx = _find_category_banner(lines)
     categories = _parse_categories(_section_rows(lines, cat_idx)) if cat_idx is not None else []
@@ -654,6 +788,7 @@ def parse_shift_close(content: str) -> dict:
         "discounts": discounts,
         "payments": payments,
         "items": items,
+        "itemwise": itemwise,
         "deleted_items": deleted_items,
         "stock": stock,
         "cashdrawer": cashdrawer,
