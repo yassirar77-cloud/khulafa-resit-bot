@@ -23,8 +23,8 @@ from email.utils import parsedate_to_datetime
 from zoneinfo import ZoneInfo
 
 from sales_daily_parser import parse_daily_summary
-from sales_email_fetcher import Mailbox, extract_shift_close
-from sales_parser import parse_shift_close
+from sales_email_fetcher import Mailbox, extract_shift_close, is_monthly_report_subject
+from sales_parser import is_nasi_kandar_item, parse_shift_close
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,7 @@ SALES_INGEST_LOG_TABLE = "sales_ingest_log"
 OUTLET_CANONICAL_TABLE = "outlet_canonical"
 CHILD_TABLES = (
     "sales_items",
+    "sales_shift_itemwise",
     "sales_payments",
     "sales_categories",
     "sales_tax",
@@ -136,6 +137,17 @@ def build_sales_record(email_dict, parsed, outlet_canonical, now_my) -> dict:
         "sales_items": [
             {"qty": i["qty"], "item_name": i["name"], "amount": i["amount"]}
             for i in parsed.get("items", [])
+        ],
+        # Per-dish rows from the S-file's SUB GROUP ITEMWISE / ITEMWISE SALES
+        # sections, kept ONLY for the nasi kandar tracked proteins (ayam/ikan/
+        # kambing/daging). These let the Guna-vs-POS comparison run from the
+        # shift-close emails alone when an outlet's D-file daily summary never
+        # arrives (the recurring "POS hilang / ingestion gap" case).
+        "sales_shift_itemwise": [
+            {"category": i.get("category"), "item_name": i["name"],
+             "qty": i["qty"], "amount": i["amount"]}
+            for i in parsed.get("itemwise", [])
+            if is_nasi_kandar_item(i.get("name"))
         ],
         "sales_payments": [
             {
@@ -607,6 +619,8 @@ def process_email(store, email_dict, *, now_my, outlets):
     Returns ``(status, detail)``:
       * ``inserted`` / ``skipped`` (duplicate)
       * ``skipped_inactive`` — outlet active=false (partnership outlets)
+      * ``skipped_report``   — a POS report type we deliberately don't ingest
+                               (MONTHLY REPORT); terminal, marked read
       * ``skipped_unknown``  — unrecognised subject or outlet not in registry
       * ``error``            — empty attachment / unparseable
     """
@@ -617,6 +631,12 @@ def process_email(store, email_dict, *, now_my, outlets):
     email_type = email_dict.get("email_type")
     code = (email_dict.get("outlet_code") or "").upper() or None
     if not email_type or not code:
+        # MONTHLY REPORT emails are a known POS report we don't ingest. They
+        # must be a TERMINAL skip (marked \Seen) — treated as skipped_unknown
+        # they stay unread and refetch + dead-letter on every poll forever
+        # (the production "dead_letter: 40" loop was mostly these).
+        if is_monthly_report_subject(email_dict.get("subject")):
+            return "skipped_report", "monthly_report_not_ingested"
         return "skipped_unknown", "unrecognised subject"
 
     s_code = _canonical_code(code)
@@ -669,11 +689,13 @@ DEAD_LETTER_THRESHOLD = 3
 
 # Statuses whose email we flag \Seen (terminal decisions). skipped_unknown and
 # error are left UNREAD so they retry once the outlet is registered / fixed.
-_MARK_SEEN_STATUSES = frozenset({"inserted", "skipped", "skipped_inactive"})
+_MARK_SEEN_STATUSES = frozenset({"inserted", "skipped", "skipped_inactive",
+                                 "skipped_report"})
 _COUNTER_BY_STATUS = {
     "inserted": "inserted",
     "skipped": "skipped",
     "skipped_inactive": "skipped_inactive",
+    "skipped_report": "skipped_report",
     "skipped_unknown": "skipped_unknown",
     "error": "errors",
 }
@@ -700,7 +722,8 @@ def run(*, store, mailbox, now_my, since=None, unseen_only=True,
     message-id dedup keeps everything already stored idempotent."""
     summary = {
         "fetched": 0, "inserted": 0, "skipped": 0,
-        "skipped_inactive": 0, "skipped_unknown": 0, "errors": 0,
+        "skipped_inactive": 0, "skipped_report": 0, "skipped_unknown": 0,
+        "errors": 0,
         "dead_letter": 0, "dead_letter_subjects": [],
         "new_outlets": [], "migration_0038_needed": False,
     }

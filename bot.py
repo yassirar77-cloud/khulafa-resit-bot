@@ -4113,6 +4113,7 @@ async def sales_ingest_manual_command(update: Update, context: ContextTypes.DEFA
         f"• Inserted: {summary['inserted']}\n"
         f"• Skipped (duplicate): {summary['skipped']}\n"
         f"• Skipped (inactive): {summary['skipped_inactive']}\n"
+        f"• Skipped (monthly report): {summary.get('skipped_report', 0)}\n"
         f"• Skipped (unknown): {summary['skipped_unknown']}\n"
         f"• Errors: {summary['errors']}"
     )

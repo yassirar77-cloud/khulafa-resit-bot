@@ -173,22 +173,25 @@ mismatch (those proteins aren't in the kitchen log):
 
 | item | counts | notes |
 |------|--------|-------|
-| `ayam_goreng` | `Ayam Goreng`, `Ayam Goreng Besar`, `Nasi Ayam Goreng Besar (Sayur)` | whole-cut only — the words *ayam goreng* must be **adjacent**, so `Nasi Goreng Ayam` / `Maggi Goreng Ayam` / `Mee Goreng Ayam` do NOT count |
+| `ayam_goreng` | `Ayam Goreng`, `Ayam Goreng Besar`, `Nasi Ayam Goreng Besar (Sayur)` **plus the plain nasi-kandar plates**: `Nasi Ayam (Sayur/Set)`, `Nasi Separuh Ayam`, `Nasi Putih Ayam`, `Briyani/Biriyani Ayam (Set/Telur)` | adjacency still guards the carb dishes — `Nasi Goreng Ayam` / `Maggi Goreng Ayam` / `Mee Goreng Ayam` do NOT count. Owner rule (Aug 2026): a plain nasi-kandar ayam plate is served with the whole-cut fried piece the chef logs, so it counts here; a plate carrying another style word (bawang/kicap/madu/tandoori/rempah/masak/rendang/…) does not |
 | `ayam_bawang` | `Ayam Bawang`, `Nasi Ayam Bawang (Sayur)`, `Nasi Separuh Ayam Bawang`, `Briyani Ayam Bawang Set/Telur/Sayur` | any *bawang* dish |
 | `ayam_kicap` | `Ayam Masak Kicap` (any `…kicap`) | |
 | `ayam_rempah` | *rempah* dishes | **BISTRO7 only**; a fried `…berempah` dish is a goreng dish, not rempah |
 | `ayam_madu` | `Ayam Madu` dishes | |
 | `ayam_tandoori` | `Ayam Tandoori` / `Ayam Tandori` | excludes `…Staff` |
 | `ikan_goreng` | `Ikan Goreng` dishes | |
-| `ikan_kari` | ikan *kari* / *curry* dishes | |
-| `kambing` | **all** kambing dishes × 180 g ÷ 1000 → kg | |
+| `ikan_kari` | ikan *kari* / *curry* dishes **plus the plain nasi-kandar fish plates**: `Nasi Ikan (Sayur)`, `Nasi Putih Ikan`, `Nasi Separuh Ikan` | the plain plate defaults to the kari-cooked fish; `…goreng/bakar/masin` variants do not count here |
+| `kambing` | **all** kambing dishes × 180 g ÷ 1000 → kg | except `Susu Kambing` goat-milk drinks |
 | `daging` | **all** daging dishes × 60 g ÷ 1000 → kg | |
 
-**Excluded entirely** (no count, no flag): plain `Nasi Ayam` / `Nasi Separuh
-Ayam` / `Isi Ayam` (no style → match nothing), any **THAI FOOD** category, staff
-meals, and `Paprik / Tomyam / Maggi / Indomee / Kuey Teow / Mee Goreng` ayam +
-`Ayam Rendang / Kurma / Kari`. Items with no kitchen entry and no POS match show
-0 quietly.
+Dish names are whitespace-collapsed before matching — the POS pads names with
+doubled spaces (`Ikan  Goreng`), which used to break every adjacency phrase and
+read those dishes as 0 sold.
+
+**Excluded entirely** (no count, no flag): `Isi Ayam` / `Hati Ayam` (match
+nothing), any **THAI FOOD** category, staff meals, and `Paprik / Tomyam / Maggi
+/ Indomee / Kuey Teow / Mee Goreng` ayam + `Ayam Rendang / Kurma / Kari`. Items
+with no kitchen entry and no POS match show 0 quietly.
 
 **Telur Ikan is the exception** — it is not a POS dish, it is bought by weight.
 So it is compared against **kg PURCHASED** (pulled from `receipts`, matching the
@@ -241,12 +244,20 @@ is therefore split into two stages:
   "which closed day we reconcile against POS" (a settled calendar day = today−1).
 
   **Completeness needs BOTH shifts** (`pos_shift_coverage` / `pos_complete_for_outlet`):
-  - the **D-file daily summary** (`sales_daily_summary`, carrying the itemwise
-    quantities) exists, **and**
   - **both** `shift_type='day'` **and** `shift_type='overnight'` rows exist in
-    `sales_daily` for that outlet+`business_date`. Live SEK-20 25 Jun had *only*
-    the overnight shift (its day email never ingested) → correctly **incomplete**,
-    never compared as a half-day.
+    `sales_daily` for that outlet+`business_date` (live SEK-20 25 Jun had *only*
+    the overnight shift — its day email never ingested → correctly **incomplete**,
+    never compared as a half-day), **and**
+  - an **itemwise source** covers those shifts: normally the **D-file daily
+    summary** (`sales_daily_summary`, carrying `sales_daily_itemwise`); when the
+    D-file never arrives (the recurring *"POS hilang / ingestion gap"*), the
+    comparison **falls back to the S-files' own per-dish rows**
+    (`sales_shift_itemwise`, parsed from each shift-close email's SUB GROUP
+    ITEMWISE section — nasi kandar dishes only, migration 0040) provided BOTH
+    shifts carry rows, and sums the two shifts as the full 24h
+    (`itemwise_source='shift'`). Shifts ingested before migration 0040 can be
+    backfilled from their stored `raw_content` with
+    `python scripts/backfill_shift_itemwise.py`.
 
   **Fold is correct (verified on live SEK-6).** `sales_parser.determine_shift_type_and_business_date`
   dates the day shift (closes 17–22h) to the close date and the overnight shift

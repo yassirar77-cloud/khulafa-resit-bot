@@ -409,25 +409,46 @@ def outlets_match(code_a, code_b) -> bool:
 # NOT on the exclusion list (Thai-chef isi-ayam, staff meals — see
 # ``_pos_dish_excluded``).
 #
-# A rule is one of:
+# A rule combines (a dish counts when ANY of the present rules matches):
 #   * "phrases" — the listed words must appear ADJACENT (whole-cut only). Used
 #     for the *goreng* items so "Ayam Goreng" / "Nasi Ayam Goreng Besar" count
 #     but carb-fried "Nasi Goreng Ayam" / "Maggi Goreng Ayam" / "Mee Goreng
 #     Ayam" (ayam trailing) do NOT.
 #   * "styles" — any listed style keyword anywhere in the name. So "Ayam
 #     Bawang", "Nasi Ayam Bawang", "Nasi Separuh Ayam Bawang" and "Briyani Ayam
-#     Bawang Set" all count for ayam_bawang. Plain "Nasi Ayam" / "Nasi Separuh
-#     Ayam" carry no style, so they match nothing (correctly excluded).
-#   * neither (kambing/daging) — base match alone: ALL kambing / daging dishes.
+#     Bawang Set" all count for ayam_bawang.
+#   * "plain" — adjacent phrases for the PLAIN nasi-kandar rice dishes ("Nasi
+#     Ayam", "Nasi Separuh Ayam", "Briyani Ayam", ...), counted only when the
+#     name carries none of the "plain_not" style words. Owner rule (Aug 2026):
+#     a plain nasi-kandar ayam plate is served with the whole-cut fried chicken
+#     the chef logs, so it counts toward Ayam Goreng — excluding these was why
+#     POS read absurdly low (guna 130 vs POS 29) and every day flagged LEAK.
+#   * none of the above (kambing/daging) — base match alone: ALL dishes.
 # "not" lists words that disqualify a dish even when the rule otherwise matches
 # (a fried "...berempah" dish is a goreng dish, not a rempah dish).
 #
 # NOTE: Telur Ikan is NOT here — it is not sold as a POS dish, it is BOUGHT by
 # weight. It is compared against kg purchased (from receipts), not POS. See
 # PURCHASE_COMPARE_CODES / purchased_kg_from_receipts below.
+
+# Style words that stop a dish being "plain" ayam: any of these means the dish
+# is another tracked style's (or an untracked style's) chicken, not the default
+# fried piece. "goreng" is here only to stop double counting — an adjacent
+# "ayam goreng" already matched via phrases before the plain rule runs.
+_AYAM_STYLE_WORDS = (
+    "bawang", "kicap", "madu", "tandoori", "tandori", "rempah",
+    "goreng", "masak", "kari", "kurma", "rendang", "merah", "pedas",
+)
+
 ITEM_POS_KEYWORDS: dict[str, dict] = {
-    # Whole-cut fried only — "ayam goreng" must be adjacent.
-    "ayam_goreng": {"base": "ayam", "phrases": ["ayam goreng"]},
+    # Whole-cut fried, plus the plain nasi-kandar plates (default = fried pc).
+    "ayam_goreng": {
+        "base": "ayam",
+        "phrases": ["ayam goreng"],
+        "plain": ["nasi ayam", "separuh ayam", "putih ayam",
+                  "briyani ayam", "biriyani ayam"],
+        "plain_not": _AYAM_STYLE_WORDS,
+    },
     "ayam_bawang": {"base": "ayam", "styles": ["bawang"]},
     # BISTRO7 only; other outlets have no kitchen line so POS shows 0 quietly.
     "ayam_rempah": {"base": "ayam", "styles": ["rempah"], "not": ["goreng"]},
@@ -436,8 +457,17 @@ ITEM_POS_KEYWORDS: dict[str, dict] = {
     # "tandori" is the common POS misspelling; "...Staff" handled by exclusion.
     "ayam_tandoori": {"base": "ayam", "styles": ["tandoori", "tandori"]},
     "ikan_goreng": {"base": "ikan", "phrases": ["ikan goreng"]},
-    "ikan_kari": {"base": "ikan", "styles": ["kari", "curry"]},
-    "kambing": {"base": "kambing", "styles": []},
+    # Plain nasi-kandar fish plates ("Nasi Ikan Sayur", "Nasi Putih Ikan") are
+    # the kari-cooked fish by default, so they count here — unless the name
+    # says goreng/bakar/masin, in which case it is not the kari fish.
+    "ikan_kari": {
+        "base": "ikan",
+        "styles": ["kari", "curry"],
+        "plain": ["nasi ikan", "putih ikan", "separuh ikan"],
+        "plain_not": ("goreng", "bakar", "masin"),
+    },
+    # "not": susu — Susu Kambing / goat-milk drinks are not the kitchen's meat.
+    "kambing": {"base": "kambing", "styles": [], "not": ["susu"]},
     "daging": {"base": "daging", "styles": []},
 }
 
@@ -481,17 +511,24 @@ def _pos_dish_excluded(name: str, category, base: str) -> bool:
 
 
 def _pos_dish_matches(spec: dict, name: str) -> bool:
-    """True when a dish name satisfies an item's match rule (phrases / styles /
-    base-only), and is not disqualified by the rule's ``not`` list."""
+    """True when a dish name satisfies an item's match rule, and is not
+    disqualified by the rule's ``not`` list. The rules compose as OR:
+    adjacency ``phrases``, ``styles`` keywords, or ``plain`` nasi-kandar phrases
+    (the latter only when no ``plain_not`` style word appears). An item with
+    none of the three (kambing/daging) is base-only: all dishes count."""
     if any(n in name for n in spec.get("not", ())):
         return False
     phrases = spec.get("phrases")
-    if phrases is not None:
-        return any(p in name for p in phrases)
+    if phrases and any(p in name for p in phrases):
+        return True
     styles = spec.get("styles")
-    if styles:
-        return any(s in name for s in styles)
-    return True  # base-only (kambing / daging): all dishes
+    if styles and any(s in name for s in styles):
+        return True
+    plain = spec.get("plain")
+    if plain and any(p in name for p in plain):
+        if not any(w in name for w in spec.get("plain_not", ())):
+            return True
+    return phrases is None and plain is None and not styles
 
 
 # Locked portion sizes for the POS-compared kg items: POS sells these by the
@@ -547,7 +584,10 @@ def pos_qty_for_item(item_code: str, itemwise_rows: list) -> float:
     base = spec["base"]
     total = 0.0
     for row in itemwise_rows or []:
-        name = str(row.get("item_name") or "").lower()
+        # Collapse whitespace runs before matching: the POS pads names with
+        # doubled spaces ("Ikan  Goreng", "Teh  O"), which silently broke every
+        # adjacency-phrase match and read those dishes as 0 sold.
+        name = re.sub(r"\s+", " ", str(row.get("item_name") or "")).strip().lower()
         if base not in name:
             continue
         if _pos_dish_excluded(name, row.get("category"), base):
@@ -812,6 +852,9 @@ SALES_SUMMARY_TABLE = "sales_daily_summary"
 SALES_ITEMWISE_TABLE = "sales_daily_itemwise"
 SALES_SHIFT_BREAKDOWN_TABLE = "sales_daily_shift_breakdown"
 SALES_DAILY_TABLE = "sales_daily"  # per-shift S-file rows (shift_type day/overnight)
+# Per-dish rows parsed from the S-file itself (nasi kandar dishes only) — the
+# comparison's fallback source when an outlet's D-file summary never arrives.
+SALES_SHIFT_ITEMWISE_TABLE = "sales_shift_itemwise"
 RECEIPTS_TABLE = "receipts"
 
 _supabase = None
@@ -1091,18 +1134,18 @@ def _matching_shift_rows(client, outlet_code, business_date) -> list:
     if not target_keys:
         return []
     date_str = str(business_date)[:10]
+    cols = ("id, outlet_code, outlet_canonical, shift_type, shift_no, "
+            "shift_close_at, received_at, shift_business_date")
     rows = _rows(
         client.table(SALES_DAILY_TABLE)
-        .select("outlet_code, outlet_canonical, shift_type, shift_no, "
-                "shift_close_at, received_at, shift_business_date")
+        .select(cols)
         .eq("shift_business_date", date_str)
         .execute()
     )
     if not rows:
         scanned = _rows(
             client.table(SALES_DAILY_TABLE)
-            .select("outlet_code, outlet_canonical, shift_type, shift_no, "
-                    "shift_close_at, received_at, shift_business_date")
+            .select(cols)
             .order("shift_business_date", desc=True)
             .limit(5000)
             .execute()
@@ -1143,16 +1186,42 @@ def _summary_shift_ids(client, summary_ids) -> set:
     return out
 
 
+def _shift_ids_with_itemwise(client, shift_ids) -> set:
+    """Which of the given sales_daily ids carry S-file per-dish rows
+    (sales_shift_itemwise). Empty set on failure or for pre-migration rows."""
+    ids = [i for i in (shift_ids or []) if i is not None]
+    if not ids:
+        return set()
+    try:
+        rows = _rows(
+            client.table(SALES_SHIFT_ITEMWISE_TABLE)
+            .select("sales_daily_id")
+            .in_("sales_daily_id", ids)
+            .execute()
+        )
+    except Exception:
+        logger.warning("kitchen: sales_shift_itemwise probe failed", exc_info=True)
+        return set()
+    return {r.get("sales_daily_id") for r in rows} - {None}
+
+
 def pos_shift_coverage(client, outlet_code, business_date) -> dict:
     """What POS has landed for an outlet's business_date so far. Returns
     {summary_present, total_shifts, has_day, has_overnight, shift_types,
-    summaries_cover_shifts, uncovered_shift_nos, complete}.
+    summaries_cover_shifts, uncovered_shift_nos, itemwise_source, complete}.
 
     ``complete`` (the comparison gate) is True only when the D-file daily summary
     exists (so itemwise quantities are available), the 'overnight' shift has been
     ingested in sales_daily — proof the post-midnight portion of the 24h day
     closed and was reported (the ~7AM email is in) — AND the stored summaries
     actually COVER those shifts.
+
+    FALLBACK (Aug 2026): some outlets' D-file simply never arrives ("POS hilang
+    / ingestion gap") even though both shift-close S-files landed — and those
+    S-files carry their own per-dish quantities (sales_shift_itemwise, nasi
+    kandar dishes only). When the D-file path is not usable but BOTH the day and
+    overnight shift rows carry S-file itemwise, the day still counts as complete
+    with ``itemwise_source='shift'`` and the comparison sums the two shifts.
 
     The coverage check is what adapts the gate to each shop's own close pattern:
     a shop that closes its POS day once (one D-file listing every shift) passes
@@ -1207,6 +1276,22 @@ def pos_shift_coverage(client, outlet_code, business_date) -> dict:
                 outlet_code, business_date, exc_info=True,
             )
             summaries_cover = True
+    # Which itemwise source can serve the comparison?
+    #   'summary' — D-file present and covering every ingested shift (primary).
+    #   'shift'   — no usable D-file, but EVERY day/overnight shift row carries
+    #               its own S-file itemwise rows (fallback; both halves needed
+    #               so the sum is never a half-day).
+    summary_usable = summary_present and summaries_cover
+    itemwise_source = "summary" if summary_usable else None
+    if not summary_usable and has_day and has_overnight:
+        core_shifts = [r for r in shifts
+                       if r.get("shift_type") in ("day", "overnight")]
+        core_ids = [r.get("id") for r in core_shifts]
+        if core_ids and all(i is not None for i in core_ids):
+            with_itemwise = _shift_ids_with_itemwise(client, core_ids)
+            if all(i in with_itemwise for i in core_ids):
+                itemwise_source = "shift"
+
     return {
         "summary_present": summary_present,
         "total_shifts": total_shifts,
@@ -1216,14 +1301,17 @@ def pos_shift_coverage(client, outlet_code, business_date) -> dict:
         "shift_count": len(shifts),
         "summaries_cover_shifts": summaries_cover,
         "uncovered_shift_nos": uncovered,
+        "itemwise_source": itemwise_source,
         # COMPLETE = the FULL 24h is in: BOTH the day and overnight shift, plus
-        # D-file summar(ies) that cover those shifts' itemwise quantities. Live
-        # SEK-20 25 Jun had ONLY the overnight shift (day email never ingested)
+        # an itemwise source that covers those shifts — normally the D-file
+        # summar(ies), else both shifts' own S-file itemwise rows. Live SEK-20
+        # 25 Jun had ONLY the overnight shift (day email never ingested)
         # — that must read incomplete, never compared as a half-day. Live SEK-6
         # 07 Aug had both S-files but only the EVENING daily close's D-file (the
         # morning close was dropped as a "duplicate") — that must also read
-        # incomplete rather than compare against half-day itemwise.
-        "complete": summary_present and has_day and has_overnight and summaries_cover,
+        # incomplete rather than compare against half-day itemwise (unless both
+        # shifts carry their own S-file itemwise, which IS the full 24h).
+        "complete": has_day and has_overnight and itemwise_source is not None,
     }
 
 
@@ -1288,24 +1376,51 @@ def select_reconcile_target_dates(client, outlet_code, candidate_dates) -> dict:
 def _fetch_itemwise(client, outlet_code, business_date) -> list:
     """POS itemwise rows for an outlet's business_date (used to compute pos_qty).
 
-    The itemwise fetch is paginated so a busy day past the PostgREST 1000-row cap
-    is fully read. Returns [] when no matching summary exists (POS not ingested)
-    OR the summary has no itemwise rows — use ``pos_ingested_for_outlet`` to tell
-    the two apart before flagging."""
+    Source selection mirrors ``pos_shift_coverage``'s ``itemwise_source`` so the
+    completeness gate and the fetch can never disagree: the D-file summary rows
+    when the summaries are usable, else BOTH shifts' own S-file itemwise rows
+    (sales_shift_itemwise) summed as the full 24h. Paginated so a busy day past
+    the PostgREST 1000-row cap is fully read. Returns [] when neither source is
+    usable — use ``pos_ingested_for_outlet`` / coverage to tell why before
+    flagging."""
+    source = None
+    try:
+        source = pos_shift_coverage(client, outlet_code, business_date).get(
+            "itemwise_source")
+    except Exception:
+        logger.warning(
+            "kitchen: itemwise source check failed for %s %s — trying summary",
+            outlet_code, business_date, exc_info=True,
+        )
+    if source == "shift":
+        shift_ids = [
+            r.get("id")
+            for r in _matching_shift_rows(client, outlet_code, business_date)
+            if r.get("shift_type") in ("day", "overnight") and r.get("id") is not None
+        ]
+        return _paged_rows(
+            lambda start, end: client.table(SALES_SHIFT_ITEMWISE_TABLE)
+            .select("item_name, qty, category, sales_daily_id")
+            .in_("sales_daily_id", shift_ids)
+            .range(start, end)
+        ) if shift_ids else []
     ids = _matching_summary_ids(client, outlet_code, business_date)
     if not ids:
         return []
+    return _paged_rows(
+        lambda start, end: client.table(SALES_ITEMWISE_TABLE)
+        .select("item_name, qty, category, summary_id")
+        .in_("summary_id", ids)
+        .range(start, end)
+    )
+
+
+def _paged_rows(build_query, page: int = 1000) -> list:
+    """Drain a range-paginated query builder into one list."""
     rows = []
-    page = 1000
     start = 0
     while True:
-        chunk = _rows(
-            client.table(SALES_ITEMWISE_TABLE)
-            .select("item_name, qty, category, summary_id")
-            .in_("summary_id", ids)
-            .range(start, start + page - 1)
-            .execute()
-        )
+        chunk = _rows(build_query(start, start + page - 1).execute())
         rows.extend(chunk)
         if len(chunk) < page:
             break
@@ -1530,8 +1645,9 @@ def evaluate_outlet_day(client, outlet_code, business_date) -> list:
     uses kg purchased from receipts.
 
     SAFETY (self-gating): writes pos_qty/mismatch_flag ONLY when the day's POS is
-    genuinely COMPLETE — the D-file summary exists AND both day+overnight shifts
-    are ingested (``pos_complete_for_outlet``). If POS is absent/incomplete it
+    genuinely COMPLETE — both day+overnight shifts are ingested AND an itemwise
+    source covers them: the D-file summary, or (fallback) both shifts' own
+    S-file itemwise rows (``pos_complete_for_outlet``). If POS is absent/incomplete it
     writes NOTHING and returns [] (the rows stay pos_qty NULL → "belum lengkap"),
     so a false pos_qty=0 / LEAK is never persisted against not-yet-ingested POS
     and the day is never marked reconciled prematurely. This is the bug where a
