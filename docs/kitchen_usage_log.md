@@ -265,6 +265,15 @@ is therefore split into two stages:
   map to `business_date = D` — the SAME day the kitchen folds 18:00 D / 00:00 D+1
   / 02:00 D+1 into.
 
+  **Shops that never keyed in still see their POS numbers** (owner rule, Aug
+  2026): on the **14:00 final pass**, a day with NO complete COOKED+LEFT record
+  but complete POS gets a **"🧾 POS punya jualan"** notice (`pos_only_snapshot` /
+  `render_pos_only_summary`) listing what POS says was sold per tracked item —
+  with an explicit *tak boleh banding* line and a Tamil plea to fill the form,
+  **never a fabricated flag**. `pos_qty` is persisted (cooked/left stay NULL) so
+  the notice posts once; it deliberately does NOT run at 09:00/11:00 so a late
+  LEFT submission that morning can still become a real comparison first.
+
   **Safety / idempotency:** until a day's POS is complete it shows
   **"⏳ POS belum lengkap"** (detail naming the missing shift) and is **never
   flagged**. The 09:00 run notifies the most-recent pending day; 11:00 is silent;

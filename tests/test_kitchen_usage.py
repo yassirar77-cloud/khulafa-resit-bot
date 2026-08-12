@@ -2614,6 +2614,96 @@ def test_evaluate_outlet_day_compares_from_shift_itemwise_without_d_file():
     assert row["pos_qty"] == 96.0
 
 
+# --- POS-only summary for shops that never keyed in ---------------------------
+
+def test_pos_only_snapshot_shows_pos_when_kitchen_never_keyed_in():
+    """Owner rule (Aug 2026): a shop that skipped the Masak/Baki form still gets
+    shown what POS says it sold — pos_qty persisted, NO flag fabricated."""
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_pos_complete(fake)  # POS complete (summary + both shifts), NO kitchen rows
+    evals = ku.pos_only_snapshot(fake, "SEK20", "2026-06-24")
+    assert evals
+    ag = next(e for e in evals if e["code"] == "ayam_goreng")
+    assert ag["pos"] == 80.0 and ag["used"] is None and ag["flag"] is None
+    # telur_ikan is purchase-compared -> not shown
+    assert all(e["code"] != "telur_ikan" for e in evals)
+    rows = fake.rows("kitchen_daily_usage")
+    assert rows and all(r.get("pos_qty") is not None for r in rows)
+    assert all(r.get("cooked_qty") is None and r.get("mismatch_flag") is None for r in rows)
+    # idempotent: the day now counts as handled, second call is a no-op
+    assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is True
+    assert ku.pos_only_snapshot(fake, "SEK20", "2026-06-24") == []
+
+
+def test_pos_only_snapshot_never_runs_on_incomplete_pos():
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_pos_summary(fake)
+    _seed_pos_shifts(fake, types=("day",))  # overnight missing -> half day
+    assert ku.pos_only_snapshot(fake, "SEK20", "2026-06-24") == []
+    assert fake.rows("kitchen_daily_usage") == []
+
+
+def test_reconcile_targets_bucket_unkeyed_day_as_pos_only():
+    from tests.fake_supabase import FakeSupabase
+
+    # No kitchen record + POS complete -> pos_only
+    fake = FakeSupabase()
+    _seed_pos_complete(fake)
+    t = ku.select_reconcile_target_dates(fake, "SEK20", ["2026-06-24"])
+    assert t["pos_only"] == ["2026-06-24"]
+    assert t["reconcile"] == [] and t["pending"] == []
+
+    # No kitchen record + POS incomplete -> nowhere (nothing to show yet)
+    fake2 = FakeSupabase()
+    _seed_pos_shifts(fake2, types=("day",))
+    t2 = ku.select_reconcile_target_dates(fake2, "SEK20", ["2026-06-24"])
+    assert t2["pos_only"] == [] and t2["reconcile"] == [] and t2["pending"] == []
+
+    # Complete kitchen record keeps going to reconcile, not pos_only
+    fake3 = FakeSupabase()
+    _seed_complete_day(fake3, date="2026-06-24")
+    _seed_pos_complete(fake3, date="2026-06-24")
+    t3 = ku.select_reconcile_target_dates(fake3, "SEK20", ["2026-06-24"])
+    assert t3["reconcile"] == ["2026-06-24"] and t3["pos_only"] == []
+
+
+def test_partial_key_in_still_gets_pos_only():
+    """COOKED submitted but LEFT never keyed -> record incomplete -> the day is
+    surfaced as POS-only instead of vanishing."""
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store["kitchen_daily_usage"] = [
+        {"id": 1, "outlet_code": "SEK20", "business_date": "2026-06-24",
+         "item_code": "ayam_goreng", "item_label": "Ayam Goreng", "unit": "pcs",
+         "cooked_qty": 100, "left_qty": None, "pos_qty": None, "mismatch_flag": None},
+    ]
+    _seed_pos_complete(fake)
+    t = ku.select_reconcile_target_dates(fake, "SEK20", ["2026-06-24"])
+    assert t["pos_only"] == ["2026-06-24"]
+
+
+def test_render_pos_only_summary_wording():
+    evals = [
+        {"code": "ayam_goreng", "label": "Ayam Goreng", "unit": "pcs",
+         "cooked": None, "left": None, "used": None, "pos": 96.0,
+         "flag": None, "source": "pos"},
+        {"code": "kambing", "label": "Kambing", "unit": "kg",
+         "cooked": None, "left": None, "used": None, "pos": 1.8,
+         "flag": None, "source": "pos"},
+    ]
+    text = ku.render_pos_only_summary("SEK-20", "2026-06-24", evals)
+    assert "POS punya jualan" in text and "SEK-20" in text and "2026-06-24" in text
+    assert "tak boleh banding" in text
+    assert "Ayam Goreng: POS jual 96 pcs" in text
+    assert "Kambing: POS jual 1.8 kg" in text
+    assert "🔴" not in text and "LEAK" not in text  # never a fabricated flag
+
+
 def test_missing_pos_shifts_and_alert_wording():
     # names the missing half(s)
     assert ku.missing_pos_shifts({"has_day": False, "has_overnight": True}) == ["day"]

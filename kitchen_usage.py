@@ -1350,15 +1350,16 @@ def select_reconcile_target_dates(client, outlet_code, candidate_dates) -> dict:
     NEVER today, whose overnight POS won't arrive until ~7AM tomorrow. Returns
     {'reconcile': [dates ready to compare — kitchen-complete, POS-complete,
     unreconciled], 'pending': [(date, coverage) — kitchen-complete, unreconciled,
-    but POS still incomplete]}. Dates already reconciled (pos_qty set) or with no
-    complete COOKED+LEFT record are ignored (not a POS-timing concern)."""
-    reconcile, pending = [], []
+    but POS still incomplete], 'pos_only': [dates whose KITCHEN record was never
+    completed but whose POS is complete — the shop still gets shown what POS says
+    it sold (``pos_only_snapshot``), owner rule Aug 2026]}. Dates already
+    reconciled/handled (any pos_qty set) are skipped everywhere."""
+    reconcile, pending, pos_only = [], [], []
     for d in candidate_dates:
         try:
             if comparison_already_posted(client, outlet_code, d):
                 continue
-            if not day_record_complete(client, outlet_code, d):
-                continue
+            kitchen_ok = day_record_complete(client, outlet_code, d)
             cov = pos_shift_coverage(client, outlet_code, d)
         except Exception:
             logger.warning(
@@ -1366,11 +1367,17 @@ def select_reconcile_target_dates(client, outlet_code, candidate_dates) -> dict:
                 outlet_code, d, exc_info=True,
             )
             continue
+        if not kitchen_ok:
+            # No (complete) kitchen key-in. Nothing to compare — but when the
+            # POS side is complete the shop is still shown its POS numbers.
+            if cov["complete"]:
+                pos_only.append(d)
+            continue
         if cov["complete"]:
             reconcile.append(d)
         else:
             pending.append((d, cov))
-    return {"reconcile": reconcile, "pending": pending}
+    return {"reconcile": reconcile, "pending": pending, "pos_only": pos_only}
 
 
 def _fetch_itemwise(client, outlet_code, business_date) -> list:
@@ -1696,6 +1703,54 @@ def evaluate_outlet_day(client, outlet_code, business_date) -> list:
     return evaluations
 
 
+def pos_only_snapshot(client, outlet_code, business_date) -> list:
+    """POS-sold quantities for a day the kitchen NEVER keyed in (no complete
+    COOKED+LEFT record by the final STAGE 2 pass).
+
+    Owner rule (Aug 2026): a shop that skipped the form still gets SHOWN what
+    the POS says it sold, so a missing key-in never hides the day. Computes
+    pos_qty per POS-compared tracked item (Telur Ikan is purchase-compared, so
+    it is skipped) and persists it on kitchen_daily_usage rows — cooked/left
+    stay NULL and mismatch_flag stays NULL because there is nothing to compare
+    against, never a fabricated flag. Persisting pos_qty makes the day count as
+    handled (``comparison_already_posted``) so the notice posts ONCE; a later
+    forced re-reconcile is still possible via ``recompute_outlet_day``.
+
+    Self-gating like ``evaluate_outlet_day``: returns [] (writing nothing) when
+    the day's POS is not complete or the day was already handled."""
+    if comparison_already_posted(client, outlet_code, business_date):
+        return []
+    if not pos_complete_for_outlet(client, outlet_code, business_date):
+        return []
+    itemwise = _fetch_itemwise(client, outlet_code, business_date)
+    evaluations = []
+    for it in items_for_outlet(outlet_code):
+        code = it["code"]
+        if compare_source(code) != "pos":
+            continue  # purchase-compared (telur_ikan): no POS number to show
+        pos = pos_qty_for_item(code, itemwise)
+        evaluations.append({
+            "code": code, "label": it["label"], "unit": it["unit"],
+            "cooked": None, "left": None, "used": None,
+            "pos": pos, "flag": None, "source": "pos",
+        })
+        try:
+            _upsert_usage_row(client, {
+                "outlet_code": outlet_code,
+                "business_date": str(business_date),
+                "item_code": code,
+                "item_label": it["label"],
+                "unit": it["unit"],
+                "pos_qty": pos,
+            })
+        except Exception:
+            logger.exception(
+                "kitchen: pos-only write failed for %s %s %s",
+                outlet_code, business_date, code,
+            )
+    return evaluations
+
+
 def comparison_already_posted(client, outlet_code, business_date) -> bool:
     """True when STAGE 2 has already reconciled this outlet+date (any row carries
     a non-null pos_qty). Makes the 09:00 run and its later retry idempotent —
@@ -1851,6 +1906,30 @@ def render_pos_missing_shift(outlet_label, business_date, coverage=None) -> str:
         "tak boleh banding Guna vs POS.\n"
         "Email POS shift ni nampaknya tak masuk (ingestion gap) — sila semak."
     )
+
+
+def render_pos_only_summary(outlet_label, business_date, evaluations: list) -> str:
+    """STAGE 2 (final pass) notice for a day the kitchen NEVER keyed in: the
+    shop is still shown what the POS says it sold per tracked item, with an
+    explicit "tak boleh banding" line and a Tamil plea to fill the form daily.
+    No flags ever — there is no Used side to compare."""
+    lines = [
+        f"🧾 POS punya jualan — {outlet_label} • {business_date}",
+        "",
+        "Kitchen tak key in rekod Masak/Baki untuk hari ni, jadi tak boleh "
+        "banding Guna vs POS. Tapi ikut POS, jualan hari tu:",
+        "",
+    ]
+    for ev in evaluations:
+        pos = format_value(ev.get("pos"), ev["unit"])
+        lines.append(f"• {ev['label']}: POS jual {pos} {ev['unit']}")
+    lines += [
+        "",
+        "👨‍🍳 நேத்து Masak/Baki form fill பண்ணல — அதனால comparison "
+        "பண்ண முடியல. இனிமேல் தினமும் form fill பண்ணுங்க, அப்போ தான் "
+        "Guna vs POS சரியா வரும் 🙏",
+    ]
+    return "\n".join(lines)
 
 
 def render_mini_summary(outlet_label, business_date, evaluations: list) -> str:
@@ -2861,6 +2940,23 @@ async def post_comparison_digests(
                         )
             pending = targets["pending"]  # newest first
             if alert_missing_shift:
+                # Final (14:00) pass ONLY: days the kitchen never keyed in still
+                # get their POS numbers shown (owner rule, Aug 2026). Not done at
+                # 09:00/11:00 so a late LEFT submission that morning can still
+                # turn the day into a REAL comparison first; by 14:00 the form
+                # window is long gone. pos_only_snapshot stamps pos_qty, so each
+                # day posts exactly once.
+                for d in reversed(targets.get("pos_only", [])):
+                    pos_evals = await asyncio.to_thread(
+                        pos_only_snapshot, _supabase, outlet_code, d
+                    )
+                    if pos_evals:
+                        with contextlib.suppress(Exception):
+                            await application.bot.send_message(
+                                chat_id=chat_id,
+                                text=render_pos_only_summary(outlet_label, d, pos_evals),
+                            )
+                        posted += 1
                 # Final (14:00) pass: any still-incomplete day is an ingestion gap.
                 for d, cov in pending:
                     logger.warning(
@@ -2911,10 +3007,12 @@ async def post_comparison_digests_retry(application) -> None:
 
 
 async def post_comparison_digests_final(application) -> None:
-    """14:00 final pass of STAGE 2: still posts any newly-complete comparison, and
-    raises a distinct "⚠️ POS <shift> hilang" alert for any kitchen-complete day
-    whose POS is STILL missing a shift — an ingestion gap to investigate, not a
-    silent forever-"belum lengkap"."""
+    """14:00 final pass of STAGE 2: still posts any newly-complete comparison,
+    shows POS-only numbers for days the kitchen never keyed in (so a skipped
+    form never hides the day — ``pos_only_snapshot``), and raises a distinct
+    "⚠️ POS <shift> hilang" alert for any kitchen-complete day whose POS is
+    STILL missing a shift — an ingestion gap to investigate, not a silent
+    forever-"belum lengkap"."""
     await post_comparison_digests(application, notify_missing=False, alert_missing_shift=True)
 
 
