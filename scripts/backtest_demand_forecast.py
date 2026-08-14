@@ -67,9 +67,9 @@ def backtest(rows: list[dict], outlets: list[str], item_filter: str | None,
         "n": 0, "errors": [], "within_10": 0, "within_20": 0,
         "sold_out": 0,
         # recommendation-vs-reality
-        "leftover_saved": 0.0, "leftover_days": 0,
+        "leftover_saved": [], "leftover_days": 0,
         "sellout_covered": 0, "sellout_days": 0,
-        "per_outlet": {},
+        "per_outlet": {}, "per_item": {},
     }
     for outlet in outlets:
         series = df.demand_series(rows, outlet)
@@ -98,6 +98,7 @@ def backtest(rows: list[dict], outlets: list[str], item_filter: str | None,
                     pct = abs(actual - fc["forecast"]) / actual * 100.0
                     stats["errors"].append(pct)
                     stats["per_outlet"].setdefault(outlet, []).append(pct)
+                    stats["per_item"].setdefault(item_code, []).append(pct)
                     if pct <= 10.0:
                         stats["within_10"] += 1
                     if pct <= 20.0:
@@ -106,11 +107,14 @@ def backtest(rows: list[dict], outlets: list[str], item_filter: str | None,
                 # What the recommendation would have changed that day.
                 if cooked is not None and left is not None and left > 0:
                     # Leftover day: the surplus the recommendation would have cut,
-                    # never below the demand that actually showed up.
+                    # never below the demand that actually showed up. Collected
+                    # per day and reported as a MEDIAN — the first version summed
+                    # these raw and reported "306,995 saved" off the back of a
+                    # handful of 2000-pc and 10900-kg numpad errors.
                     if fc["recommend"] < float(cooked):
                         saved = float(cooked) - max(fc["recommend"], actual)
                         if saved > 0:
-                            stats["leftover_saved"] += saved
+                            stats["leftover_saved"].append(saved)
                             stats["leftover_days"] += 1
                 if censored and cooked is not None:
                     stats["sellout_days"] += 1
@@ -170,13 +174,20 @@ def main() -> None:
 
     print("\nWhat the recommendation would have changed")
     print(f"  over-cook days it would have trimmed : {stats['leftover_days']}")
-    print(f"  leftover avoided (summed, mixed units): "
-          f"{round(stats['leftover_saved'], 1)}")
+    print(f"  leftover avoided per such day (median): "
+          f"{_median(stats['leftover_saved'])}")
     if stats["sellout_days"]:
         print(f"  sell-out days it would have covered  : "
               f"{stats['sellout_covered']}/{stats['sellout_days']}")
     else:
         print("  sell-out days it would have covered  : none in window")
+
+    if stats["per_item"]:
+        print("\nPer item (median error) — items under the volume floor are skipped")
+        for item, errs in sorted(
+            stats["per_item"].items(), key=lambda kv: -statistics.median(kv[1])
+        ):
+            print(f"  {item:16s} {_median(errs)}%  ({len(errs)} item-days)")
 
     if stats["per_outlet"]:
         print("\nPer outlet (median error)")

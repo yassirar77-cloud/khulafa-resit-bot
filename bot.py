@@ -5299,14 +5299,26 @@ def _gather_cook_plans(today=None) -> dict:
         except Exception:
             logger.exception("cook plan: manager lookup failed")
     bundle["managers"] = managers
-    bundle["enabled"] = wmr.delivery_enabled()
+    # Manager delivery needs BOTH gates: the global one, and this feature's own
+    # COOK_PLAN_ENABLED. Until the forecast is backtested to numbers worth
+    # acting on, /cook_plan_now stays a preview — every plan routes to the owner
+    # with the [TEST] prefix instead of reaching a kitchen.
+    bundle["enabled"] = wmr.delivery_enabled() and demand_forecast.cook_plan_enabled()
     return bundle
 
 
 async def post_cook_plans(application: Application, *,
                           notify_chat_id=None) -> None:
     """Daily 11:00 MY job (after the 10:45 slow-item watch, so yesterday's
-    completed day is already folded in and well before anything is cooked)."""
+    completed day is already folded in and well before anything is cooked).
+
+    The SCHEDULED run no-ops unless COOK_PLAN_ENABLED is truthy — an unproven
+    forecast must never reach a kitchen on a timer. ``notify_chat_id`` is set
+    only by /cook_plan_now, which is owner-only and always allowed to run so
+    the plan can be previewed and measured."""
+    if notify_chat_id is None and not demand_forecast.cook_plan_enabled():
+        logger.info("cook plan: scheduled run skipped (COOK_PLAN_ENABLED off)")
+        return
     try:
         bundle = await asyncio.to_thread(_gather_cook_plans)
     except Exception:
