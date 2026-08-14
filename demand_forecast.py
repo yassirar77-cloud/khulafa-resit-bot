@@ -10,16 +10,33 @@ Where the history comes from
 ----------------------------
 ``kitchen_daily_usage`` already holds, per (outlet, business_date, item):
 Cooked (18:00 form), Left (02:00 form), Used = Cooked − Left, and — once the
-24h POS day is complete — ``pos_qty``, the dishes actually sold. Demand for a
-day is read in that order of truth:
+24h POS day is complete — ``pos_qty``, the dishes actually sold.
 
-  * POS dishes sold, when the item is POS-compared and the day was reconciled
-    (``kitchen_usage.compare_source`` == 'pos'); this is what customers bought.
-  * otherwise Used (Cooked − Left) — what left the kitchen.
+**Demand is always Used (Cooked − Left).** The first cut of this module
+preferred ``pos_qty`` — customers bought it, so surely that is demand — and the
+production backtest (120 days, ~1250 item-days) showed why that is wrong:
 
-Telur Ikan is deliberately excluded from the POS path: its ``pos_qty`` column
-holds kg PURCHASED, not sold (``PURCHASE_COMPARE_CODES``), so using it as
-demand would forecast the supplier's delivery pattern instead of the shop's.
+  * ``pos_qty`` is present on only **46 %** of rows, so a series built on
+    "POS when available, else Used" silently alternates between two different
+    signals, and the median of that mixture measures neither.
+  * the two are not even close to the same scale. Measured median Used ÷ median
+    POS per item: ayam_goreng **3.6x**, ayam_kicap **5.0x**, ikan_goreng
+    **5.0x**, daging **5.6x**, telur_ikan **13.4x**. That is by design, not by
+    error: ``kitchen_usage`` counts only dishes that map cleanly to a whole cut
+    (``AYAM_EXCLUDE_SUBSTRINGS`` drops rendang/kurma/isi-ayam noodle and rice
+    dishes; Thai-category and staff meals are excluded outright) because the
+    Guna-vs-POS flag compares like with like on both sides. A deliberately
+    conservative subset is the right input for a mismatch gate and the wrong
+    one for an absolute level — forecasting on it told shops to cook a third
+    of what they need.
+
+Used carries its own bias (over-portioning and leakage ride along with it), but
+it is present on every keyed-in day, it is on the same scale as the number the
+chef is being asked to change, and it excludes exactly the leftovers this
+feature exists to remove. ``pos_qty`` is still carried on each point for
+diagnostics; it never enters the model. Telur Ikan needs no special case any
+more — its ``pos_qty`` holds kg PURCHASED rather than sold, and nothing reads
+it.
 
 Censored days (the part that matters)
 -------------------------------------
@@ -52,6 +69,14 @@ with is a number the chef ignores::
     deviation relative to the level) + a bonus per recent sell-out, capped.
     Steady items get ~5 %, erratic or sell-out-prone items get up to 25 %.
 
+Two guards run before any of it. Numpad fat-fingers are dropped
+(``reject_outliers``) — production carries cooked entries of 2000 pcs, 3500 kg
+and 10900 kg of kambing, which survive a median but wreck the thin per-weekday
+samples and every surplus figure the plan quotes. And an item whose level is
+under the volume floor gets no plan at all: most tracked items move 3-6 a day,
+where a single portion swings the error by a third, so only the items that
+genuinely move (ayam goreng, ayam bawang) are worth a number.
+
 Then each item is compared with what the shop has actually been cooking
 (``usual_cooked``, the recent median) and gets one action:
 
@@ -72,6 +97,7 @@ forecast can never block the kitchen forms or the digest.
 from __future__ import annotations
 
 import logging
+import os
 import statistics
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -80,6 +106,19 @@ logger = logging.getLogger(__name__)
 
 USAGE_TABLE = "kitchen_daily_usage"
 FORECAST_TABLE = "kitchen_demand_forecast"
+
+# Master kill-switch for the SCHEDULED 11:00 plan, same shape as
+# ``kitchen_usage.kitchen_log_enabled``. Default OFF: a forecast that has not
+# been backtested against the shops' own numbers must never reach a kitchen,
+# and the first production backtest of this module found a median error of
+# 23-53 %. ``/cook_plan_now`` still works for the owner regardless, so the plan
+# can be previewed and re-measured before anyone acts on it.
+_ENABLED_TRUTHY = {"1", "true", "yes", "on", "y"}
+
+
+def cook_plan_enabled() -> bool:
+    """True only when COOK_PLAN_ENABLED is explicitly set truthy. Default OFF."""
+    return os.environ.get("COOK_PLAN_ENABLED", "").strip().lower() in _ENABLED_TRUTHY
 
 # --- windows -----------------------------------------------------------------
 _HISTORY_DAYS = 56        # how far back we read (2 x the level window + slack)
@@ -103,6 +142,24 @@ _BASE_SAFETY = 0.05
 _VOLATILITY_K = 0.50      # safety grows with relative MAD
 _SELLOUT_SAFETY_PER_DAY = 0.03
 _MAX_SAFETY = 0.25
+
+# --- outlier rejection -------------------------------------------------------
+# Production has cooked_qty values of 2000 pcs, 3500 kg and 10900 kg sitting in
+# the kitchen log — fat-fingered numpad entries, not days. The median survives a
+# few, but they poison the day-of-week medians (thin per-weekday samples) and
+# every "surplus" number the plan quotes. A point is dropped when it exceeds
+# BOTH a multiple of the item's median AND an absolute margin above it, so a
+# genuine festival day on a small item is kept while 10900 kg of kambing is not.
+_OUTLIER_FACTOR = 6.0
+_OUTLIER_MIN_ABS = 20.0
+
+# --- minimum volume ----------------------------------------------------------
+# "Cook ~3 kg daging" is not advice, it is noise: at that size a single portion
+# swings the percentage error by a third. Same reasoning as
+# ``item_sales_watch._MIN_MEDIAN_QTY`` — an item must genuinely move before the
+# shop is told anything about it.
+_MIN_LEVEL_PCS = 10.0
+_MIN_LEVEL_KG = 3.0        # daging's measured 2.0 kg/day is below the line
 
 # --- advice gates (dual, mamak-tuned — same shape as the mismatch gates) ------
 _CUT_PCT_GATE = 10.0
@@ -205,38 +262,30 @@ def load_usage_rows(supabase, start_iso: str, end_iso: str) -> list[dict]:
 def day_demand(row: dict, item_code: str) -> dict | None:
     """The demand signal carried by one ``kitchen_daily_usage`` row.
 
-    Returns ``{'demand', 'censored', 'cooked', 'left', 'source'}`` or ``None``
-    when the row carries no usable demand at all. POS sold wins when the item is
-    POS-compared and the day was reconciled; otherwise Used (Cooked − Left).
-    ``censored`` marks a sell-out (Left = 0) — demand was AT LEAST this."""
+    Returns ``{'demand', 'censored', 'cooked', 'left', 'pos', 'source'}`` or
+    ``None`` when the row carries no usable demand. Demand is **always** Used
+    (Cooked − Left) — see the module docstring for the production measurement
+    that ruled POS out as a level. ``pos`` is carried for diagnostics only and
+    never enters the model. ``censored`` marks a sell-out (Left = 0) — demand
+    was AT LEAST this."""
     try:
-        from kitchen_usage import compare_source
-
         cooked = _to_float(row.get("cooked_qty"))
         left = _to_float(row.get("left_qty"))
         used = _to_float(row.get("used_qty"))
         if used is None and cooked is not None and left is not None:
             used = cooked - left
 
-        demand = None
-        source = "used"
-        if compare_source(item_code) == "pos":
-            pos = _to_float(row.get("pos_qty"))
-            # pos_qty is written ONLY when the 24h POS day is genuinely
-            # complete (kitchen_usage self-gates precisely so a false 0 is
-            # never persisted), so a present value — including 0 — is real
-            # sales. NULL means "not reconciled", and falls through to Used.
-            if pos is not None:
-                demand, source = pos, "pos"
-        if demand is None and used is not None:
-            demand, source = used, "used"
-        if demand is None or demand < 0:
+        # Left keyed in above Cooked is a key-in error, not negative demand
+        # (production: kambing's median Left, 4.5, exceeds its median Cooked).
+        if used is None or used < 0:
             return None
+        demand, source = used, "used"
         return {
             "demand": float(demand),
             "censored": left is not None and left <= 0 and (cooked or 0) > 0,
             "cooked": cooked,
             "left": left,
+            "pos": _to_float(row.get("pos_qty")),   # diagnostics only
             "source": source,
         }
     except Exception:
@@ -275,6 +324,34 @@ def demand_series(rows: list[dict], outlet_code: str) -> dict[str, dict[str, dic
 
 
 # --- the model (pure) --------------------------------------------------------
+
+def reject_outliers(points: list[tuple[date, dict]]) -> list[tuple[date, dict]]:
+    """Drop numpad fat-fingers before they reach the model.
+
+    Two-pass: take the median of the raw demands, then keep every point at or
+    below ``max(factor × median, median + margin)``. The margin keeps the filter
+    from turning brutal on small items — kambing's median of 3 kg would
+    otherwise cap at 18 kg and throw away a real 20 kg day, while 10900 kg is
+    still dropped either way. Returns the points unchanged when there is
+    nothing to judge against. Pure; never raises."""
+    try:
+        if len(points) < 3:
+            return list(points)
+        values = [float(p.get("demand") or 0.0) for _, p in points]
+        median = _median(values)
+        if median <= 0:
+            return list(points)
+        ceiling = max(_OUTLIER_FACTOR * median, median + _OUTLIER_MIN_ABS)
+        return [(d, p) for d, p in points
+                if float(p.get("demand") or 0.0) <= ceiling]
+    except Exception:
+        logger.exception("cook plan: outlier rejection failed")
+        return list(points)
+
+
+def _min_level(unit: str) -> float:
+    return _MIN_LEVEL_KG if unit == "kg" else _MIN_LEVEL_PCS
+
 
 def _adjusted(point: dict) -> float:
     """A sell-out day's observed demand understates the truth — lift it before
@@ -353,23 +430,46 @@ def _cut_gate(unit: str) -> float:
 
 def decide_action(recommend: float, usual_cooked: float | None, sellouts: int,
                   unit: str) -> str:
-    """CUT / RAISE / HOLD for one item.
+    """CUT / RAISE / HOLD for one item — symmetric around what the shop cooks.
 
-    RAISE wins over CUT when the shop keeps running dry: lost sales cost more
-    than a few leftover pieces, and a kitchen told to cut on a day it sold out
-    stops reading the message. CUT needs BOTH gates (% and absolute) so a shop
-    two pieces over its plan is left alone."""
+    RAISE means "cook more than usual", CUT means "cook less", HOLD means "the
+    usual amount is about right". Both directions need BOTH gates (% and
+    absolute) so a shop two pieces off its plan is left alone; sell-out
+    evidence raises on its own, because a shop that keeps running dry is losing
+    sales whatever the gates say.
+
+    Recent sell-outs also VETO a cut: telling a kitchen to cook less in a week
+    it kept running out is the fastest way to make it stop reading."""
     if usual_cooked is None or usual_cooked <= 0:
         return "HOLD"
-    if sellouts >= _RAISE_SELLOUT_DAYS and recommend > usual_cooked:
-        return "RAISE"
-    surplus = usual_cooked - recommend
+    diff = recommend - usual_cooked
+    gate = _cut_gate(unit)
+    if diff > 0:
+        if sellouts >= _RAISE_SELLOUT_DAYS:
+            return "RAISE"
+        pct = diff / usual_cooked * 100.0
+        return "RAISE" if pct > _CUT_PCT_GATE and diff > gate else "HOLD"
+    if sellouts >= _RAISE_SELLOUT_DAYS:
+        return "HOLD"
+    surplus = -diff
     if surplus <= 0:
         return "HOLD"
     pct = surplus / usual_cooked * 100.0
-    if pct > _CUT_PCT_GATE and surplus > _cut_gate(unit):
-        return "CUT"
-    return "HOLD"
+    return "CUT" if pct > _CUT_PCT_GATE and surplus > gate else "HOLD"
+
+
+def _reason_for(action: str, sellouts: int, dow: float, trend: float) -> str:
+    """Why an item got its action — drives which explanation the kitchen reads.
+
+    A raise off the back of repeated sell-outs is a different conversation from
+    a raise because today is a Friday, and the message has to say which."""
+    if action == "CUT":
+        return "surplus"
+    if action != "RAISE":
+        return "steady"
+    if sellouts >= _RAISE_SELLOUT_DAYS:
+        return "sellout"
+    return "busy_day" if dow >= 1.05 else "trend"
 
 
 def forecast_item(item_code: str, day_points: dict[str, dict],
@@ -397,14 +497,21 @@ def forecast_item(item_code: str, day_points: dict[str, dict],
             if d >= target:
                 continue
             points.append((d, point))
+        points.sort(key=lambda t: t[0])
+        # Fat-fingered entries out first: they distort the level, the weekday
+        # medians and every surplus number the plan quotes.
+        points = reject_outliers(points)
         if len(points) < MIN_DATA_DAYS:
             return None
-        points.sort(key=lambda t: t[0])
 
         level_points = points[-_LEVEL_DAYS:]
         values = [_adjusted(p) for _, p in level_points]
         level = _median(values)
         if level <= 0:
+            return None
+        # Below the floor the item does not move enough for a plan to mean
+        # anything — one portion would swing it by a third.
+        if level < _min_level(unit):
             return None
 
         dow = dow_factor(level_points, target.weekday(), level)
@@ -428,6 +535,7 @@ def forecast_item(item_code: str, day_points: dict[str, dict],
         mad = _median([abs(v - level) for v in values])
         rel_mad = mad / level if level else 0.0
         action = decide_action(recommend, usual_cooked, sellouts, unit)
+        reason = _reason_for(action, sellouts, dow, trend)
 
         return {
             "code": item_code,
@@ -445,6 +553,8 @@ def forecast_item(item_code: str, day_points: dict[str, dict],
             "samples": len(points),
             "confidence": _confidence(len(points), rel_mad),
             "action": action,
+            "reason": reason,
+            "day_name": _DAY_NAME_MY.get(target.weekday(), ""),
             "surplus": (
                 round(usual_cooked - recommend, 2)
                 if usual_cooked is not None else None
@@ -504,23 +614,44 @@ def _fmt(value, unit: str) -> str:
 
 
 def _plan_line(fc: dict) -> str:
-    """One item's line: the number to cook, then the one-line reason for it."""
+    """One item's line: the number to cook, then the one-line reason for it.
+
+    The reason has to match the number — an earlier cut told a shop to cook 190
+    against its usual 160 and then said "your current amount is right"."""
     unit = fc["unit"]
     head = f"• {fc['label']}: masak ~{_fmt(fc['recommend'], unit)} {unit}"
     usual = fc.get("usual_cooked")
+    usual_txt = f"~{_fmt(usual, unit)} {unit}" if usual is not None else ""
+    reason = fc.get("reason") or "steady"
+
     if fc["action"] == "CUT" and usual is not None:
         return (
             f"{head}  ⬇️\n"
-            f"   இப்ப ~{_fmt(usual, unit)} {unit} masak பண்றீங்க — "
+            f"   இப்ப {usual_txt} masak பண்றீங்க — "
             f"~{_fmt(fc.get('surplus'), unit)} {unit} அதிகம், அது தான் "
             f"தினமும் மிச்சம் ஆகுது."
         )
     if fc["action"] == "RAISE":
-        note = f"{head}  ⬆️\n   கடந்த {_RECENT_DAYS} நாள்ல {fc['sellouts']} நாள் "
-        note += "முழுசா தீந்து போச்சு — customer கேட்டும் குடுக்க முடியல."
-        if usual is not None:
-            note += f" இப்ப ~{_fmt(usual, unit)} {unit} தான் masak ஆகுது."
-        return note
+        if reason == "sellout":
+            note = (
+                f"{head}  ⬆️\n   கடந்த {_RECENT_DAYS} நாள்ல {fc['sellouts']} நாள் "
+                "முழுசா தீந்து போச்சு — customer கேட்டும் குடுக்க முடியல."
+            )
+            if usual:
+                note += f" இப்ப {usual_txt} தான் masak ஆகுது."
+            return note
+        if reason == "busy_day":
+            day = fc.get("day_name") or "இந்த நாள்"
+            return (
+                f"{head}  ⬆️\n"
+                f"   {day} வழக்கமா busy — உங்க usual {usual_txt}-அ விட "
+                "கொஞ்சம் கூட்டி வெச்சுக்குங்க."
+            )
+        return (
+            f"{head}  ⬆️\n"
+            f"   கடந்த சில வாரமா sales ஏறிட்டு வருது — usual {usual_txt}-அ "
+            "விட கொஞ்சம் அதிகம் தேவைப்படும்."
+        )
     return f"{head}  ✅\n   இப்பயிருக்கிற அளவு சரியா இருக்கு, அப்படியே தொடருங்க."
 
 
@@ -596,7 +727,12 @@ def format_owner_summary(entries: list[dict]) -> str:
                 items = e.get("items") or []
                 parts = []
                 for fc in items:
+                    # Only structural problems reach the owner: chronic
+                    # over-cooking, and shops that keep running dry. A routine
+                    # Friday uplift is the plan working, not news.
                     if fc["action"] == "HOLD":
+                        continue
+                    if fc["action"] == "RAISE" and fc.get("reason") != "sellout":
                         continue
                     arrow = "↓" if fc["action"] == "CUT" else "↑"
                     unit = fc["unit"]

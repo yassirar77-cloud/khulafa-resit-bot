@@ -22,13 +22,13 @@ goes in the pot.
 before the 18:00 COOKED form). Per outlet, per tracked item:
 
 - the quantity to cook today,
-- one line of reasoning — over-cooking and how much is wasted daily, or
-  selling out and how often,
+- one line of reasoning that matches the number — over-cooking and how much is
+  wasted daily, selling out and how often, or a weekday that simply runs busier,
 - Malay header + trade words, Tamil reasoning, same register as the kitchen
   form and the wastage follow-up.
 
-Routed through `wmr.route_message`, so until `MANAGER_DELIVERY_ENABLED` is
-flipped every plan goes to the owner with the `[TEST]` prefix. The owner
+Routed through `wmr.route_message` behind two gates (see below), so until both
+are flipped every plan goes to the owner with the `[TEST]` prefix. The owner
 always gets the English roll-up in the alert group.
 
 **Commands:** `/cook_plan_now` (build + post on demand),
@@ -47,29 +47,60 @@ recommend = round(forecast × (1 + safety))
 
 | Part | Choice | Why |
 |---|---|---|
-| level | median of trailing 28 demand days | one 3000-pc key-in typo must not move tomorrow's plan |
+| level | median of trailing 28 demand days, outliers removed | one 2000-pc key-in typo must not move tomorrow's plan |
 | dow_factor | that weekday's median ÷ level, shrunk `n/(n+2)`, clamped 0.70–1.40 | Friday genuinely runs above Tuesday; two observed Fridays are not a pattern |
 | trend | recent 14-day median ÷ prior 14, clamped ±15 % | follows a shop that is really growing; won't chase a quiet week into under-cooking |
 | safety | base 5 % + 0.5 × relative MAD + 3 %/recent sell-out, capped 25 % | a buffer sized by volatility, not a fudge factor |
 | rounding | pcs whole (nearest 5 above 50), kg nearest 0.5 | a number the bench can actually act on |
 
-**Demand truth, in order:** POS dishes sold (what customers bought) → Used =
-Cooked − Left. Telur Ikan never uses the POS path: its `pos_qty` column holds
-kg *purchased*, so reading it as demand would forecast the supplier's delivery
-rhythm instead of the shop's.
+**Demand truth: always Used (Cooked − Left).** The first cut preferred
+`pos_qty` — customers bought it, so surely that is demand. The production
+backtest (120 days, ~1250 item-days) killed that:
 
-**Censoring is the part that matters.** A day ending with `left_qty = 0` is a
-sell-out: demand was *at least* what was cooked, and every later customer was
-turned away. Counting that as ordinary demand teaches the model to keep
-under-cooking exactly the dishes that sell best. Sell-out days are flagged,
-lifted 10 % before entering the level, and add safety buffer.
+| Problem | Measured |
+|---|---|
+| POS coverage | present on **46 %** of rows — a "POS when available, else Used" series alternates between two signals and its median measures neither |
+| Scale gap (median Used ÷ median POS) | ayam_goreng **3.6x**, ayam_kicap **5.0x**, ikan_goreng **5.0x**, daging **5.6x**, telur_ikan **13.4x** |
 
-**Actions** — CUT (over-cooking past BOTH a % and an absolute gate, with the
-daily surplus named), RAISE (sold out ≥2 times in 14 days and the plan is above
-the usual cook — lost sales cost more than leftovers, and a kitchen told to cut
-on a sell-out day stops reading the message), HOLD (already right; saying so is
-a result). An item needs 10 data days before it gets a number at all; thin
-outlets are counted and skipped, never guessed at.
+The gap is by design: `kitchen_usage` counts only dishes mapping cleanly to a
+whole cut (`AYAM_EXCLUDE_SUBSTRINGS` drops rendang/kurma/isi-ayam noodle and
+rice dishes; Thai and staff meals excluded outright) so the Guna-vs-POS flag
+compares like with like. A conservative subset is the right input for a
+mismatch gate and the wrong one for an absolute level — forecasting on it told
+shops to cook a third of what they need. `pos_qty` is still carried per point
+for diagnostics; nothing reads it.
+
+**Two guards run before the model.**
+
+*Outlier rejection* (`reject_outliers`) — the kitchen log contains cooked
+entries of 2000 pcs, 3500 kg and **10,900 kg of kambing**. A point is dropped
+above `max(6 x median, median + 20)`: the double condition kills fat-fingers
+while keeping a genuine heavy day on a small item.
+
+*Volume floor* — most tracked items move 3-6 a day, where a single portion
+swings the percentage error by a third. Under 10 pcs / 3 kg no plan is issued
+at all, so in practice a shop gets numbers for the items that actually matter
+(ayam goreng, ayam bawang) rather than eleven noisy ones. Same reasoning as
+`item_sales_watch._MIN_MEDIAN_QTY`.
+
+**Sell-outs are censored demand.** A day ending `left_qty = 0` means demand was
+*at least* what was cooked, and every later customer was turned away. Counting
+that as ordinary demand teaches the model to keep under-cooking exactly the
+dishes that sell best — so those days are flagged, lifted 10 % before entering
+the level, and add safety buffer.
+
+**Actions are symmetric around what the shop already cooks** — RAISE ("cook
+more than usual"), CUT ("cook less"), HOLD ("the usual is about right"), both
+directions past BOTH a % and an absolute gate. Two rules earned by simulation:
+
+- Sell-out evidence raises on its own, and **vetoes a cut** — telling a kitchen
+  to cook less in a week it kept running out is the fastest way to make it stop
+  reading.
+- A raise needs its *reason* to match its number. An earlier cut returned HOLD
+  for a Friday uplift and printed "your current amount is right" above a number
+  30 pcs bigger. Each raise now carries `sellout` / `busy_day` / `trend` and
+  renders the matching explanation. Only `sellout` raises and cuts reach the
+  owner summary — a routine Friday uplift is the plan working, not news.
 
 ## Measuring itself
 
@@ -80,6 +111,18 @@ demand is censored, so the error shown is a floor, not a fact).
 `/forecast_accuracy` reports the **median** error, the within-10 %/20 % rates,
 and a per-outlet breakdown. Median, not mean: one item that sold 2 instead of
 20 would otherwise drag a whole month's score.
+
+## Delivery is gated OFF by default
+
+`COOK_PLAN_ENABLED` (default **off**, same shape as
+`kitchen_usage.kitchen_log_enabled`) stops the scheduled 11:00 job dead, and
+forces `/cook_plan_now` to route every plan to the owner with the `[TEST]`
+prefix regardless of `MANAGER_DELIVERY_ENABLED`. An unproven forecast must
+never reach a kitchen on a timer — the first production backtest of this module
+measured a 23-53 % median error per outlet, and that was with the POS mixture,
+the fat-fingers and the sub-floor items all still in.
+
+Flip it on only after a backtest run shows numbers worth acting on.
 
 ## Safety properties
 
@@ -99,11 +142,13 @@ and a per-outlet breakdown. Median, not mean: one item that sold 2 instead of
 
 ## Tests
 
-`tests/test_demand_forecast.py` (52 cases): demand extraction and the Telur
-Ikan trap, sell-out censoring, weekday shrinkage, trend clamps, safety sizing,
-the CUT/RAISE dual gates, Bistro-only item scoping, message rendering,
-plan→score round trip on the fake client, idempotent re-runs, and the
-missing-table degradation path.
+`tests/test_demand_forecast.py` (75 cases): the Used-only demand signal and the
+POS/Telur-Ikan traps, outlier rejection against the real 10,900 kg entry, the
+volume floor, the kill-switch, sell-out censoring, weekday shrinkage, trend
+clamps, safety sizing, the symmetric CUT/RAISE gates and the sell-out cut-veto,
+reason→copy agreement, owner-summary filtering, Bistro-only item scoping,
+plan→score round trip on the fake client, outlet-code bridging, idempotent
+re-runs, and the missing-table degradation path.
 
 ## Follow-ups (not in this PR)
 

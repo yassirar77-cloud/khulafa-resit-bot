@@ -62,23 +62,26 @@ def steady_points(n, demand, *, end=TARGET, cooked=None, left=2.0):
 
 class DayDemand(unittest.TestCase):
 
-    def test_pos_sold_wins_over_used(self):
-        # POS is what customers actually bought; Used only says what left the
-        # kitchen (and carries every over-portioning error with it).
-        row = usage_row("SEK6", TARGET, "ayam_goreng", cooked=100, left=10, pos=85)
-        point = df.day_demand(row, "ayam_goreng")
-        self.assertEqual(point["demand"], 85.0)
-        self.assertEqual(point["source"], "pos")
-
-    def test_falls_back_to_used_when_pos_not_reconciled(self):
-        row = usage_row("SEK6", TARGET, "ayam_goreng", cooked=100, left=10, pos=None)
+    def test_demand_is_always_used_never_pos(self):
+        # Production measurement: pos_qty is present on only 46% of rows and
+        # runs 3.6-13x below Used, because kitchen_usage counts only dishes
+        # that map cleanly to a whole cut. Mixing the two scales in one series
+        # is what produced 23-53% forecast error. Used is the only signal.
+        row = usage_row("SEK6", TARGET, "ayam_goreng", cooked=100, left=10, pos=25)
         point = df.day_demand(row, "ayam_goreng")
         self.assertEqual(point["demand"], 90.0)
         self.assertEqual(point["source"], "used")
+        self.assertEqual(point["pos"], 25.0)      # carried for diagnostics only
+
+    def test_no_used_means_no_demand_even_with_pos(self):
+        # A POS-only row cannot stand in for a keyed-in day: it is a different
+        # scale, so admitting it would reintroduce the mixture.
+        row = usage_row("SEK6", TARGET, "ayam_goreng", cooked=None, left=None, pos=85)
+        self.assertIsNone(df.day_demand(row, "ayam_goreng"))
 
     def test_telur_ikan_pos_column_is_kg_bought_never_demand(self):
-        # pos_qty for Telur Ikan holds kg PURCHASED (PURCHASE_COMPARE_CODES).
-        # Reading it as demand would forecast the supplier's delivery rhythm.
+        # pos_qty for Telur Ikan holds kg PURCHASED (PURCHASE_COMPARE_CODES) —
+        # 13.4x its Used in production. Nothing reads it.
         row = usage_row("SEK6", TARGET, "telur_ikan", cooked=6.0, left=1.0, pos=20.0)
         point = df.day_demand(row, "telur_ikan")
         self.assertEqual(point["demand"], 5.0)
@@ -98,9 +101,104 @@ class DayDemand(unittest.TestCase):
         )
 
     def test_negative_demand_is_dropped(self):
-        # Left keyed in above Cooked — a key-in error, not a negative demand.
+        # Left keyed in above Cooked — a key-in error, not negative demand.
+        # Production: kambing's median Left (4.5) exceeds its median Cooked (4.0).
         row = usage_row("SEK6", TARGET, "ayam_goreng", cooked=10, left=25)
         self.assertIsNone(df.day_demand(row, "ayam_goreng"))
+
+
+class OutlierRejection(unittest.TestCase):
+    """Production carries cooked entries of 2000 pcs, 3500 kg and 10900 kg of
+    kambing. They survive a median but wreck the thin per-weekday samples and
+    every surplus figure the plan quotes."""
+
+    def _points(self, values):
+        return [
+            (TARGET - timedelta(days=i + 1), {"demand": float(v), "censored": False})
+            for i, v in enumerate(values)
+        ]
+
+    def test_numpad_fat_finger_is_dropped(self):
+        kept = df.reject_outliers(self._points([3, 4, 3, 5, 3, 4, 10900]))
+        self.assertNotIn(10900.0, [p["demand"] for _, p in kept])
+        self.assertEqual(len(kept), 6)
+
+    def test_a_real_busy_day_on_a_small_item_survives(self):
+        # Median 3 kg; a genuine 20 kg festival day must NOT be thrown away —
+        # that is what the absolute margin protects.
+        kept = df.reject_outliers(self._points([3, 4, 3, 5, 3, 4, 20]))
+        self.assertIn(20.0, [p["demand"] for _, p in kept])
+
+    def test_big_item_drops_its_fat_finger_but_keeps_a_heavy_day(self):
+        # ayam_goreng's real numbers: median ~160/day, with a 2000 in the log.
+        kept = df.reject_outliers(self._points([150, 160, 170, 155, 165, 2000]))
+        self.assertNotIn(2000.0, [p["demand"] for _, p in kept])
+        self.assertEqual(len(kept), 5)
+        # A heavy-but-possible day stays — the filter kills typos, not business.
+        kept = df.reject_outliers(self._points([150, 160, 170, 155, 165, 400]))
+        self.assertIn(400.0, [p["demand"] for _, p in kept])
+
+    def test_too_few_points_are_left_alone(self):
+        self.assertEqual(len(df.reject_outliers(self._points([5, 4000]))), 2)
+
+    def test_outlier_does_not_reach_the_forecast(self):
+        points = steady_points(30, 100)
+        spike = (TARGET - timedelta(days=3)).isoformat()
+        points[spike] = dict(points[spike], demand=2000.0)
+        fc = df.forecast_item("ayam_goreng", points, TARGET)
+        self.assertLess(fc["forecast"], 115.0)
+
+
+class VolumeFloor(unittest.TestCase):
+    """Most tracked items move 3-6 a day in production, where one portion
+    swings the error by a third. "Cook ~3 kg daging" is noise, not advice."""
+
+    def test_low_volume_pcs_item_gets_no_plan(self):
+        self.assertIsNone(
+            df.forecast_item("ayam_kicap", steady_points(30, 6), TARGET)
+        )
+
+    def test_low_volume_kg_item_gets_no_plan(self):
+        self.assertIsNone(
+            df.forecast_item("daging", steady_points(30, 1.5), TARGET)
+        )
+
+    def test_the_item_that_actually_moves_gets_a_plan(self):
+        self.assertIsNotNone(
+            df.forecast_item("ayam_goreng", steady_points(30, 160), TARGET)
+        )
+
+    def test_kg_floor_is_lower_than_the_pcs_floor(self):
+        self.assertIsNotNone(
+            df.forecast_item("kambing", steady_points(30, 4.0), TARGET)
+        )
+
+
+class KillSwitch(unittest.TestCase):
+    """An unproven forecast must never reach a kitchen on a timer."""
+
+    def setUp(self):
+        self._prev = os.environ.get("COOK_PLAN_ENABLED")
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ.pop("COOK_PLAN_ENABLED", None)
+        else:
+            os.environ["COOK_PLAN_ENABLED"] = self._prev
+
+    def test_default_is_off(self):
+        os.environ.pop("COOK_PLAN_ENABLED", None)
+        self.assertFalse(df.cook_plan_enabled())
+
+    def test_explicit_truthy_turns_it_on(self):
+        for value in ("1", "true", "TRUE", "yes", "on", "y"):
+            os.environ["COOK_PLAN_ENABLED"] = value
+            self.assertTrue(df.cook_plan_enabled(), value)
+
+    def test_anything_else_stays_off(self):
+        for value in ("", "0", "false", "no", "maybe"):
+            os.environ["COOK_PLAN_ENABLED"] = value
+            self.assertFalse(df.cook_plan_enabled(), value)
 
 
 class Rounding(unittest.TestCase):
@@ -225,6 +323,71 @@ class Action(unittest.TestCase):
 
     def test_no_cooking_history_holds(self):
         self.assertEqual(df.decide_action(50.0, None, 0, "pcs"), "HOLD")
+
+    def test_busy_day_raises_without_any_sellout(self):
+        # A Friday uplift is a real raise. The first cut returned HOLD here and
+        # then printed "your current amount is right" above a bigger number.
+        self.assertEqual(df.decide_action(190.0, 160.0, 0, "pcs"), "RAISE")
+
+    def test_small_uplift_stays_hold(self):
+        self.assertEqual(df.decide_action(164.0, 160.0, 0, "pcs"), "HOLD")
+
+    def test_recent_sellouts_veto_a_cut(self):
+        # Telling a kitchen to cook less in a week it kept running out is the
+        # fastest way to make it stop reading the message.
+        self.assertEqual(df.decide_action(80.0, 120.0, 3, "pcs"), "HOLD")
+
+
+class Reasons(unittest.TestCase):
+
+    def test_sellout_reason_wins(self):
+        self.assertEqual(df._reason_for("RAISE", 3, 1.2, 1.0), "sellout")
+
+    def test_weekday_uplift_is_a_busy_day(self):
+        self.assertEqual(df._reason_for("RAISE", 0, 1.2, 1.0), "busy_day")
+
+    def test_flat_weekday_uplift_is_a_trend(self):
+        self.assertEqual(df._reason_for("RAISE", 0, 1.0, 1.15), "trend")
+
+    def test_cut_and_hold_reasons(self):
+        self.assertEqual(df._reason_for("CUT", 0, 1.0, 1.0), "surplus")
+        self.assertEqual(df._reason_for("HOLD", 0, 1.0, 1.0), "steady")
+
+    def test_busy_day_line_names_the_day_and_the_usual(self):
+        fc = {
+            "label": "Ayam Goreng", "unit": "pcs", "recommend": 190.0,
+            "usual_cooked": 160.0, "action": "RAISE", "reason": "busy_day",
+            "day_name": "Jumaat", "sellouts": 0,
+        }
+        line = df._plan_line(fc)
+        self.assertIn("190", line)
+        self.assertIn("160", line)
+        self.assertIn("Jumaat", line)
+        self.assertNotIn("சரியா இருக்கு", line)   # never the HOLD copy
+
+    def test_owner_summary_ignores_a_routine_busy_day_raise(self):
+        entry = {
+            "outlet_code": "SEK6", "display": "Sek 6",
+            "business_date": TARGET.isoformat(),
+            "items": [{
+                "label": "Ayam Goreng", "unit": "pcs", "recommend": 190.0,
+                "usual_cooked": 160.0, "action": "RAISE", "reason": "busy_day",
+                "day_name": "Jumaat", "sellouts": 0,
+            }],
+        }
+        self.assertEqual(df.format_owner_summary([entry]), "")
+
+    def test_owner_summary_keeps_a_sellout_raise(self):
+        entry = {
+            "outlet_code": "SEK6", "display": "Sek 6",
+            "business_date": TARGET.isoformat(),
+            "items": [{
+                "label": "Ayam Goreng", "unit": "pcs", "recommend": 190.0,
+                "usual_cooked": 160.0, "action": "RAISE", "reason": "sellout",
+                "day_name": "Jumaat", "sellouts": 4,
+            }],
+        }
+        self.assertIn("Sek 6", df.format_owner_summary([entry]))
 
 
 class ForecastItem(unittest.TestCase):
