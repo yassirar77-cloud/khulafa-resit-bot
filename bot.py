@@ -103,6 +103,7 @@ import kitchen_usage
 import manager_registration
 import key_stock_daily
 import item_sales_watch
+import demand_forecast
 import missing_bills
 import monthly_consumption
 import human_touch
@@ -2113,6 +2114,11 @@ HELP_TEXT = (
     "(full 24h day)\n"
     "/activate_outlet <code> <name> — activate a newly-detected POS outlet "
     "and pull in its held emails\n"
+    "\n"
+    "Cook to demand:\n"
+    "/cook_plan_now — today's per-outlet cook quantities forecast from the "
+    "shop's own sales history\n"
+    "/forecast_accuracy [days] — how close those forecasts have been\n"
     "\n"
     "Questions:\n"
     "/questions_now — which manager questions are still unanswered\n"
@@ -5273,6 +5279,140 @@ async def slow_items_now_command(update: Update,
     )
 
 
+# === Cook-to-demand plan (how much to cook today) ===========================
+# Every wastage alert ends with "cook to the sales" — this is the number.
+# Forecasts today's demand per outlet per kitchen item from that shop's own
+# trailing history (POS dishes sold, or Cooked − Left when POS is absent),
+# with weekday seasonality, trend, sell-out censoring and a volatility-sized
+# safety buffer, then tells the kitchen what to cook — and flags the items it
+# has been over-cooking (wastage) or running dry on (lost sales). Posted in
+# the late morning, hours before the 18:00 COOKED form. Yesterday's forecasts
+# are scored on the way through, so /forecast_accuracy can answer "should we
+# believe this?" with measured numbers. See demand_forecast.py.
+
+def _gather_cook_plans(today=None) -> dict:
+    bundle = demand_forecast.gather_cook_plans(supabase, today=today)
+    managers = {}
+    if bundle["entries"]:
+        try:
+            managers = manager_registration.get_all_managers(supabase)
+        except Exception:
+            logger.exception("cook plan: manager lookup failed")
+    bundle["managers"] = managers
+    bundle["enabled"] = wmr.delivery_enabled()
+    return bundle
+
+
+async def post_cook_plans(application: Application, *,
+                          notify_chat_id=None) -> None:
+    """Daily 11:00 MY job (after the 10:45 slow-item watch, so yesterday's
+    completed day is already folded in and well before anything is cooked)."""
+    try:
+        bundle = await asyncio.to_thread(_gather_cook_plans)
+    except Exception:
+        logger.exception("cook plan: gather failed")
+        if notify_chat_id is not None:
+            with contextlib.suppress(Exception):
+                await application.bot.send_message(
+                    chat_id=notify_chat_id,
+                    text="Failed to build today's cook plans.",
+                )
+        return
+
+    entries = bundle["entries"]
+    enabled = bundle["enabled"]
+    sent = 0
+    for entry in entries:
+        text = demand_forecast.format_cook_plan(entry)
+        if not text:
+            continue
+        mgr = bundle["managers"].get(entry["outlet_code"])
+        decision = wmr.route_message(
+            enabled,
+            entry.get("display") or entry["outlet_code"],
+            mgr.get("chat_id") if mgr else None,
+            ALERT_CHAT_ID,
+        )
+        text = human_touch.personalise(
+            supervisor.with_reply_footer(text),
+            mgr.get("manager_name") if mgr else None,
+            decision.target_chat_id,
+        )
+        try:
+            await human_touch.show_typing(application.bot, decision.target_chat_id)
+            sent_msg = await application.bot.send_message(
+                chat_id=decision.target_chat_id, text=decision.prefix + text
+            )
+            sent += 1
+            if decision.reason == "manager":
+                await asyncio.to_thread(
+                    supervisor.log_question,
+                    supabase, decision.target_chat_id, sent_msg.message_id,
+                    "cook_plan", text,
+                )
+        except Exception:
+            logger.exception(
+                "cook plan: send failed (outlet=%s)", entry.get("outlet_code")
+            )
+
+    summary = demand_forecast.format_owner_summary(entries)
+    if summary:
+        with contextlib.suppress(Exception):
+            await application.bot.send_message(chat_id=ALERT_CHAT_ID, text=summary)
+    if notify_chat_id is not None and not entries:
+        note = (
+            f"✅ No cook plan for {bundle.get('business_date') or 'today'} — "
+            "no outlet has enough kitchen-log history yet."
+        )
+        if bundle.get("skipped_thin"):
+            note += (
+                f" ({bundle['skipped_thin']} outlet(s) skipped — under "
+                f"{demand_forecast.MIN_DATA_DAYS} data days per item.)"
+            )
+        with contextlib.suppress(Exception):
+            await application.bot.send_message(chat_id=notify_chat_id, text=note)
+    logger.info(
+        "Cook plan %s: %d outlet(s) planned, %d sent, %d thin, %d scored, "
+        "delivery_enabled=%s",
+        bundle.get("business_date"), len(entries), sent,
+        bundle.get("skipped_thin", 0), bundle.get("scored", 0), enabled,
+    )
+
+
+async def cook_plan_now_command(update: Update,
+                                context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only: build and post today's cook plans on demand."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    await message.reply_text(
+        "Building today's cook-to-demand plan from each shop's own sales "
+        "history…"
+    )
+    await post_cook_plans(
+        context.application, notify_chat_id=_command_owner_id(update)
+    )
+
+
+async def forecast_accuracy_command(update: Update,
+                                    context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only: how close the cook-plan forecasts have been. ``/forecast_accuracy
+    [days]`` (default 28)."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    days = 28
+    if context.args:
+        try:
+            days = max(1, min(180, int(context.args[0])))
+        except (TypeError, ValueError):
+            pass
+    text = await asyncio.to_thread(
+        demand_forecast.accuracy_report, supabase, days
+    )
+    await message.reply_text(text or "No forecast accuracy data yet.")
+
+
 # === Overbuying watch (sales down, orders not) ==============================
 # Weekly cross-check of the two trends the bot already collects: POS sales
 # (from the shift-close emails, reconciled per outlet per day) and purchases
@@ -5836,6 +5976,8 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("overbuy_now", overbuy_now_command))
     app.add_handler(CommandHandler("key_stock_now", key_stock_now_command))
     app.add_handler(CommandHandler("slow_items_now", slow_items_now_command))
+    app.add_handler(CommandHandler("cook_plan_now", cook_plan_now_command))
+    app.add_handler(CommandHandler("forecast_accuracy", forecast_accuracy_command))
     app.add_handler(CommandHandler("questions_now", questions_now_command))
     app.add_handler(CommandHandler("form_chase_now", form_chase_now_command))
     app.add_handler(CommandHandler("scoreboard_now", scoreboard_now_command))
@@ -6014,6 +6156,21 @@ async def run_bot() -> None:
         minute=45,
         args=[app],
         id="slow_items_daily",
+        replace_existing=True,
+    )
+    # Cook-to-demand plan — 11:00 MY, right after the slow-item watch and
+    # hours before the 18:00 COOKED form, so the kitchen has the number while
+    # it still matters. Forecasts today's demand per item from the shop's own
+    # history and flags what it over-cooks (wastage) or runs dry on (lost
+    # sales); also scores yesterday's forecasts. Gated by
+    # MANAGER_DELIVERY_ENABLED.
+    scheduler.add_job(
+        post_cook_plans,
+        trigger="cron",
+        hour=11,
+        minute=0,
+        args=[app],
+        id="cook_plan_daily",
         replace_existing=True,
     )
     # Overbuying watch — Monday 09:30 MY, right after the 09:00 weekly
