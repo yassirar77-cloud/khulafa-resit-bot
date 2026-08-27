@@ -25,20 +25,39 @@ class FakeSupabaseResult:
 
 
 class FakeInsertChain:
-    """Stand-in for the ``.table(...).insert(...).execute()`` chain."""
+    """Stand-in for the ``.table(...).insert(...).execute()`` chain, plus
+    the read chain the issue-#79 history fetch issues (select/eq/gte/limit
+    all no-op and execute returns the canned ``history_rows``)."""
 
     def __init__(self, table_name, parent):
         self.table_name = table_name
         self.parent = parent
         self._payload = None
+        self._is_select = False
 
     def insert(self, payload):
         self._payload = payload
         self.parent.last_insert_payload = payload
         self.parent.last_table = self.table_name
+        self.parent.payloads_by_table.setdefault(self.table_name, []).append(payload)
+        return self
+
+    def select(self, *_):
+        self._is_select = True
+        return self
+
+    def eq(self, *_):
+        return self
+
+    def gte(self, *_):
+        return self
+
+    def limit(self, *_):
         return self
 
     def execute(self):
+        if self._is_select:
+            return FakeSupabaseResult(list(self.parent.history_rows))
         if self.parent.raise_on_execute is not None:
             raise self.parent.raise_on_execute
         # Mirror Supabase behavior: insert echoes back the rows inserted.
@@ -50,6 +69,8 @@ class FakeSupabaseClient:
         self.last_insert_payload = None
         self.last_table = None
         self.raise_on_execute = None
+        self.payloads_by_table = {}
+        self.history_rows = []
 
     def table(self, name):
         return FakeInsertChain(name, self)
@@ -283,9 +304,161 @@ class SaveItemPrices(unittest.TestCase):
             chat_id=1,
             merchant="X",
             price_records=self._records(),
+            check_history=False,
         )
         self.assertEqual(count, 2)
         client.table.assert_called_once_with("item_prices")
+
+
+class SanityGate(unittest.TestCase):
+    """Issue #79: implausible rows are quarantined, not inserted."""
+
+    def _garbage_record(self):
+        # Receipt 2254's OCR column merge.
+        return {
+            "raw_item_name": "AIS",
+            "canonical_item": "ais",
+            "qty": 40250.0,
+            "unit_price": 100.0,
+            "line_total": 4_025_000.0,
+        }
+
+    def _clean_record(self):
+        return {
+            "raw_item_name": "Ayam",
+            "canonical_item": "ayam",
+            "qty": 30.0,
+            "unit_price": 19.80,
+            "line_total": 594.0,
+        }
+
+    def test_garbage_row_quarantined_clean_row_inserted(self):
+        client = FakeSupabaseClient()
+        with self.assertLogs("price_aggregation", level="WARNING"):
+            count = save_item_prices(
+                client,
+                receipt_id=2254,
+                receipt_date="2026-06-02",
+                outlet_code="SEK14",
+                chat_id=1,
+                merchant="EVEREST",
+                price_records=[self._clean_record(), self._garbage_record()],
+                receipt_total=100.0,
+                check_history=False,
+            )
+        self.assertEqual(count, 1)
+        inserted = client.payloads_by_table["item_prices"][0]
+        self.assertEqual(len(inserted), 1)
+        self.assertEqual(inserted[0]["raw_item_name"], "Ayam")
+        quarantined = client.payloads_by_table["item_price_quarantine"][0]
+        self.assertEqual(len(quarantined), 1)
+        q = quarantined[0]
+        self.assertEqual(q["receipt_id"], 2254)
+        self.assertEqual(q["raw_item_name"], "AIS")
+        self.assertEqual(q["source"], "ingest")
+        self.assertIn("qty_above_ceiling", q["reasons"])
+        self.assertIn("line_total_exceeds_receipt_total", q["reasons"])
+
+    def test_all_rows_garbage_returns_zero_no_item_prices_insert(self):
+        client = FakeSupabaseClient()
+        with self.assertLogs("price_aggregation", level="WARNING"):
+            count = save_item_prices(
+                client,
+                receipt_id=2254,
+                receipt_date="2026-06-02",
+                outlet_code="SEK14",
+                chat_id=1,
+                merchant="EVEREST",
+                price_records=[self._garbage_record()],
+                receipt_total=100.0,
+                check_history=False,
+            )
+        self.assertEqual(count, 0)
+        self.assertNotIn("item_prices", client.payloads_by_table)
+        self.assertIn("item_price_quarantine", client.payloads_by_table)
+
+    def test_future_dated_receipt_rows_quarantined(self):
+        # The 2026-06-21 rows from issue #79 — never valid for a purchase.
+        from datetime import date, timedelta
+
+        future = (date.today() + timedelta(days=10)).isoformat()
+        client = FakeSupabaseClient()
+        with self.assertLogs("price_aggregation", level="WARNING"):
+            count = save_item_prices(
+                client,
+                receipt_id=99,
+                receipt_date=future,
+                outlet_code="SEK14",
+                chat_id=1,
+                merchant="X",
+                price_records=[self._clean_record()],
+                check_history=False,
+            )
+        self.assertEqual(count, 0)
+        q = client.payloads_by_table["item_price_quarantine"][0][0]
+        self.assertEqual(q["reasons"], "future_receipt_date")
+
+    def test_history_outlier_quarantined_via_fetched_stats(self):
+        client = FakeSupabaseClient()
+        # 10 historical AIS rows at ~RM2.50: a new RM100 unit price is 40x.
+        client.history_rows = [
+            {"qty": 45.0, "unit_price": 2.50} for _ in range(10)
+        ]
+        spiky = {
+            "raw_item_name": "AIS",
+            "canonical_item": "ais",
+            "qty": 40.0,
+            "unit_price": 100.0,
+            "line_total": 4000.0,
+        }
+        with self.assertLogs("price_aggregation", level="WARNING"):
+            count = save_item_prices(
+                client,
+                receipt_id=7,
+                receipt_date="2026-06-02",
+                outlet_code="SEK14",
+                chat_id=1,
+                merchant="EVEREST",
+                price_records=[spiky],
+            )
+        self.assertEqual(count, 0)
+        q = client.payloads_by_table["item_price_quarantine"][0][0]
+        self.assertIn("unit_price_vs_history_median", q["reasons"])
+
+    def test_quarantine_insert_failure_does_not_block_clean_rows(self):
+        # If the quarantine table is missing (migration not applied yet),
+        # clean rows must still store and nothing may raise.
+        client = FakeSupabaseClient()
+        original_table = client.table
+
+        def flaky_table(name):
+            chain = original_table(name)
+            if name == "item_price_quarantine":
+                chain.parent = _RaisingParent(client)
+            return chain
+
+        class _RaisingParent:
+            def __init__(self, real):
+                self.raise_on_execute = RuntimeError("relation does not exist")
+                self.history_rows = real.history_rows
+                self.payloads_by_table = real.payloads_by_table
+                self.last_insert_payload = None
+                self.last_table = None
+
+        client.table = flaky_table
+        with self.assertLogs("price_aggregation", level="WARNING"):
+            count = save_item_prices(
+                client,
+                receipt_id=2254,
+                receipt_date="2026-06-02",
+                outlet_code="SEK14",
+                chat_id=1,
+                merchant="EVEREST",
+                price_records=[self._clean_record(), self._garbage_record()],
+                receipt_total=100.0,
+                check_history=False,
+            )
+        self.assertEqual(count, 1)
 
 
 if __name__ == "__main__":
