@@ -89,7 +89,7 @@ def _pm_window(client, now_my) -> list:
     )
 
 
-def _data_quality(client) -> dict:
+def _data_quality(client, now_my) -> dict:
     low_conf = fetch_all_pages(
         lambda: client.table(RECEIPTS_TABLE)
         .select("id").lt("confidence", LOW_CONFIDENCE_FLOOR).order("id", desc=False)
@@ -103,7 +103,19 @@ def _data_quality(client) -> dict:
         "low_confidence": len(low_conf),
         "reparse_pending": len(reparse_pending),
         "unresolved_merchants": unresolved,
+        "price_quarantined_today": _price_quarantined_today(client, now_my),
     }
+
+
+def _price_quarantined_today(client, now_my) -> int:
+    """Issue #79: rows the price sanity gate kept out of item_prices today
+    (Malaysia day). 0 on any failure — the table may predate migration 0042."""
+    from price_sanity import count_quarantined_since
+
+    start_local = datetime.combine(now_my.date(), time.min, tzinfo=MALAYSIA_TZ)
+    return count_quarantined_since(
+        client, start_local.astimezone(timezone.utc).isoformat()
+    )
 
 
 def _unresolved_merchant_count(client) -> int:
@@ -533,7 +545,7 @@ def gather_digest_data(client, now_my) -> dict:
     data = {
         "today": _today_receipts(client, now_my),
         "pm_window_rows": _pm_window(client, now_my),
-        "data_quality": _data_quality(client),
+        "data_quality": _data_quality(client, now_my),
         "outliers": {"count": _outlier_count(client), "threshold": OUTLIER_TOTAL_MAX},
         "new_suppliers": _new_suppliers(client, now_my),
         "today_suppliers": _safe(_today_suppliers, [], client, now_my),

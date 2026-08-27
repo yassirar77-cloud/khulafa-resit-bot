@@ -265,12 +265,18 @@ def _outlets_block(outlets):
 
 
 def _data_quality_block(dq):
-    return "\n".join([
+    lines = [
         SECTION_HEADERS[5],
         f"- {int(dq.get('low_confidence', 0))} receipts with confidence below 60 → /reparse_status",
         f"- {int(dq.get('reparse_pending', 0))} receipts pending in /reparse_preview",
         f"- {int(dq.get('unresolved_merchants', 0))} unresolved merchants in /merchant_coverage",
-    ])
+    ]
+    quarantined = int(dq.get("price_quarantined_today", 0))
+    if quarantined:
+        lines.append(
+            f"- {quarantined} garbage price rows quarantined today → /price_quarantine"
+        )
+    return "\n".join(lines)
 
 
 def _outlier_block(outliers):

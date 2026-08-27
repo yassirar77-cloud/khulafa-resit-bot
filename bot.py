@@ -1839,6 +1839,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 stored.get("chat_id"),
                 stored.get("merchant"),
                 price_records,
+                # Issue #79: powers the line-total-vs-receipt-total check
+                # in the price_sanity gate.
+                _to_float(stored.get("total")),
             )
             if inserted:
                 logger.info(
@@ -2124,7 +2127,11 @@ HELP_TEXT = (
     "/questions_now — which manager questions are still unanswered\n"
     "/form_chase_now — remind every group whose kitchen form is still "
     "not keyed in\n"
-    "/scoreboard_now — 7-day question response scoreboard per chat"
+    "/scoreboard_now — 7-day question response scoreboard per chat\n"
+    "\n"
+    "Data quality:\n"
+    "/price_quarantine [n] — latest garbage price rows the sanity gate "
+    "kept out of item_prices, with reject reasons"
 )
 
 
@@ -3810,6 +3817,25 @@ async def price_history_command(update: Update, context: ContextTypes.DEFAULT_TY
     await message.reply_text(
         analytics.format_price_history(item_id, analytics.price_history(rows, item_id))
     )
+
+
+async def price_quarantine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/price_quarantine [n]`` — latest rows the issue-#79 sanity gate
+    kept out of item_prices (OCR column merges, future dates, history
+    outliers), with the reject reasons for threshold tuning."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    n = _parse_reparse_n(context.args, 10, 50)
+    try:
+        from price_sanity import fetch_recent_quarantine, format_quarantine_rows
+
+        rows = await asyncio.to_thread(fetch_recent_quarantine, supabase, n)
+    except Exception:
+        logger.exception("price_quarantine failed")
+        await message.reply_text("Failed to read item_price_quarantine.")
+        return
+    await _reply_chunked(message, format_quarantine_rows(rows))
 
 
 async def shop_prices_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5964,6 +5990,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("top_items", top_items_command))
     app.add_handler(CommandHandler("top_suppliers", top_suppliers_command))
     app.add_handler(CommandHandler("price_history", price_history_command))
+    app.add_handler(CommandHandler("price_quarantine", price_quarantine_command))
     app.add_handler(CommandHandler("shop_prices", shop_prices_command))
     # Aliases: same report, whichever wording comes to mind first.
     app.add_handler(CommandHandler("all_prices", shop_prices_command))

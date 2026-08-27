@@ -9,9 +9,11 @@ Pipeline:
         -> classify_and_extract_items # here: filter + canonicalize + line_total
         -> save_item_prices           # here: batch insert into Supabase
 
-There is no sanity threshold (RM0.001 and RM10000 both store). Filtering
-of outliers is deferred to the consumer in PR #24, where it has access to
-historical context. Failures here MUST NOT crash the receipt pipeline.
+Issue #79: ``save_item_prices`` now runs every row through the
+``price_sanity`` gate before insert — implausible qty/price/date rows
+(OCR column merges, future dates, orders-of-magnitude history outliers)
+are diverted to the ``item_price_quarantine`` table instead of poisoning
+the corpus. Failures here MUST NOT crash the receipt pipeline.
 """
 from __future__ import annotations
 
@@ -19,10 +21,12 @@ import logging
 from typing import Any
 
 from item_canonicalization_v2 import canonicalize_item
+import price_sanity
 
 logger = logging.getLogger(__name__)
 
 _ITEM_PRICES_TABLE = "item_prices"
+_QUARANTINE_TABLE = "item_price_quarantine"
 
 
 def _is_numeric(value: Any) -> bool:
@@ -76,6 +80,27 @@ def classify_and_extract_items(
     return out
 
 
+def quarantine_rows(supabase_client, rows: list[dict]) -> int:
+    """Insert reject rows into ``item_price_quarantine``.
+
+    Each row should already carry the receipt context plus ``reasons``
+    (comma-separated codes) and ``source``. Returns the count inserted;
+    never raises — a quarantine failure must not block the pipeline
+    (the reject is still fully logged by the caller).
+    """
+    if not rows:
+        return 0
+    try:
+        result = supabase_client.table(_QUARANTINE_TABLE).insert(rows).execute()
+    except Exception:
+        logger.exception(
+            "quarantine_rows: insert failed (rows=%d) — rejects are in the log only",
+            len(rows),
+        )
+        return 0
+    return len(result.data) if getattr(result, "data", None) else 0
+
+
 def save_item_prices(
     supabase_client,
     receipt_id,
@@ -84,12 +109,23 @@ def save_item_prices(
     chat_id,
     merchant,
     price_records: list[dict],
+    receipt_total=None,
+    check_history: bool = True,
 ) -> int:
     """Batch-insert ``price_records`` into the ``item_prices`` table.
 
-    Returns the count of rows inserted (0 on any failure or empty input).
-    Never raises — logs the traceback on insert failure so the caller
-    (the receipt pipeline) can proceed without interruption.
+    Issue #79: every record passes through the ``price_sanity`` gate
+    first. Implausible rows (impossible qty/price, future receipt_date,
+    orders-of-magnitude history outliers) go to ``item_price_quarantine``
+    with their reject reasons instead of entering the corpus.
+    ``receipt_total`` (when the caller has it) powers the
+    line-total-vs-receipt-total check; ``check_history=False`` skips the
+    per-item history queries (used by callers that already hold history).
+
+    Returns the count of rows inserted into ``item_prices`` (0 on any
+    failure or empty input). Never raises — logs the traceback on insert
+    failure so the caller (the receipt pipeline) can proceed without
+    interruption.
     """
     if not price_records:
         logger.warning(
@@ -117,6 +153,55 @@ def save_item_prices(
             len(skipped),
             receipt_id,
             skipped[:10],
+        )
+
+    if not usable:
+        return 0
+
+    # === Issue #79 sanity gate ===
+    history_by_item: dict = {}
+    if check_history:
+        history_by_item = price_sanity.fetch_history_stats(
+            supabase_client,
+            [rec.get("canonical_item") for rec in usable],
+        )
+    usable, rejected = price_sanity.partition_records(
+        usable,
+        receipt_date=receipt_date,
+        receipt_total=receipt_total,
+        history_by_item=history_by_item,
+    )
+    if rejected:
+        for rec, reasons in rejected:
+            logger.warning(
+                "save_item_prices: QUARANTINED row (receipt_id=%s, item=%r, "
+                "qty=%s, unit_price=%s, line_total=%s, reasons=%s)",
+                receipt_id,
+                rec.get("raw_item_name"),
+                rec.get("qty"),
+                rec.get("unit_price"),
+                rec.get("line_total"),
+                ",".join(reasons),
+            )
+        quarantine_rows(
+            supabase_client,
+            [
+                {
+                    "receipt_id": receipt_id,
+                    "receipt_date": receipt_date,
+                    "outlet_code": outlet_code,
+                    "chat_id": chat_id,
+                    "merchant": merchant,
+                    "canonical_item": rec.get("canonical_item"),
+                    "raw_item_name": rec.get("raw_item_name"),
+                    "qty": rec.get("qty"),
+                    "unit_price": rec.get("unit_price"),
+                    "line_total": rec.get("line_total"),
+                    "reasons": ",".join(reasons),
+                    "source": "ingest",
+                }
+                for rec, reasons in rejected
+            ],
         )
 
     if not usable:
