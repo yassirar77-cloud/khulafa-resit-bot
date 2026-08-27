@@ -44,6 +44,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import math
 import re
 from datetime import date
 from typing import Any, Iterator
@@ -140,6 +141,11 @@ def distinct_outlets(client) -> list[str]:
     Every value is offered, ``"UNKNOWN"`` included: it is a real bucket of
     receipts whose chat didn't map to a shop, and hiding it would make it
     unexportable.
+
+    Names are offered EXACTLY as stored, never tidied. ``build_export``
+    filters with ``.eq`` on the name picked here, so trimming one that
+    happened to carry whitespace would offer a shop whose export then came
+    back empty — a silent wrong answer. Only blanks are dropped.
     """
     def _build():
         return (
@@ -153,8 +159,8 @@ def distinct_outlets(client) -> list[str]:
         for row in page:
             if not isinstance(row, dict):
                 continue
-            name = str(row.get("outlet") or "").strip()
-            if name:
+            name = str(row.get("outlet") or "")
+            if name.strip():
                 found.add(name)
     return sorted(found, key=str.lower)
 
@@ -197,21 +203,35 @@ def to_number(value: Any) -> float | None:
     Strings are cast only when they match ``^[0-9]+(\\.[0-9]+)?$`` after
     trimming, so "2 pcs", "RM19.80", "1,5" and "-3" all come out blank
     instead of being half-parsed into a wrong number. ``bool`` is rejected
-    up front because it is an ``int`` subclass.
+    up front because it is an ``int`` subclass, and anything that will not
+    survive the cast as a finite float comes out blank too.
     """
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        return _finite(value)
     if not isinstance(value, str):
         return None
     text = value.strip()
     if not _NUMERIC_RE.fullmatch(text):
         return None
+    return _finite(text)
+
+
+def _finite(value: Any) -> float | None:
+    """``float(value)`` when that is a real, finite number, else ``None``.
+
+    Two ways a well-formed cell still isn't a usable number: a jsonb
+    integer too big for a float raises ``OverflowError``, and a 400-digit
+    string satisfies the numeric gate but casts to ``inf``. Both would
+    otherwise escape the module's promise that a bad row never raises and
+    never invents a figure.
+    """
     try:
-        return float(text)
-    except ValueError:  # pragma: no cover - regex already guarantees this
+        number = float(value)
+    except (OverflowError, TypeError, ValueError):
         return None
+    return number if math.isfinite(number) else None
 
 
 def receipt_lines(items: Any) -> list[tuple[str, float | None, float | None]]:

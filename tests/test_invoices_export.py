@@ -16,6 +16,7 @@ import io
 import os
 import sys
 import unittest
+from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -62,6 +63,42 @@ def client_with(*receipts):
     return client
 
 
+class RangeRecorder:
+    """Wraps a client and records every ``.range()`` window it is asked for,
+    so a test can prove the month was WALKED rather than slurped in one go."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.ranges = []
+
+    def table(self, name):
+        return _RecordingQuery(self._inner.table(name), self.ranges)
+
+
+class _RecordingQuery:
+    def __init__(self, inner, ranges):
+        self._inner = inner
+        self._ranges = ranges
+
+    def __getattr__(self, attr):
+        method = getattr(self._inner, attr)
+
+        def wrapper(*args, **kwargs):
+            if attr == "range":
+                self._ranges.append(args)
+            result = method(*args, **kwargs)
+            # Builder calls return the inner query; keep recording on it.
+            return self if result is self._inner else result
+
+        return wrapper
+
+
+def has_code_line(src, text):
+    """True when ``text`` starts a real line of code — so the assertion
+    fails if the line is commented out rather than removed."""
+    return any(line.strip().startswith(text) for line in src.splitlines())
+
+
 def read_csv(blob):
     """Decode one produced CSV back into a list of rows."""
     return list(csv.reader(io.StringIO(blob.decode("utf-8-sig"))))
@@ -85,7 +122,7 @@ class ParseMonth(unittest.TestCase):
 
     def test_rejects_loose_and_invalid_forms(self):
         for bad in ("2026-7", "2026-13", "2026-00", "07-2026", "2026",
-                    "last", "", None, "2026-07-01", "abcd-ef"):
+                    "last", "", None, "2026-07-01", "abcd-ef", "0000-07"):
             with self.subTest(bad=bad):
                 self.assertIsNone(parse_month(bad))
 
@@ -162,9 +199,15 @@ class DistinctOutlets(unittest.TestCase):
         client = client_with(receipt(1, outlet="UNKNOWN"), receipt(2, outlet="Vista"))
         self.assertEqual(distinct_outlets(client), ["UNKNOWN", "Vista"])
 
-    def test_values_are_trimmed(self):
+    def test_names_are_offered_exactly_as_stored(self):
+        # build_export filters with .eq on whatever is picked here, so a
+        # tidied-up name would offer a shop whose export came back empty.
         client = client_with(receipt(1, outlet="  Vista  "), receipt(2, outlet="Vista"))
-        self.assertEqual(distinct_outlets(client), ["Vista"])
+        offered = distinct_outlets(client)
+        self.assertEqual(sorted(offered), ["  Vista  ", "Vista"])
+        for name in offered:
+            export = build_export(client, name, 2026, 7)
+            self.assertEqual(export["stats"]["bill_count"], 1, f"{name!r} not exportable")
 
 
 # --- items jsonb -------------------------------------------------------------
@@ -188,6 +231,19 @@ class ToNumber(unittest.TestCase):
 
     def test_trailing_newline_does_not_slip_through_the_anchors(self):
         self.assertEqual(to_number("3\n"), 3.0)  # trimmed, then matched
+
+    def test_oversized_json_integer_is_blank_not_an_exception(self):
+        # float(10**400) raises OverflowError; a bad row must never raise.
+        self.assertIsNone(to_number(10 ** 400))
+
+    def test_digits_too_long_for_a_float_do_not_become_inf(self):
+        # Passes the numeric gate, casts to inf — not a number to report.
+        self.assertIsNone(to_number("1" + "0" * 400))
+
+    def test_non_finite_floats_are_unusable(self):
+        self.assertIsNone(to_number(float("inf")))
+        self.assertIsNone(to_number(float("-inf")))
+        self.assertIsNone(to_number(float("nan")))
 
 
 class ReceiptLines(unittest.TestCase):
@@ -546,9 +602,26 @@ class BuildExportEdgeCases(unittest.TestCase):
         self.assertEqual([r[3] for r in rows], ["3", "2", "10"])
 
     def test_date_objects_are_rendered_as_iso(self):
-        client = client_with(receipt(1, receipt_date="2026-07-09", total=1.0, items=[]))
-        rows = files_by_kind(build_export(client, "Bistro", 2026, 7))["bills"]
-        self.assertEqual(rows[1][0], "2026-07-09")
+        # Defensive branch: PostgREST hands back ISO strings, but a date
+        # object must not reach the CSV as "datetime.date(2026, 7, 9)".
+        self.assertEqual(invoices_export._date_cell(date(2026, 7, 9)), "2026-07-09")
+        self.assertEqual(invoices_export._date_cell("2026-07-09T00:00:00"), "2026-07-09")
+        self.assertEqual(invoices_export._date_cell(None), "")
+
+    def test_a_bill_with_several_usable_lines_sums_them_all(self):
+        # Every other fixture has one line per receipt; the ratio has to be
+        # right when the sum spans lines, including an unusable one.
+        client = client_with(receipt(1, total=100.0, items=[
+            {"name": "AYAM", "qty": 2, "price": 30},        # 60
+            {"item": "IKAN", "quantity": "1", "price": "40"},  # 40
+            {"name": "PLASTIK", "qty": "banyak", "price": "RM2"},  # unusable
+        ]))
+        export = build_export(client, "Bistro", 2026, 7)
+        rows = files_by_kind(export)["items"][1:]
+        self.assertEqual(len(rows), 3)
+        self.assertEqual([r[-1] for r in rows], ["1.00", "1.00", "1.00"])
+        self.assertEqual(export["stats"]["reconciled_count"], 1)
+        self.assertEqual(export["stats"]["unusable_count"], 0)
 
     def test_junk_rows_never_raise(self):
         client = client_with(
@@ -562,22 +635,37 @@ class BuildExportEdgeCases(unittest.TestCase):
 
 
 class BuildExportStreaming(unittest.TestCase):
-    def test_month_is_read_page_by_page(self):
-        # With a page size below the row count the walk must keep going;
-        # a single unpaged read would return only the first page.
-        client = client_with(*[
+    def _paged_export(self, rows, page_size):
+        spy = RangeRecorder(client_with(*rows))
+        original = invoices_export.PAGE_SIZE
+        invoices_export.PAGE_SIZE = page_size
+        try:
+            return spy, build_export(spy, "Bistro", 2026, 7)
+        finally:
+            invoices_export.PAGE_SIZE = original
+
+    def test_month_is_walked_in_pages_not_slurped(self):
+        rows = [
             receipt(i, receipt_date=f"2026-07-{i:02d}", total=10.0,
                     items=[{"name": "AYAM", "qty": 1, "price": 10}])
             for i in range(1, 8)
-        ])
-        original = invoices_export.PAGE_SIZE
-        invoices_export.PAGE_SIZE = 2
-        try:
-            export = build_export(client, "Bistro", 2026, 7)
-        finally:
-            invoices_export.PAGE_SIZE = original
+        ]
+        spy, export = self._paged_export(rows, page_size=2)
+        # 7 rows, 2 per page: four windows, the short last one ends the walk.
+        # An implementation that read the month in one shot records none.
+        self.assertEqual(spy.ranges, [(0, 1), (2, 3), (4, 5), (6, 7)])
         self.assertEqual(export["stats"]["bill_count"], 7)
         self.assertEqual(len(files_by_kind(export)["items"]) - 1, 7)
+
+    def test_rows_spanning_a_page_boundary_are_all_exported(self):
+        # The bug a page walk hides: rows after the first window vanishing.
+        rows = [receipt(i, receipt_date=f"2026-07-{i:02d}", total=float(i),
+                        items=[{"name": "X", "qty": 1, "price": float(i)}])
+                for i in range(1, 6)]
+        _spy, export = self._paged_export(rows, page_size=2)
+        bills = files_by_kind(export)["bills"][1:]
+        self.assertEqual([r[3] for r in bills], ["1", "2", "3", "4", "5"])
+        self.assertEqual(export["stats"]["total_spend"], 15.0)
 
 
 # --- replies -----------------------------------------------------------------
@@ -638,21 +726,22 @@ class InvoicesExportWiring(unittest.TestCase):
         cls.block = cls.src[start:cls.src.index("\nasync def ", start + 1)]
 
     def test_command_is_registered(self):
-        self.assertIn(
-            'app.add_handler(CommandHandler("invoices_export", invoices_export_command))',
+        self.assertTrue(has_code_line(
             self.src,
-        )
+            'app.add_handler(CommandHandler("invoices_export", invoices_export_command))',
+        ), "registration missing or commented out")
 
     def test_documented_in_help(self):
         self.assertIn("/invoices_export <outlet> <YYYY-MM>", self.src)
 
     def test_gated_to_reviewers_like_the_other_admin_commands(self):
-        self.assertIn(
-            "if not message or not is_reviewer(_command_owner_id(update)):", self.block
-        )
+        self.assertTrue(has_code_line(
+            self.block, "if not message or not is_reviewer(_command_owner_id(update)):"
+        ), "admin gate missing or commented out")
 
     def test_ambiguous_outlet_stops_before_any_export(self):
-        self.assertIn("if len(matches) != 1:", self.block)
+        self.assertTrue(has_code_line(self.block, "if len(matches) != 1:"),
+                        "ambiguity stop missing or commented out")
         choice = self.block.index("format_outlet_choice")
         build = self.block.index("invoices_export.build_export")
         self.assertLess(choice, build, "the export must not run on an ambiguous outlet")
