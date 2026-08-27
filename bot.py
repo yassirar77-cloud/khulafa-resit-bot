@@ -19,6 +19,7 @@ from telegram import (
     BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaDocument,
     Update,
     WebAppInfo,
 )
@@ -106,6 +107,7 @@ import item_sales_watch
 import demand_forecast
 import missing_bills
 import monthly_consumption
+import invoices_export
 import human_touch
 import overbuy_watch
 import supervisor
@@ -2082,6 +2084,8 @@ HELP_TEXT = (
     "/food_cost_month — month-to-date food cost % per outlet\n"
     "/food_cost_outlet <name> — one outlet's food cost trend\n"
     "/monthly_kg [YYYY-MM | last] — kg ayam/daging/kambing dll dibeli bulan itu\n"
+    "/invoices_export <outlet> <YYYY-MM> — one outlet's month of bills as "
+    "CSV (suppliers, bills, line items)\n"
     "/cash_no_receipt_today — POS cash payouts with no receipt\n"
     "/reconcile_now — re-run today/yesterday reconciliation\n"
     "/reconcile_date YYYY-MM-DD — re-run one historical date\n"
@@ -4498,6 +4502,78 @@ async def post_monthly_kg_report(application: Application) -> None:
         logger.exception("monthly kg report: send failed (%s-%s)", year, month)
 
 
+async def invoices_export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/invoices_export <outlet> <YYYY-MM>`` — one outlet's month of bills as
+    three CSVs (suppliers, bills, line items) posted back to the chat.
+
+    The outlet argument is a case-insensitive PARTIAL match on
+    ``receipts.outlet``; anything but exactly one match is reported with the
+    candidates instead of guessed at. Reviewer-only, like the other admin
+    exports — a month of supplier pricing isn't for outlet groups.
+    """
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    args = context.args or []
+    if len(args) < 2:
+        await message.reply_text(invoices_export.USAGE)
+        return
+    # Everything before the month is the outlet, so multi-word shops
+    # ("klang b.emas 2026-07") work without quoting.
+    *outlet_parts, month_arg = args
+    outlet_term = " ".join(outlet_parts).strip()
+    parsed = invoices_export.parse_month(month_arg)
+    if not outlet_term or parsed is None:
+        await message.reply_text(invoices_export.USAGE)
+        return
+    year, month = parsed
+
+    try:
+        outlets = await asyncio.to_thread(invoices_export.distinct_outlets, supabase)
+    except Exception:
+        logger.exception("invoices_export outlet lookup failed (%r)", outlet_term)
+        await message.reply_text("Failed to read outlets from receipts.")
+        return
+    matches = invoices_export.match_outlets(outlets, outlet_term)
+    if len(matches) != 1:
+        await _reply_chunked(
+            message,
+            invoices_export.format_outlet_choice(outlet_term, matches, outlets),
+        )
+        return
+    outlet = matches[0]
+
+    try:
+        export = await asyncio.to_thread(
+            invoices_export.build_export, supabase, outlet, year, month
+        )
+    except Exception:
+        logger.exception("invoices_export failed (%s %04d-%02d)", outlet, year, month)
+        await message.reply_text("Failed to build the invoice export.")
+        return
+
+    files = export["files"]
+    if not files:
+        await message.reply_text(invoices_export.format_empty(outlet, year, month))
+        return
+
+    media = [
+        InputMediaDocument(media=content, filename=name) for name, content in files
+    ]
+    try:
+        await message.reply_media_group(media=media)
+    except Exception:
+        # An album send is all-or-nothing; fall back to one document at a
+        # time so the export still lands rather than being lost to a
+        # transient album rejection.
+        logger.exception("invoices_export album send failed, sending separately")
+        for name, content in files:
+            await message.reply_document(document=content, filename=name)
+    await message.reply_text(
+        invoices_export.format_summary(outlet, year, month, export["stats"])
+    )
+
+
 # === PR #67: weekly manager food-cost reports (Phase 1) ======================
 #
 # SAFETY: weekly messages route to the OWNER (prefixed "[TEST — ...]") until
@@ -6007,6 +6083,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("food_cost_week", food_cost_week_command))
     app.add_handler(CommandHandler("food_cost_month", food_cost_month_command))
     app.add_handler(CommandHandler("monthly_kg", monthly_kg_command))
+    app.add_handler(CommandHandler("invoices_export", invoices_export_command))
     app.add_handler(CommandHandler("food_cost_outlet", food_cost_outlet_command))
     app.add_handler(CommandHandler("gen_codes", gen_codes_command))
     app.add_handler(CommandHandler("register", register_command))
