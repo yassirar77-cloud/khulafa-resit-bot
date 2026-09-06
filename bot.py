@@ -97,6 +97,7 @@ from backfill_items import (
     top_unmatched_from_resolutions,
 )
 import analytics
+import bill_analysis
 import digest
 import food_cost_analytics
 import kitchen_usage
@@ -2107,6 +2108,12 @@ HELP_TEXT = (
     "Missing bills:\n"
     "/missing_bills_now — check which regular suppliers' bills stopped "
     "being uploaded\n"
+    "\n"
+    "Bill analysis (nightly 21:30):\n"
+    "/bill_analysis_now — analyse today's bills: price increases vs each "
+    "shop's previous price + what every branch pays for every item\n"
+    "/outlet_prices [item] — what each branch last paid, cheapest first "
+    "(alias: /branch_prices; no item = every item)\n"
     "\n"
     "Overbuying:\n"
     "/overbuy_now — check which outlets kept ordering the same despite "
@@ -4888,6 +4895,201 @@ async def missing_bills_now_command(update: Update,
     )
 
 
+# === Bill analysis (every bill, every item, every shop) =====================
+# Nightly 21:30 MY, after the day's uploads and the 21:00 missing-bill check,
+# ahead of the 23:00 digest. Two passes over the cleaned item_prices corpus
+# (see bill_analysis.py):
+#   1. every line on the bills uploaded in the last 24h against the SAME
+#      shop's previous price for the same cut — increases to the owners,
+#      and in Tamil to the manager whose bill it was, with who sells it
+#      cheaper and which branch pays less;
+#   2. every item bought by two or more outlets in the last 30 days — what
+#      each branch last paid and from whom, cheapest first; each manager is
+#      told the items another branch buys cheaper (and where they are the
+#      cheapest themselves).
+# Owners always get the English reports in the alert group. Manager notes
+# ride the MANAGER_DELIVERY_ENABLED gate like every other manager message.
+
+def _registry_code_for_outlet(outlet_code, registry_outlets) -> str | None:
+    """item_prices outlet code (``D``, ``BISTRO7``) -> outlet_canonical
+    registration code (``DAMANSARA``, ``BISTRO7``), so the right manager is
+    found. Bridges on the exact code first, then on the canonical name."""
+    from outlet_resolver import canonical_outlet
+
+    code = str(outlet_code or "").strip().upper()
+    if not code:
+        return None
+    for o in registry_outlets:
+        if o.code.upper() == code:
+            return o.code
+    canonical = canonical_outlet(code)
+    if canonical:
+        for o in registry_outlets:
+            if o.canonical == canonical or canonical_outlet(o.code) == canonical:
+                return o.code
+    return None
+
+
+def _gather_bill_analysis(today=None) -> dict:
+    bundle = bill_analysis.gather_bill_analysis(supabase, today=today)
+    routes = {}
+    if bundle.get("outlet_codes"):
+        try:
+            outlets = manager_registration.load_active_outlets(supabase)
+            managers = manager_registration.get_all_managers(supabase)
+            for code in bundle["outlet_codes"]:
+                reg = _registry_code_for_outlet(code, outlets)
+                mgr = managers.get(reg) if reg else None
+                display = next(
+                    (o.display for o in outlets if reg and o.code == reg), None
+                ) or bill_analysis.outlet_label(code)
+                routes[code] = {
+                    "display": display,
+                    "manager_chat_id": mgr.get("chat_id") if mgr else None,
+                    "manager_name": mgr.get("manager_name") if mgr else None,
+                }
+        except Exception:
+            logger.exception("bill analysis: manager routing lookup failed")
+    bundle["routes"] = routes
+    bundle["enabled"] = wmr.delivery_enabled()
+    return bundle
+
+
+async def _send_chunked_to(application: Application, chat_id, text: str) -> bool:
+    ok = True
+    for chunk in chunk_message(text):
+        try:
+            await application.bot.send_message(chat_id=chat_id, text=chunk)
+        except Exception:
+            ok = False
+            logger.exception("bill analysis: send failed (chat=%s)", chat_id)
+    return ok
+
+
+async def post_bill_analysis(application: Application, *,
+                             notify_chat_id=None) -> None:
+    """Nightly 21:30 MY job (and ``/bill_analysis_now``). Owners get the
+    price-change report and the outlet comparison; each outlet manager gets
+    one Tamil note about their own bills, via the delivery gate."""
+    try:
+        bundle = await asyncio.to_thread(_gather_bill_analysis)
+    except Exception:
+        logger.exception("bill analysis: gather failed")
+        for chat in {ALERT_CHAT_ID, notify_chat_id} - {None}:
+            with contextlib.suppress(Exception):
+                await application.bot.send_message(
+                    chat_id=chat, text="⚠️ Bill analysis failed to run — see logs."
+                )
+        return
+
+    price_report = bill_analysis.format_owner_price_report(bundle)
+    outlet_report = bill_analysis.format_owner_outlet_report(bundle)
+    if price_report:
+        await _send_chunked_to(application, ALERT_CHAT_ID, price_report)
+    if outlet_report:
+        await _send_chunked_to(application, ALERT_CHAT_ID, outlet_report)
+    if notify_chat_id is not None and not price_report and not outlet_report:
+        with contextlib.suppress(Exception):
+            await application.bot.send_message(
+                chat_id=notify_chat_id,
+                text="No bills were uploaded in the last 24h and no item was "
+                     "bought by two or more outlets recently — nothing to analyse.",
+            )
+
+    enabled = bundle.get("enabled", False)
+    delivered: list[dict] = []
+    for code in bundle.get("outlet_codes") or []:
+        slice_ = bill_analysis.entries_for_outlet(bundle, code)
+        text = bill_analysis.format_manager_note(code, slice_)
+        if not text:
+            continue
+        route = (bundle.get("routes") or {}).get(code) or {}
+        decision = wmr.route_message(
+            enabled,
+            route.get("display") or bill_analysis.outlet_label(code),
+            route.get("manager_chat_id"),
+            ALERT_CHAT_ID,
+        )
+        text = human_touch.personalise(
+            supervisor.with_reply_footer(text),
+            route.get("manager_name"),
+            decision.target_chat_id,
+        )
+        try:
+            await human_touch.show_typing(application.bot, decision.target_chat_id)
+            first_id = None
+            for i, chunk in enumerate(chunk_message(decision.prefix + text)):
+                sent_msg = await application.bot.send_message(
+                    chat_id=decision.target_chat_id, text=chunk
+                )
+                if i == 0:
+                    first_id = sent_msg.message_id
+            if decision.reason == "manager" and first_id is not None:
+                await asyncio.to_thread(
+                    supervisor.log_question,
+                    supabase, decision.target_chat_id, first_id,
+                    "bill_analysis", text,
+                )
+            delivered.append({
+                "outlet_code": code,
+                "display": route.get("display") or bill_analysis.outlet_label(code),
+                "reason": decision.reason,
+                "manager_name": route.get("manager_name"),
+                "increases": len(slice_["increases"]),
+                "pays_more": len(slice_["pays_more"]),
+            })
+        except Exception:
+            logger.exception("bill analysis: manager note send failed (outlet=%s)", code)
+
+    summary = bill_analysis.format_owner_delivery_summary(delivered, enabled)
+    if summary:
+        with contextlib.suppress(Exception):
+            await application.bot.send_message(chat_id=ALERT_CHAT_ID, text=summary)
+    stats = bundle.get("stats") or {}
+    logger.info(
+        "Bill analysis: %d bill(s), %d increase(s), %d decrease(s), "
+        "%d item(s) compared across outlets, %d manager note(s), delivery_enabled=%s",
+        stats.get("new_bills", 0), len(bundle.get("increases") or []),
+        len(bundle.get("decreases") or []), len(bundle.get("comparisons") or []),
+        len(delivered), enabled,
+    )
+
+
+async def bill_analysis_now_command(update: Update,
+                                    context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only: run the nightly bill analysis on demand."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    await message.reply_text("Analysing every bill, every item, every shop…")
+    await post_bill_analysis(
+        context.application, notify_chat_id=_command_owner_id(update)
+    )
+
+
+async def outlet_prices_command(update: Update,
+                                context: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/outlet_prices [item]`` — what each branch last paid, cheapest
+    first: one item, or every item two or more branches buy. Answers in the
+    alert group and to reviewers anywhere, like /shop_prices."""
+    message = update.effective_message
+    if not message:
+        return
+    in_alert_chat = message.chat_id == ALERT_CHAT_ID
+    if not in_alert_chat and not is_reviewer(_command_owner_id(update)):
+        return
+    query = " ".join(context.args or []).strip()
+    try:
+        text = await asyncio.to_thread(
+            bill_analysis.build_outlet_price_report, supabase, query
+        )
+    except Exception:
+        logger.exception("outlet_prices failed (query=%r)", query)
+        await message.reply_text("Failed to build the outlet price comparison.")
+        return
+    await _reply_chunked(message, text)
+
+
 # === Question follow-up (the human-supervisor memory) =======================
 # Every Tamil question the bot asks a real manager/group is logged in
 # audit_responses (see supervisor.py). This job is the part a human boss
@@ -6012,6 +6214,9 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("register", register_command))
     app.add_handler(CommandHandler("weekly_report_now", weekly_report_now_command))
     app.add_handler(CommandHandler("missing_bills_now", missing_bills_now_command))
+    app.add_handler(CommandHandler("bill_analysis_now", bill_analysis_now_command))
+    app.add_handler(CommandHandler("outlet_prices", outlet_prices_command))
+    app.add_handler(CommandHandler("branch_prices", outlet_prices_command))
     app.add_handler(CommandHandler("overbuy_now", overbuy_now_command))
     app.add_handler(CommandHandler("key_stock_now", key_stock_now_command))
     app.add_handler(CommandHandler("slow_items_now", slow_items_now_command))
@@ -6238,6 +6443,22 @@ async def run_bot() -> None:
         minute=0,
         args=[app],
         id="missing_bill_check",
+        replace_existing=True,
+    )
+    # Bill analysis — nightly 21:30 MY, after the missing-bill check and
+    # ahead of the 23:00 digest. Every bill uploaded in the last 24h against
+    # the same shop's previous price (increases to owners + the manager whose
+    # bill it was), and every item two or more outlets buy compared across
+    # branches (owners get the full table; each manager hears which items
+    # another branch buys cheaper). Manager notes gated by
+    # MANAGER_DELIVERY_ENABLED.
+    scheduler.add_job(
+        post_bill_analysis,
+        trigger="cron",
+        hour=21,
+        minute=30,
+        args=[app],
+        id="bill_analysis",
         replace_existing=True,
     )
     # Monthly kg-per-protein purchase report — 1st of the month 09:30 MY,
