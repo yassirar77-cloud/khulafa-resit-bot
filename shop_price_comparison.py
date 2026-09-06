@@ -207,6 +207,43 @@ def _cutoff_iso(lookback_days: int | None, today: date | None) -> str | None:
         return None
 
 
+_PRICE_ROW_COLUMNS = (
+    "merchant, receipt_date, unit_price, qty, receipt_id, raw_item_name, "
+    "outlet_code, canonical_item, created_at"
+)
+
+
+def _fetch_all_price_rows(supabase_client, cutoff: str | None) -> list[dict]:
+    """Every item's price rows in the window, for the all-bills sweep.
+
+    Same read path as ``_fetch_price_rows`` minus the item filter: paginated
+    first (a 90-day window across ten outlets is well past the 1000-row
+    cap), plain query as the fallback. Never raises; ``[]`` on failure.
+    """
+
+    def _build():
+        query = supabase_client.table(_ITEM_PRICES_TABLE).select(_PRICE_ROW_COLUMNS)
+        if cutoff:
+            query = query.gte("receipt_date", cutoff)
+        return query
+
+    try:
+        from db_pagination import fetch_all_pages
+
+        return fetch_all_pages(lambda: _build().order("receipt_id", desc=False))
+    except Exception:
+        logger.debug(
+            "shop prices: paginated bulk read unavailable, falling back",
+            exc_info=True,
+        )
+    try:
+        result = _build().execute()
+    except Exception:
+        logger.exception("shop prices: bulk query failed")
+        return []
+    return getattr(result, "data", None) or []
+
+
 def _fetch_price_rows(
     supabase_client,
     canonical_item: str,
@@ -223,10 +260,7 @@ def _fetch_price_rows(
     def _build():
         query = (
             supabase_client.table(_ITEM_PRICES_TABLE)
-            .select(
-                "merchant, receipt_date, unit_price, qty, receipt_id, "
-                "raw_item_name, outlet_code"
-            )
+            .select(_PRICE_ROW_COLUMNS)
             .eq("canonical_item", canonical_item)
         )
         if cutoff:
@@ -378,6 +412,14 @@ def load_price_rows(
     )[0]
 
 
+def _empty_stats() -> dict:
+    return {
+        "fetched": 0, "kept": 0, "bad_price": 0, "bad_date": 0,
+        "non_supplier_receipt": 0, "non_shop_merchant": 0, "own_outlet": 0,
+        "no_item": 0,
+    }
+
+
 def load_price_rows_with_stats(
     supabase_client,
     canonical_item,
@@ -391,17 +433,13 @@ def load_price_rows_with_stats(
     leaving the reader guessing whether a supplier is missing or simply
     hasn't sold anything lately.
     """
-    stats = {
-        "fetched": 0, "kept": 0, "bad_price": 0, "bad_date": 0,
-        "non_supplier_receipt": 0, "non_shop_merchant": 0, "own_outlet": 0,
-    }
+    stats = _empty_stats()
     try:
         if not isinstance(canonical_item, str) or not canonical_item.strip():
             return [], stats
         canon = canonical_item.strip()
         base_today = today or date.today()
         cutoff = _cutoff_iso(lookback_days, base_today)
-        today_iso = base_today.isoformat()
 
         raw_rows = _fetch_price_rows(
             supabase_client, canon, cutoff, exclude_receipt_id
@@ -409,86 +447,165 @@ def load_price_rows_with_stats(
         stats["fetched"] = len(raw_rows)
         if not raw_rows:
             return [], stats
-
-        dated: list[dict] = []
-        for row in raw_rows:
-            if not isinstance(row, dict):
-                continue
-            price = _to_float(row.get("unit_price"))
-            if price is None or price <= 0:
-                stats["bad_price"] += 1
-                continue
-            when = _iso(row.get("receipt_date"))
-            # Corrupt future dates ("last 26 Dec" on a receipt logged in
-            # August) are stale OCR, not a price. Re-check the cutoff here
-            # too: the fallback query path may not have filtered it.
-            if not when or when > today_iso:
-                stats["bad_date"] += 1
-                continue
-            if cutoff and when < cutoff:
-                continue
-            dated.append((row, price, when))
-
-        if not dated:
-            return [], stats
-
-        meta = _receipt_meta(supabase_client, [r.get("receipt_id") for r, _, _ in dated])
-        canonicals = _merchant_canonicals(supabase_client)
-        resolver = _NameResolver(supabase_client)
-
-        out: list[dict] = []
-        for row, price, when in dated:
-            receipt = meta.get(row.get("receipt_id")) or {}
-
-            # Drop what is provably not a purchase. 'UNKNOWN' (the column
-            # default) and a missing receipt both mean "not classified",
-            # which is not evidence against the row.
-            receipt_type = (receipt.get("receipt_type") or "").strip().upper()
-            if receipt_type in _NON_SHOP_RECEIPT_TYPES:
-                stats["non_supplier_receipt"] += 1
-                continue
-
-            raw_merchant = row.get("merchant")
-            canonical_id = receipt.get("merchant_canonical_id")
-            if canonical_id is None and canonicals:
-                canonical_id = resolver.canonical_id(raw_merchant)
-
-            canonical_row = canonicals.get(canonical_id) if canonical_id else None
-            if canonical_row:
-                category = (canonical_row.get("category") or "").strip().lower()
-                if category in _NON_SHOP_CATEGORIES:
-                    stats["non_shop_merchant"] += 1
-                    continue
-                shop = (canonical_row.get("display_name") or "").strip()
-            else:
-                shop = ""
-
-            if not shop:
-                # No canonical row: fall back to the suffix-stripped name, so
-                # the same shop reads identically everywhere in the report
-                # ("BESTARI FARM", never "BESTARI FARM (M) SDN BHD" in one
-                # block and "BESTARI FARM" in the next).
-                raw = raw_merchant.strip() if isinstance(raw_merchant, str) else ""
-                shop = shop_display(raw) or raw
-            if _is_own_outlet(shop):
-                stats["own_outlet"] += 1
-                continue
-            if not shop:
-                shop = _UNKNOWN_SHOP
-
-            out.append({
-                "shop": shop,
-                "shop_key": shop_key(shop) or shop,
-                "variant": item_variant(row.get("raw_item_name"), canon),
-                "unit_price": price,
-                "receipt_date": when,
-                "receipt_id": row.get("receipt_id"),
-            })
-        stats["kept"] = len(out)
-        return out, stats
+        return _clean_price_rows(
+            supabase_client, raw_rows, canon, cutoff, base_today, stats
+        ), stats
     except Exception:
         logger.exception("load_price_rows: unexpected failure")
         return [], stats
+
+
+def load_all_price_rows(
+    supabase_client,
+    lookback_days: int | None = DEFAULT_LOOKBACK_DAYS,
+    today: date | None = None,
+) -> list[dict]:
+    """Cleaned, comparable price rows for EVERY item in the window.
+
+    The all-bills sweep (``bill_analysis``) needs the whole corpus at once;
+    one bulk read beats a query per item. Same cleaning as
+    ``load_price_rows`` (each row is variant-tagged against its own
+    canonical item), and every row additionally carries ``canonical_item``,
+    ``outlet_code``, ``qty``, ``raw_item_name`` and ``created_at``. Never
+    raises.
+    """
+    return load_all_price_rows_with_stats(
+        supabase_client, lookback_days=lookback_days, today=today
+    )[0]
+
+
+def load_all_price_rows_with_stats(
+    supabase_client,
+    lookback_days: int | None = DEFAULT_LOOKBACK_DAYS,
+    today: date | None = None,
+) -> tuple[list[dict], dict]:
+    """``load_all_price_rows`` plus the drop tally. Never raises."""
+    stats = _empty_stats()
+    try:
+        base_today = today or date.today()
+        cutoff = _cutoff_iso(lookback_days, base_today)
+        raw_rows = _fetch_all_price_rows(supabase_client, cutoff)
+        stats["fetched"] = len(raw_rows)
+        if not raw_rows:
+            return [], stats
+        return _clean_price_rows(
+            supabase_client, raw_rows, None, cutoff, base_today, stats
+        ), stats
+    except Exception:
+        logger.exception("load_all_price_rows: unexpected failure")
+        return [], stats
+
+
+def _clean_price_rows(
+    supabase_client,
+    raw_rows: list,
+    canonical_item: str | None,
+    cutoff: str | None,
+    base_today: date,
+    stats: dict,
+) -> list[dict]:
+    """The cleaning pass shared by the per-item and all-items loaders.
+
+    ``canonical_item`` pins every row to one item (the per-item loader);
+    ``None`` takes each row's own ``canonical_item`` column instead and
+    drops rows that have none.
+    """
+    today_iso = base_today.isoformat()
+
+    dated: list[tuple] = []
+    for row in raw_rows:
+        if not isinstance(row, dict):
+            continue
+        if canonical_item is not None:
+            canon = canonical_item
+        else:
+            canon = row.get("canonical_item")
+            if not isinstance(canon, str) or not canon.strip():
+                stats["no_item"] += 1
+                continue
+            canon = canon.strip()
+        price = _to_float(row.get("unit_price"))
+        if price is None or price <= 0:
+            stats["bad_price"] += 1
+            continue
+        when = _iso(row.get("receipt_date"))
+        # Corrupt future dates ("last 26 Dec" on a receipt logged in
+        # August) are stale OCR, not a price. Re-check the cutoff here
+        # too: the fallback query path may not have filtered it.
+        if not when or when > today_iso:
+            stats["bad_date"] += 1
+            continue
+        if cutoff and when < cutoff:
+            continue
+        dated.append((row, canon, price, when))
+
+    if not dated:
+        return []
+
+    meta = _receipt_meta(supabase_client, [r.get("receipt_id") for r, _, _, _ in dated])
+    canonicals = _merchant_canonicals(supabase_client)
+    resolver = _NameResolver(supabase_client)
+
+    out: list[dict] = []
+    for row, canon, price, when in dated:
+        receipt = meta.get(row.get("receipt_id")) or {}
+
+        # Drop what is provably not a purchase. 'UNKNOWN' (the column
+        # default) and a missing receipt both mean "not classified",
+        # which is not evidence against the row.
+        receipt_type = (receipt.get("receipt_type") or "").strip().upper()
+        if receipt_type in _NON_SHOP_RECEIPT_TYPES:
+            stats["non_supplier_receipt"] += 1
+            continue
+
+        raw_merchant = row.get("merchant")
+        canonical_id = receipt.get("merchant_canonical_id")
+        if canonical_id is None and canonicals:
+            canonical_id = resolver.canonical_id(raw_merchant)
+
+        canonical_row = canonicals.get(canonical_id) if canonical_id else None
+        if canonical_row:
+            category = (canonical_row.get("category") or "").strip().lower()
+            if category in _NON_SHOP_CATEGORIES:
+                stats["non_shop_merchant"] += 1
+                continue
+            shop = (canonical_row.get("display_name") or "").strip()
+        else:
+            shop = ""
+
+        if not shop:
+            # No canonical row: fall back to the suffix-stripped name, so
+            # the same shop reads identically everywhere in the report
+            # ("BESTARI FARM", never "BESTARI FARM (M) SDN BHD" in one
+            # block and "BESTARI FARM" in the next).
+            raw = raw_merchant.strip() if isinstance(raw_merchant, str) else ""
+            shop = shop_display(raw) or raw
+        if _is_own_outlet(shop):
+            stats["own_outlet"] += 1
+            continue
+        if not shop:
+            shop = _UNKNOWN_SHOP
+
+        outlet_code = row.get("outlet_code")
+        out.append({
+            "shop": shop,
+            "shop_key": shop_key(shop) or shop,
+            "variant": item_variant(row.get("raw_item_name"), canon),
+            "unit_price": price,
+            "receipt_date": when,
+            "receipt_id": row.get("receipt_id"),
+            "canonical_item": canon,
+            "outlet_code": (
+                outlet_code.strip().upper()
+                if isinstance(outlet_code, str) and outlet_code.strip()
+                else None
+            ),
+            "qty": _to_float(row.get("qty")),
+            "raw_item_name": row.get("raw_item_name") or "",
+            "created_at": row.get("created_at"),
+        })
+    stats["kept"] = len(out)
+    return out
 
 
 def summarise_shops(rows: list[dict]) -> list[dict]:
@@ -762,6 +879,37 @@ _QUERY_SYNONYMS = {
     "fried onions": "bawang_goreng",
     "breadcrumbs": "tepung_roti",
     "yoghurt": "yogurt",
+    # Staples added 2026-09 (bill analysis): English words whose canonical
+    # key is Malay.
+    "egg": "telur",
+    "eggs": "telur",
+    "sugar": "gula",
+    "oil": "minyak_masak",
+    "cooking oil": "minyak_masak",
+    "rice": "beras",
+    "onion": "bawang",
+    "onions": "bawang",
+    "garlic": "bawang",
+    "chilli": "cili",
+    "chili": "cili",
+    "salt": "garam",
+    "milk": "susu",
+    "tea": "teh",
+    "vegetable": "sayur",
+    "vegetables": "sayur",
+    "veg": "sayur",
+    "lime": "limau",
+    "lemon": "limau",
+    "noodles": "mee",
+    "spices": "rempah",
+    "spice": "rempah",
+    "butter": "mentega",
+    "margarine": "mentega",
+    "lentils": "dhal",
+    "tofu": "tauhu",
+    "plastic": "packaging",
+    "diesel": "fuel",
+    "petrol": "fuel",
 }
 
 

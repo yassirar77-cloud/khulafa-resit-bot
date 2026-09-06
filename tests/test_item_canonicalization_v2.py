@@ -23,11 +23,40 @@ class CanonicalizeItemExactMatch(unittest.TestCase):
     def test_ayam_exact(self):
         self.assertEqual(canonicalize_item("AYAM")["canonical"], "ayam")
 
-    def test_telur_not_in_v2(self):
-        res = canonicalize_item("TELUR")
-        self.assertFalse(res["matched"])
-        self.assertIsNone(res["canonical"])
-        self.assertFalse(res["is_noise"])
+    def test_telur_is_eggs_but_telur_ikan_stays_fish(self):
+        # Staples were added in 2026-09 for the every-bill analysis. Longest
+        # variation wins, so bare TELUR is eggs while TELUR IKAN (fish roe)
+        # keeps resolving to ikan — the false positive v2 was built to avoid.
+        self.assertEqual(canonicalize_item("TELUR")["canonical"], "telur")
+        self.assertEqual(canonicalize_item("TELUR GRED A 30 BIJI")["canonical"], "telur")
+        self.assertEqual(canonicalize_item("TELUR IKAN 1KG")["canonical"], "ikan")
+        self.assertEqual(canonicalize_item("TELUR IKAN SEJUK BEKU")["canonical"], "ikan")
+
+    def test_staples_resolve_without_stealing_existing_categories(self):
+        cases = {
+            "GULA PASIR 1KG": "gula",
+            "MINYAK MASAK 17KG": "minyak_masak",
+            "MINYAK DIESEL": "fuel",
+            "BERAS BASMATHI 10KG": "beras",
+            "BAWANG BESAR 10KG": "bawang",
+            "BAWANG GORENG 900 G": "bawang_goreng",
+            "CILI KERING 5KG": "cili",
+            "SOS CILI 4.4 KG A1": "sos_cili",
+            "BABAS CHILLI POWDER 1KG": "spices_babas",
+            "TEH BOH": "teh",
+            "TEA MASALA": "tea_masala",
+            "TOMATO": "sayur",
+            "TOMATO SOS 4.2 KG": "sos_tomato",
+            "LIME JUICE": "drinks",
+            "LIMAU NIPIS": "limau",
+            "KACANG DAL": "dhal",
+            "KACANG": "kacang",
+            "JINTAN PUTIH 1KG": "rempah",
+            "PLASTIK BEG 10X16": "packaging",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(canonicalize_item(raw)["canonical"], expected)
 
     def test_kopi_exact(self):
         self.assertEqual(canonicalize_item("KOPI")["canonical"], "kopi")
@@ -186,7 +215,7 @@ class ClassifyItemsInReceipt(unittest.TestCase):
 class ItemCanonicalUtilities(unittest.TestCase):
     def test_list_canonical_items_count_and_sorted(self):
         items = list_canonical_items()
-        self.assertEqual(len(items), 34)
+        self.assertEqual(len(items), 53)
         self.assertEqual(items, sorted(items))
 
     def test_get_item_variations_ayam(self):
