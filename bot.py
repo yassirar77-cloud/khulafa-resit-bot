@@ -99,6 +99,7 @@ from backfill_items import (
 import analytics
 import bill_analysis
 import digest
+import director_ask
 import food_cost_analytics
 import kitchen_usage
 import manager_registration
@@ -2070,6 +2071,14 @@ HELP_TEXT = (
     "/compare <item> — compare an item's unit price across outlets\n"
     "/shop_prices <item> — every shop's price for that item, cheapest first\n"
     "   (aliases: /all_prices, /harga — works for any item, e.g. ayam, telur, minyak)\n"
+    "/ask <question> — ask about any item in plain words, English or Malay\n"
+    "   (aliases: /tanya, /cari, /search). Examples:\n"
+    "   \u2022 beras beli kat mana — which shops sell it, cheapest first\n"
+    "   \u2022 bila last beli ayam — the last purchases, shop and price\n"
+    "   \u2022 berapa belanja telur bulan ni — spend and quantity for a period\n"
+    "   \u2022 which branch pays most for gula — branch-by-branch comparison\n"
+    "   In the alert group and owner DMs you can drop the /ask and just type "
+    "the question.\n"
     "/advances — list outstanding staff advances (PAYOUT / PINJAM)\n"
     "/advances <staff> — history for one staff member\n"
     "/advances <outlet> — open advances at one outlet\n"
@@ -3880,6 +3889,95 @@ async def shop_prices_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await message.reply_text("Failed to read item prices.")
         return
     await message.reply_text(text)
+
+
+# === Plain-language item search ("ask the bot") ==============================
+# Every number below is already in the database, but only reachable by
+# remembering the right slash command. The question the director actually
+# types is "beras beli kat mana" — so answer that. Parsing and reporting
+# live in ``director_ask``; this is only the Telegram glue.
+
+def _ask_allowed(update: Update) -> bool:
+    """Same policy as /shop_prices: the alert group, or a reviewer
+    anywhere. Supplier pricing isn't for arbitrary outlet groups."""
+    message = update.effective_message
+    if not message:
+        return False
+    return message.chat_id == ALERT_CHAT_ID or is_reviewer(_command_owner_id(update))
+
+
+async def _send_answer(message, question: str) -> None:
+    try:
+        text = await asyncio.to_thread(
+            director_ask.answer_question, supabase, question, _my_today()
+        )
+    except Exception:
+        logger.exception("ask failed (question=%r)", question)
+        await message.reply_text("Failed to answer that. Try /help.")
+        return
+    await _reply_chunked(message, text)
+
+
+async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/ask <question>`` — ask about any item in plain words.
+
+    "/ask beras beli kat mana", "/ask bila last beli ayam", "/ask berapa
+    belanja telur bulan ni". Aliases: /tanya, /cari, /search.
+    """
+    message = update.effective_message
+    if not message or not _ask_allowed(update):
+        return
+    question = " ".join(context.args or []).strip()
+    if not question:
+        await message.reply_text(director_ask.HELP_TEXT)
+        return
+    await _send_answer(message, question)
+
+
+async def handle_ask_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Answer an item question typed WITHOUT a slash command.
+
+    The director shouldn't have to remember ``/ask`` either. The whole
+    risk of a bare text handler is answering things nobody asked, so the
+    bar depends on where the message landed:
+
+    - In a reviewer's private chat every message is addressed to the bot,
+      so a bare item name ("beras") is enough.
+    - In the alert group the text has to BOTH resolve to a real item AND
+      carry a question word or a question mark, so ordinary chatter
+      ("sudah hantar", "ok") is never answered.
+
+    Anywhere else it stays quiet. /shop_prices answers a reviewer in any
+    chat, but that is a typed command; un-prompted supplier prices landing
+    in an outlet group because the owner happened to mention ayam is not
+    the same thing. Those chats still get an answer — through /ask.
+
+    Anything that doesn't clear the bar is left alone silently: a bot that
+    replies "I don't understand" to every group message is worse than one
+    that says nothing.
+    """
+    message = update.effective_message
+    if not message or not message.text:
+        return
+    question = message.text.strip()
+    if not question or question.startswith("/"):
+        return
+    chat = update.effective_chat
+    reviewer = is_reviewer(_command_owner_id(update))
+    private_reviewer = bool(chat and chat.type == "private") and reviewer
+    if not private_reviewer and message.chat_id != ALERT_CHAT_ID:
+        return
+
+    parsed = director_ask.parse_question(question, today=_my_today())
+    if private_reviewer:
+        interesting = bool(parsed.get("canonical")) or (
+            parsed.get("intent") == director_ask.INTENT_ITEMS
+        )
+    else:
+        interesting = bool(parsed.get("confident"))
+    if not interesting:
+        return
+    await _send_answer(message, question)
 
 
 # === PR #34: daily digest preview (owner-only) ===============================
@@ -6194,6 +6292,10 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("price_history", price_history_command))
     app.add_handler(CommandHandler("price_quarantine", price_quarantine_command))
     app.add_handler(CommandHandler("shop_prices", shop_prices_command))
+    app.add_handler(CommandHandler("ask", ask_command))
+    app.add_handler(CommandHandler("tanya", ask_command))
+    app.add_handler(CommandHandler("cari", ask_command))
+    app.add_handler(CommandHandler("search", ask_command))
     # Aliases: same report, whichever wording comes to mind first.
     app.add_handler(CommandHandler("all_prices", shop_prices_command))
     app.add_handler(CommandHandler("harga", shop_prices_command))
@@ -6256,6 +6358,12 @@ async def run_bot() -> None:
     )
     app.add_handler(
         MessageHandler(filters.TEXT & filters.REPLY & ~filters.COMMAND, handle_audit_reply)
+    )
+    # Plain-language item search. Registered last in the group so the
+    # review-edit conversation and the audit-reply handler above always get
+    # first refusal; ~REPLY keeps it off audit replies entirely.
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.REPLY, handle_ask_text)
     )
 
     stop = asyncio.Event()
@@ -6568,6 +6676,7 @@ async def run_bot() -> None:
                 BotCommand("start", "Greeting"),
                 BotCommand("summary", "Today's spending grouped by merchant"),
                 BotCommand("compare", "Compare an item's unit price across outlets"),
+                BotCommand("ask", "Ask about any item in plain words"),
                 BotCommand("advances", "Staff cash advances (PAYOUT/PINJAM) tracker"),
                 BotCommand("dashboard", "Open the Mini App dashboard"),
                 BotCommand("help", "Show command list"),
