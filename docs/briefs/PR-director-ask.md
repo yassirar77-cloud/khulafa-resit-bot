@@ -122,6 +122,110 @@ fix with `/merchant_show`. The names appear only under `debug`.
 `/shop_prices <item>` serves this view by default; `/shop_prices <item> cuts`
 still gives the per-cut comparison, and `debug` still breaks down the filtering.
 
+## Honouring the whole question, not just the item
+
+`/shop_prices` answered *"Khulafa **bistro** ayam **whole leg** price"* with every
+cut at every outlet: 188 purchases, four shops, three screens. The outlet and the
+cut reached the report and were thrown away.
+
+The report now reads all three, each through the code that already owns that
+matching:
+
+| Part | Source | Example |
+| --- | --- | --- |
+| Item | `shop_price_comparison.resolve_item_query` | "ayam" |
+| Outlet | `outlet_mapping.outlet_match` | "bistro" → `BISTRO7` |
+| Cut | `shop_price_comparison.pick_variant` | "whole leg" → `AYAM WHOLE LEG` |
+
+`outlet_match` is new but not new logic: it is `outlet_from_chat_title`'s ordered
+rules, returning *which* needle matched as well as the code, because the outlet
+words have to be removed before what is left can be read as a cut.
+`outlet_from_chat_title` now delegates to it.
+
+Two things had to be got right for the filters to reach the rows rather than
+merely parse:
+
+**The item name must leave the cut phrase.** Left in, "ayam" matches the cut
+literally called `AYAM` as well as `AYAM WHOLE LEG`; `pick_variant` sees two
+candidates, returns `None`, and naming a cut does nothing. `cut_phrase` strips
+the item's own tokens and any synonym that resolves to the same item, so
+"chicken whole leg" also lands on `whole leg`.
+
+**The outlet must be read from the original text.** `extract_item_text` drops
+bare numbers, so "sek 6" arrived as "sek" and the rules — which match the literal
+`"sek 6"` — never fired. `"Khulafa sek 6 ayam whole leg price"` parsed an outlet
+and then answered about all four. The item is still resolved from the cleaned
+text; only the outlet reads the original.
+
+Filtering also changes what the rest of the report should say. The year-widening
+is skipped when a filter is on — at one outlet, for one cut, a single supplier is
+the normal answer, not a shortfall. The outlet roll-up and the per-row outlet tag
+disappear when the question named one outlet, and the cut disappears from every
+line when the question named one cut, because the heading already says both.
+
+```
+🔎 Ayam · Bistro · Whole Leg — last 90 days
+4 purchases · 1 shop
+
+🏪 Shop
+• BESTARI FARM — 23 Sep · RM15.00 · 4x
+
+🧾 Recent purchases
+• 23 Sep · BESTARI FARM — RM15.00 × 80
+• 18 Sep · BESTARI FARM — RM15.00 × 60
+• 16 Sep · BESTARI FARM — RM609.00 ⚠️ × 1
+… +1 more purchase(s)
+
+⚠️ 1 row(s) may be OCR errors (RM609.00) — /shop_prices ayam debug
+```
+
+## A price range that describes the item, not its worst two rows
+
+`range RM1.40–RM609.00` was a true min–max and a useless one. Across 160 rows it
+is *guaranteed* to quote an OCR column merge at one end and a fragment at the
+other, and it was printed as though both were prices.
+
+`_price_band` takes the median (via `price_sanity.median_stats`, which already
+ignores values past the absolute ceilings) and keeps the prices within
+`OUTLIER_FACTOR` — 5×, the same multiple the order generator uses to reject qty
+outliers. What is left becomes `usually RM13.00–RM15.00`; what falls outside is
+reported as suspect rather than quoted as a price, and marked `⚠️` on the row
+where it is read, not only in the footnote.
+
+A per-shop band is judged against the **item's** median, so a shop whose every
+row is garbage cannot make that garbage its own normal.
+
+The band is not trigger-happy: RM110 for a sack of beras idly sits inside 5× of
+its item's median and is kept as a real price.
+
+## The blind spot behind "Left out"
+
+`bot.py` writes `item_prices` only for a receipt classified `SUPPLIER_PURCHASE`;
+an `UNKNOWN` one returns early. Those purchases have **no rows at all**, so no
+drop counter can mention them — the shop is simply absent, and the `⚠️ Left out:`
+line cannot see it.
+
+`debug` now counts the receipts in the window that were never classified and
+names their merchants, which is the only way "why is my mini market missing" has
+a complete answer.
+
+### What this says about PRs #82 and #83
+
+Both were investigated against this report:
+
+- **#82 (bad dates)** — already handled here. The report drops missing and
+  future-dated rows, declares the count (`8 bad date`), and `debug` names the
+  shops behind them. Dates too old are excluded by the window, not silently. No
+  change needed for this report.
+- **#83 (INBOIS)** — real and directly related, but its proposed fix is wrong for
+  this case. `classify_receipt("INBOIS", …)` returns `UNKNOWN`, so that RM108
+  Vista receipt never reached `item_prices`. Whitelisting `INBOIS` would tag
+  every mis-OCR'd receipt as a supplier purchase and put a shop called "INBOIS"
+  in the list — INBOIS is OCR of *INVOIS*, the Malay word for invoice, read off
+  the bill header instead of the shop name. The fix belongs in merchant
+  extraction, which is out of scope here. What is in scope is no longer hiding
+  it: the `debug` count above names it.
+
 ## The three rules it is built on
 
 **Never guess an item.** A confident answer about the wrong item is worse than no

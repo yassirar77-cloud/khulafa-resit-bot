@@ -86,6 +86,17 @@ class DirectorAskWiring(unittest.TestCase):
         # The full listing is longer than one Telegram message.
         self.assertIn("_reply_chunked(message, text)", block)
 
+    def test_the_whole_question_reaches_the_report(self):
+        # Collapsing the question to the canonical item is what answered
+        # "Khulafa bistro ayam whole leg price" with every cut at every
+        # outlet. The outlet rules need the original text too — cleaning
+        # drops the "6" out of "sek 6".
+        block = _block(self.src, "async def _send_answer(")
+        self.assertIn("director_ask.answer_question", block)
+        help_text = self.src[self.src.index("HELP_TEXT = ("):]
+        self.assertIn("/shop_prices bistro ayam whole leg", help_text)
+        self.assertIn("/shop_prices sek 6 ayam", help_text)
+
     def test_answers_go_off_thread_and_chunked(self):
         block = _block(self.src, "async def _send_answer(")
         self.assertIn("asyncio.to_thread(", block)

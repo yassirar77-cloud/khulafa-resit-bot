@@ -25,6 +25,8 @@ from tests.fake_supabase import FakeSupabase  # noqa: E402
 import director_ask  # noqa: E402
 from director_ask import (  # noqa: E402
     build_item_report,
+    cut_phrase,
+    resolve_outlet,
     INTENT_BRANCH,
     INTENT_ITEMS,
     INTENT_LAST,
@@ -369,7 +371,7 @@ class ItemReport(unittest.TestCase):
         text = build_item_report(self._mixed_shop_client(), "beras", today=TODAY)
         for shop in ("BESTARI WHOLESALE", "PASARAYA MINI JAYA", "KEDAI RUNCIT AHMAD"):
             self.assertIn(shop, text)
-        self.assertIn("3 shop(s)", text)
+        self.assertIn("3 shops", text)
         # The old report's verdict on exactly this data.
         self.assertNotIn("Only one supplier", text)
 
@@ -378,7 +380,9 @@ class ItemReport(unittest.TestCase):
         shop_block = text[text.index("🏪"):text.index("🧾")]
         self.assertEqual(shop_block.count("BESTARI WHOLESALE"), 1)
         # …and its spread across those lines is shown rather than hidden.
-        self.assertIn("range RM33.90–RM110.00", shop_block)
+        # RM110 is a real price for a sack of idly rice — within 5x the
+        # median, so the band keeps it rather than crying OCR error.
+        self.assertIn("usually RM33.90–RM110.00", shop_block)
 
     def test_it_carries_dates_prices_quantities_and_the_outlet(self):
         text = build_item_report(self._mixed_shop_client(), "beras", today=TODAY)
@@ -473,6 +477,32 @@ class ItemReport(unittest.TestCase):
         self.assertNotIn("BESTARI WHOLESALE", detail)
         self.assertNotIn("JUTA RIA", detail)
 
+    def test_debug_names_receipts_that_never_reached_item_prices(self):
+        # bot.py writes item_prices only for a SUPPLIER_PURCHASE; an
+        # UNKNOWN receipt returns early. Those purchases have NO rows, so
+        # no drop counter can mention them — the shop is simply absent.
+        # This is the blind spot "Left out" cannot see.
+        client = _client([_row("beras", "BESTARI WHOLESALE", 39.80, 1, days_ago=4)])
+        for rid, merchant, rtype in (
+            (900, "INBOIS", "UNKNOWN"),
+            (901, "DIAMOND BALL", None),
+            (902, "BESTARI WHOLESALE", "SUPPLIER_PURCHASE"),
+        ):
+            row = {"id": rid, "merchant": merchant,
+                   "receipt_date": (TODAY - timedelta(days=3)).isoformat()}
+            if rtype:
+                row["receipt_type"] = rtype
+            client.table("receipts").insert(row).execute()
+
+        text = build_item_report(client, "beras debug", today=TODAY)
+        self.assertIn("never classified", text)
+        self.assertIn("INBOIS", text)
+        self.assertIn("DIAMOND BALL", text)          # missing type counts too
+        self.assertIn("2 receipt(s)", text)
+        # A classified receipt is not accused of anything.
+        blind_spot = text[text.index("never classified"):]
+        self.assertNotIn("BESTARI WHOLESALE", blind_spot)
+
     def test_the_names_only_appear_under_debug(self):
         client = _client([
             _row("beras", "BESTARI WHOLESALE", 39.80, 1, days_ago=4),
@@ -496,6 +526,175 @@ class ItemReport(unittest.TestCase):
         self.assertIsInstance(build_item_report(_client([]), None, today=TODAY), str)
 
 
+class OutletAndCutFilters(unittest.TestCase):
+    """"Khulafa bistro ayam whole leg price" must answer about Bistro's
+    whole leg — not every cut at every outlet.
+
+    Each (outlet, cut) pair gets its own price, so a test can assert on
+    what is actually DISPLAYED rather than on what was parsed. A filter
+    that resolves correctly and then fails to reach the rows is the exact
+    bug these cover.
+    """
+
+    # outlet -> the price only that outlet pays for whole leg
+    WHOLE_LEG = {"BISTRO7": 15.00, "JAKEL": 15.50, "SEK20": 15.60, "SEK6": 15.70}
+    OTHER_CUTS = {"AYAM PUTIH": 2.30, "KNORR STOCK AYAM": 19.50}
+
+    def _client(self):
+        client = FakeSupabase()
+        receipt_id = 0
+        for outlet, price in self.WHOLE_LEG.items():
+            for day in (2, 5):
+                receipt_id += 1
+                client.table("item_prices").insert(
+                    _row("ayam", "BESTARI FARM", price, receipt_id,
+                         days_ago=day, item="AYAM WHOLE LEG 30KG", outlet=outlet)
+                ).execute()
+        for cut, price in self.OTHER_CUTS.items():
+            receipt_id += 1
+            client.table("item_prices").insert(
+                _row("ayam", "MYMOON", price, receipt_id, days_ago=3,
+                     item=cut, outlet="BISTRO7")
+            ).execute()
+        return client
+
+    def _answer(self, question):
+        return answer_question(self._client(), question, today=TODAY)
+
+    def test_outlet_and_cut_both_reach_the_displayed_rows(self):
+        text = self._answer("Khulafa bistro ayam whole leg price")
+        self.assertIn("Bistro", text)
+        self.assertIn("Whole Leg", text)
+        self.assertIn("RM15.00", text)                 # Bistro's whole leg
+        for price in ("RM15.50", "RM15.60", "RM15.70"):
+            self.assertNotIn(price, text)              # other outlets
+        for price in ("RM2.30", "RM19.50"):
+            self.assertNotIn(price, text)              # other cuts
+
+    def test_outlet_alone_keeps_every_cut_at_that_outlet(self):
+        text = self._answer("Khulafa bistro ayam price")
+        self.assertIn("RM15.00", text)
+        self.assertIn("RM2.30", text)
+        self.assertIn("RM19.50", text)
+        for price in ("RM15.50", "RM15.60", "RM15.70"):
+            self.assertNotIn(price, text)
+
+    def test_cut_alone_keeps_every_outlet_for_that_cut(self):
+        text = self._answer("Khulafa ayam whole leg price")
+        for price in ("RM15.00", "RM15.50", "RM15.60", "RM15.70"):
+            self.assertIn(price, text)
+        for price in ("RM2.30", "RM19.50"):
+            self.assertNotIn(price, text)
+
+    def test_an_outlet_written_with_a_number_still_filters(self):
+        # The cleaned text drops bare numbers, so "sek 6" arrived as
+        # "sek" and the outlet rules never fired — parsed, not applied.
+        text = self._answer("Khulafa sek 6 ayam whole leg price")
+        self.assertIn("SEK-6", text)
+        self.assertIn("RM15.70", text)
+        for price in ("RM15.00", "RM15.50", "RM15.60"):
+            self.assertNotIn(price, text)
+
+    def test_no_filter_still_shows_everything(self):
+        # Requirement: the wide view must not regress.
+        text = self._answer("Khulafa ayam price")
+        for price in ("RM15.00", "RM15.50", "RM15.60", "RM15.70", "RM2.30", "RM19.50"):
+            self.assertIn(price, text)
+        self.assertIn("2 shops", text)
+        self.assertIn("4 outlets", text)
+        self.assertIn("🏬 Outlets buying it:", text)
+
+    def test_a_filtered_answer_is_short_enough_for_a_phone(self):
+        text = self._answer("Khulafa bistro ayam whole leg price")
+        self.assertLessEqual(len(text.splitlines()), 14)
+        # …while the unfiltered one is allowed to be long.
+        self.assertGreater(len(self._answer("ayam").splitlines()), 14)
+
+    def test_an_outlet_that_never_bought_it_says_so_and_names_who_did(self):
+        text = self._answer("Khulafa vista ayam whole leg price")
+        self.assertIn("No Ayam bought at Vista", text)
+        self.assertIn("BISTRO7", text)
+
+    def test_the_heading_does_not_repeat_the_item_name(self):
+        # The cut is "AYAM WHOLE LEG" on the receipt; "Ayam · Ayam Whole
+        # Leg" reads like a stutter.
+        head = self._answer("Khulafa bistro ayam whole leg price").splitlines()[0]
+        self.assertIn("Whole Leg", head)
+        self.assertNotIn("Ayam Whole Leg", head)
+
+    def test_the_helpers_delegate_rather_than_rematch(self):
+        self.assertEqual(
+            resolve_outlet("Khulafa bistro ayam whole leg price"),
+            ("BISTRO7", "bistro"),
+        )
+        self.assertEqual(
+            cut_phrase("Khulafa bistro ayam whole leg price", "ayam", "bistro"),
+            "whole leg",
+        )
+        # A synonym for the item is not a cut either.
+        self.assertEqual(cut_phrase("khulafa chicken whole leg", "ayam", ""), "whole leg")
+        self.assertEqual(cut_phrase("Khulafa ayam price", "ayam", ""), "")
+
+
+class PriceBand(unittest.TestCase):
+    """RM1.40–RM609.00 is a true min-max and a useless one: over 160 rows
+    it is guaranteed to quote an OCR column merge at one end and a
+    fragment at the other."""
+
+    def _client(self):
+        prices = [15.00, 15.00, 13.00, 15.00, 13.00, 609.00, 1.40]
+        client = FakeSupabase()
+        for i, price in enumerate(prices, start=1):
+            client.table("item_prices").insert(
+                _row("ayam", "BESTARI FARM", price, i, days_ago=i,
+                     item="AYAM WHOLE LEG 30KG")
+            ).execute()
+        return client
+
+    def test_the_range_excludes_the_outliers(self):
+        text = build_item_report(self._client(), "ayam", today=TODAY)
+        self.assertIn("usually RM13.00–RM15.00", text)
+        self.assertNotIn("RM1.40–RM609.00", text)
+
+    def test_the_outliers_are_reported_not_hidden(self):
+        text = build_item_report(self._client(), "ayam", today=TODAY)
+        self.assertIn("2 row(s) may be OCR errors", text)
+        self.assertIn("RM609.00", text)
+        self.assertIn("/shop_prices ayam debug", text)
+
+    def test_a_suspect_price_is_marked_where_it_is_read(self):
+        text = build_item_report(self._client(), "ayam", today=TODAY)
+        line = next(l for l in text.splitlines() if "RM609.00" in l and l.startswith("•"))
+        self.assertIn("⚠️", line)
+
+    def test_clean_prices_raise_no_warning(self):
+        client = FakeSupabase()
+        for i, price in enumerate([15.00, 14.00, 13.00], start=1):
+            client.table("item_prices").insert(
+                _row("ayam", "BESTARI FARM", price, i, days_ago=i)
+            ).execute()
+        text = build_item_report(client, "ayam", today=TODAY)
+        self.assertNotIn("may be OCR errors", text)
+        self.assertIn("usually RM13.00–RM15.00", text)
+
+    def test_one_shops_garbage_cannot_become_its_own_normal(self):
+        # A shop whose every row is an OCR merge is judged against the
+        # ITEM's median, not against itself.
+        client = FakeSupabase()
+        for i, price in enumerate([15.00, 15.00, 14.00, 13.00], start=1):
+            client.table("item_prices").insert(
+                _row("ayam", "BESTARI FARM", price, i, days_ago=i)
+            ).execute()
+        for i, price in enumerate([880.00, 910.00], start=90):
+            client.table("item_prices").insert(
+                _row("ayam", "JUTA RIA", price, i, days_ago=2)
+            ).execute()
+        text = build_item_report(client, "ayam", today=TODAY)
+        juta = next(l for l in text.splitlines() if "JUTA RIA" in l and l.startswith("•"))
+        self.assertNotIn("usually", juta)
+        self.assertIn("may be OCR errors", text)
+
+
 class AnswerRouting(unittest.TestCase):
     def setUp(self):
         self.client = _client([
@@ -508,7 +707,7 @@ class AnswerRouting(unittest.TestCase):
         self.assertIn("🏪 Shops we buy it from", text)
         self.assertIn("BALAJI", text)
         self.assertIn("MYMOON", text)
-        self.assertIn("2 shop(s)", text)
+        self.assertIn("2 shops", text)
 
     def test_malay_phrasing_reaches_the_same_answer(self):
         english = answer_question(self.client, "where we buy beras", today=TODAY)
