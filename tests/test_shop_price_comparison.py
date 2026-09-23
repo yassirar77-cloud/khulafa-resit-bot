@@ -207,6 +207,59 @@ class LoadPriceRows(unittest.TestCase):
         self.assertEqual([r["shop"] for r in rows], ["BESTARI FARM"])
 
 
+
+class DroppedNames(unittest.TestCase):
+    """Every filtered row remembers which shop it belonged to.
+
+    The counts alone ("3 non-shop merchant") cannot tell the director
+    which supplier vanished from a report; the names can.
+    """
+
+    def test_each_reason_records_its_shops(self):
+        client = _client(
+            [
+                _row("beras", "BESTARI WHOLESALE", 39.80, 1),
+                _row("beras", "RESTORAN KHULAFA", 1.70, 2),
+                _row("beras", "TNB", 120.00, 3),
+                _row("beras", "SOME SHOP", 0, 4),
+            ],
+            receipts=[{"id": 3, "receipt_type": "UTILITY"}],
+        )
+        _, stats = load_price_rows_with_stats(client, "beras", today=TODAY)
+        names = stats["dropped_names"]
+        self.assertEqual(list(names["own_outlet"]), ["RESTORAN KHULAFA"])
+        self.assertEqual(list(names["non_supplier_receipt"]), ["TNB"])
+        self.assertEqual(list(names["bad_price"]), ["SOME SHOP"])
+        # The kept shop is not recorded anywhere as dropped.
+        self.assertNotIn(
+            "BESTARI WHOLESALE",
+            {n for bucket in names.values() for n in bucket},
+        )
+
+    def test_a_mis_categorised_merchant_is_named(self):
+        client = _client(
+            [_row("beras", "KEDAI RUNCIT AHMAD", 41.00, 1)],
+            receipts=[{"id": 1, "receipt_type": "UNKNOWN", "merchant_canonical_id": 9}],
+            canonicals=[{
+                "id": 9, "display_name": "KEDAI RUNCIT AHMAD",
+                "category": "internal_transfer",
+            }],
+        )
+        _, stats = load_price_rows_with_stats(client, "beras", today=TODAY)
+        self.assertEqual(
+            list(stats["dropped_names"]["non_shop_merchant"]),
+            ["KEDAI RUNCIT AHMAD"],
+        )
+
+    def test_the_name_list_cannot_grow_without_bound(self):
+        client = _client([
+            _row("beras", f"KHULAFA OUTLET {i}", 1.70, i + 1) for i in range(30)
+        ])
+        _, stats = load_price_rows_with_stats(client, "beras", today=TODAY)
+        self.assertEqual(stats["own_outlet"], 30)
+        self.assertLessEqual(len(stats["dropped_names"]["own_outlet"]), 8)
+
+
 class GetShopPrices(unittest.TestCase):
 
     def test_groups_by_shop_cheapest_first(self):

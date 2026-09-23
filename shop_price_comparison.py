@@ -412,12 +412,36 @@ def load_price_rows(
     )[0]
 
 
+# How many distinct shop names to remember per drop reason. A count alone
+# ("3 non-shop merchant") cannot tell the director WHICH of his suppliers
+# went missing; the names can, and a handful is enough to spot it.
+_DROPPED_NAME_LIMIT = 8
+
+
 def _empty_stats() -> dict:
     return {
         "fetched": 0, "kept": 0, "bad_price": 0, "bad_date": 0,
         "non_supplier_receipt": 0, "non_shop_merchant": 0, "own_outlet": 0,
         "no_item": 0,
+        # {reason: {shop name: times}} — filled by _note_dropped.
+        "dropped_names": {},
     }
+
+
+def _note_dropped(stats: dict, reason: str, merchant: Any) -> None:
+    """Remember which shop a dropped row belonged to.
+
+    Never raises and never grows without bound: at most
+    ``_DROPPED_NAME_LIMIT`` distinct names per reason, counted after that
+    but not named.
+    """
+    try:
+        name = str(merchant or "").strip() or _UNKNOWN_SHOP
+        bucket = stats.setdefault("dropped_names", {}).setdefault(reason, {})
+        if name in bucket or len(bucket) < _DROPPED_NAME_LIMIT:
+            bucket[name] = bucket.get(name, 0) + 1
+    except Exception:
+        logger.debug("shop prices: could not record a dropped name", exc_info=True)
 
 
 def load_price_rows_with_stats(
@@ -522,11 +546,13 @@ def _clean_price_rows(
             canon = row.get("canonical_item")
             if not isinstance(canon, str) or not canon.strip():
                 stats["no_item"] += 1
+                _note_dropped(stats, "no_item", row.get("merchant"))
                 continue
             canon = canon.strip()
         price = _to_float(row.get("unit_price"))
         if price is None or price <= 0:
             stats["bad_price"] += 1
+            _note_dropped(stats, "bad_price", row.get("merchant"))
             continue
         when = _iso(row.get("receipt_date"))
         # Corrupt future dates ("last 26 Dec" on a receipt logged in
@@ -534,6 +560,7 @@ def _clean_price_rows(
         # too: the fallback query path may not have filtered it.
         if not when or when > today_iso:
             stats["bad_date"] += 1
+            _note_dropped(stats, "bad_date", row.get("merchant"))
             continue
         if cutoff and when < cutoff:
             continue
@@ -553,12 +580,13 @@ def _clean_price_rows(
         # Drop what is provably not a purchase. 'UNKNOWN' (the column
         # default) and a missing receipt both mean "not classified",
         # which is not evidence against the row.
+        raw_merchant = row.get("merchant")
         receipt_type = (receipt.get("receipt_type") or "").strip().upper()
         if receipt_type in _NON_SHOP_RECEIPT_TYPES:
             stats["non_supplier_receipt"] += 1
+            _note_dropped(stats, "non_supplier_receipt", raw_merchant)
             continue
 
-        raw_merchant = row.get("merchant")
         canonical_id = receipt.get("merchant_canonical_id")
         if canonical_id is None and canonicals:
             canonical_id = resolver.canonical_id(raw_merchant)
@@ -568,6 +596,12 @@ def _clean_price_rows(
             category = (canonical_row.get("category") or "").strip().lower()
             if category in _NON_SHOP_CATEGORIES:
                 stats["non_shop_merchant"] += 1
+                # `shop` is not bound yet on this path — the canonical
+                # display name is the label, falling back to the raw one.
+                _note_dropped(
+                    stats, "non_shop_merchant",
+                    (canonical_row.get("display_name") or "").strip() or raw_merchant,
+                )
                 continue
             shop = (canonical_row.get("display_name") or "").strip()
         else:
@@ -582,6 +616,7 @@ def _clean_price_rows(
             shop = shop_display(raw) or raw
         if _is_own_outlet(shop):
             stats["own_outlet"] += 1
+            _note_dropped(stats, "own_outlet", shop or raw_merchant)
             continue
         if not shop:
             shop = _UNKNOWN_SHOP
