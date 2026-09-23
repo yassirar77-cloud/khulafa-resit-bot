@@ -188,9 +188,38 @@ other, and it was printed as though both were prices.
 `_price_band` takes the median (via `price_sanity.median_stats`, which already
 ignores values past the absolute ceilings) and keeps the prices within
 `OUTLIER_FACTOR` — 5×, the same multiple the order generator uses to reject qty
-outliers. What is left becomes `usually RM13.00–RM15.00`; what falls outside is
-reported as suspect rather than quoted as a price, and marked `⚠️` on the row
-where it is read, not only in the footnote.
+outliers.
+
+A suspect row is then **excluded, not annotated**. An OCR column merge is not a
+purchase at RM609; it is a bad read of one, and listing it among the real lines
+makes it read as a price however it is marked. It comes out of the purchase log,
+out of the shop summaries, out of the counts and out of the band — the figures
+and the list are computed from the same clean rows — and is accounted for on its
+own line:
+
+```
+🧾 Recent purchases
+• 23 Sep · BESTARI FARM — RM15.00 × 80
+• 18 Sep · BESTARI FARM — RM15.00 × 60
+• 15 Sep · BESTARI FARM — RM15.00 × 60
+
+⚠️ 1 purchase excluded as a possible OCR error — RM609.00
+→ /shop_prices ayam debug
+```
+
+Nothing is hidden from accounting, it is moved: `debug` prints every excluded row
+in full — date, shop, price, quantity, outlet, cut — and says what it was judged
+against.
+
+```
+🧾 1 row excluded from the figures above as a possible OCR error
+   (more than 5× or under 1/5 of the median RM15.00)
+• 16 Sep · BESTARI FARM — RM609.00 × 1 · BISTRO7
+   Ayam Whole Leg
+```
+
+If the filter would empty the report, the rows are kept instead — a flagged
+answer beats no answer.
 
 A per-shop band is judged against the **item's** median, so a shop whose every
 row is garbage cannot make that garbage its own normal.

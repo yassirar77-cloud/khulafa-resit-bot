@@ -1006,6 +1006,42 @@ _DROP_REASONS = (
 )
 
 
+def _excluded_detail(suspect_rows: list[dict], median: float | None) -> list[str]:
+    """Every row the OCR filter kept out of the answer, in full.
+
+    The normal report excludes them so a RM609 chicken line is never read
+    as a price, but accounting must still be able to see them — so
+    ``debug`` prints each one with its date, shop, price, quantity and
+    outlet, and says what it was judged against. Nothing is hidden;
+    it is moved.
+    """
+    if not suspect_rows:
+        return []
+    lines = [
+        "",
+        f"🧾 {_plural(len(suspect_rows), 'row')} excluded from the figures "
+        f"above as a possible OCR error"
+        + (f" (more than {OUTLIER_FACTOR:.0f}× or under 1/{OUTLIER_FACTOR:.0f} "
+           f"of the median {_money(median)})" if median else ""),
+    ]
+    for row in sorted(suspect_rows, key=_row_sort_key, reverse=True):
+        bits = [
+            f"• {_short_date(row.get('receipt_date'))}",
+            f"· {row.get('shop')}",
+            f"— {_money(float(row.get('unit_price') or 0.0))}",
+        ]
+        qty = row.get("qty")
+        if isinstance(qty, (int, float)) and float(qty) > 0:
+            bits.append(f"× {_qty(qty)}")
+        if row.get("outlet_code"):
+            bits.append(f"· {row['outlet_code']}")
+        lines.append(" ".join(bits))
+        variant = str(row.get("variant") or "")
+        if variant:
+            lines.append(f"   {variant.title()}")
+    return lines
+
+
 def _dropped_note(stats: dict) -> str:
     """One line naming what never reached the answer, so a missing
     supplier is visible instead of silent."""
@@ -1163,20 +1199,38 @@ def build_item_report(
                 rows = [r for r in rows if r.get("variant") == matched_cut]
                 scope.append(_cut_label(matched_cut, canonical))
 
-        shops = _shop_summaries(rows)
+        # An OCR column merge is not a purchase at RM609 — it is a bad
+        # read of one. Listing it among the real lines makes the director
+        # read it as a price, and letting it into the summary makes every
+        # number downstream wrong. It comes out of the display AND out of
+        # the statistics, is accounted for on its own line, and is kept in
+        # full under `debug` so nothing is hidden from accounting.
+        suspect_prices = set(_price_band(rows).get("suspect") or [])
+        suspect_rows = [
+            r for r in rows if float(r.get("unit_price") or 0.0) in suspect_prices
+        ]
+        clean_rows = [r for r in rows if r not in suspect_rows]
+        if not clean_rows:
+            # Degenerate: nothing survived. Better a flagged answer than
+            # an empty one.
+            clean_rows, suspect_rows = rows, []
+
+        shops = _shop_summaries(clean_rows)
         outlets: dict[str, int] = {}
-        for row in rows:
+        for row in clean_rows:
             if row.get("outlet_code"):
                 code = str(row["outlet_code"])
                 outlets[code] = outlets.get(code, 0) + 1
-        band = _price_band(rows)
+        # Recomputed from the SAME rows that are displayed, so "usually
+        # RM13.00–RM15.00" describes the list above it.
+        band = _price_band(clean_rows)
         filtered = bool(outlet_code or matched_cut)
 
         # --- render ------------------------------------------------------
         heading = " · ".join([title] + scope)
         lines = [
             f"🔎 {heading} — last {window_days} days",
-            f"{_plural(len(rows), 'purchase')} · {_plural(len(shops), 'shop')}"
+            f"{_plural(len(clean_rows), 'purchase')} · {_plural(len(shops), 'shop')}"
             + (f" · {_plural(len(outlets), 'outlet')}"
                if outlets and not outlet_code else ""),
             "",
@@ -1203,20 +1257,15 @@ def build_item_report(
         if len(shops) > MAX_SHOPS_LISTED:
             lines.append(f"… +{len(shops) - MAX_SHOPS_LISTED} more shop(s)")
 
-        suspect_prices = set(band.get("suspect") or [])
         limit = MAX_PURCHASE_LINES_FILTERED if filtered else MAX_PURCHASE_LINES
-        recent = sorted(rows, key=_row_sort_key, reverse=True)[:limit]
+        recent = sorted(clean_rows, key=_row_sort_key, reverse=True)[:limit]
         lines.append("")
         lines.append("🧾 Recent purchases")
         for row in recent:
-            price = float(row.get("unit_price") or 0.0)
-            # Flag it where it is read, not only in the footnote — a
-            # RM609 chicken line listed plainly still looks like a price.
-            mark = " ⚠️" if price in suspect_prices else ""
             bits = [
                 f"• {_short_date(row.get('receipt_date'))}",
                 f"· {row.get('shop')}",
-                f"— {_money(price)}{mark}",
+                f"— {_money(float(row.get('unit_price') or 0.0))}",
             ]
             qty = row.get("qty")
             if isinstance(qty, (int, float)) and float(qty) > 0:
@@ -1227,8 +1276,8 @@ def build_item_report(
             variant = str(row.get("variant") or "")
             if variant and not matched_cut:
                 lines.append(f"   {variant.title()}")
-        if len(rows) > len(recent):
-            lines.append(f"… +{len(rows) - len(recent)} more purchase(s)")
+        if len(clean_rows) > len(recent):
+            lines.append(f"… +{len(clean_rows) - len(recent)} more purchase(s)")
 
         # Redundant once the question named one outlet.
         if outlets and not outlet_code:
@@ -1237,7 +1286,7 @@ def build_item_report(
             lines.append("")
             lines.append(f"🏬 Outlets buying it: {listed}")
 
-        groups = _comparable_groups(rows)
+        groups = _comparable_groups(clean_rows)
         if groups:
             lines.append("")
             lines.append("💡 Same type, more than one shop — cheapest first")
@@ -1264,17 +1313,25 @@ def build_item_report(
                 "shop list above is everyone who sold it."
             )
 
-        suspect = band.get("suspect") or []
-        if suspect:
-            quoted = ", ".join(_money(p) for p in suspect[:MAX_SUSPECT_QUOTED])
+        if suspect_rows:
+            quoted = ", ".join(
+                _money(float(r.get("unit_price") or 0.0))
+                for r in sorted(
+                    suspect_rows,
+                    key=lambda r: -float(r.get("unit_price") or 0.0),
+                )[:MAX_SUSPECT_QUOTED]
+            )
             more = (
-                f" +{len(suspect) - MAX_SUSPECT_QUOTED} more"
-                if len(suspect) > MAX_SUSPECT_QUOTED else ""
+                f" +{len(suspect_rows) - MAX_SUSPECT_QUOTED} more"
+                if len(suspect_rows) > MAX_SUSPECT_QUOTED else ""
             )
             lines.append("")
             lines.append(
-                f"⚠️ {len(suspect)} row(s) may be OCR errors ({quoted}{more}) — "
-                f"/shop_prices {canonical.replace('_', ' ')} debug"
+                f"⚠️ {_plural(len(suspect_rows), 'purchase')} excluded as a "
+                f"possible OCR error — {quoted}{more}"
+            )
+            lines.append(
+                f"→ /shop_prices {canonical.replace('_', ' ')} debug"
             )
 
         if widened:
@@ -1294,6 +1351,7 @@ def build_item_report(
                 f"🔍 read {stats.get('fetched', 0)} row(s) from item_prices, "
                 f"kept {stats.get('kept', 0)}"
             )
+            lines.extend(_excluded_detail(suspect_rows, band.get("median")))
             lines.extend(_dropped_detail(stats))
             lines.extend(_unclassified_note(
                 supabase_client,

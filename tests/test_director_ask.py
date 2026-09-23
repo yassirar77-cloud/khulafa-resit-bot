@@ -637,9 +637,15 @@ class OutletAndCutFilters(unittest.TestCase):
 
 
 class PriceBand(unittest.TestCase):
-    """RM1.40–RM609.00 is a true min-max and a useless one: over 160 rows
-    it is guaranteed to quote an OCR column merge at one end and a
-    fragment at the other."""
+    """An OCR column merge is not a purchase at RM609 — it is a bad read
+    of one.
+
+    ``range RM1.40–RM609.00`` was a true min-max and a useless one, and
+    listing RM609 among the real lines made the director read it as a
+    price. Suspect rows come out of the display AND out of the figures,
+    are accounted for on their own line, and stay in full under ``debug``
+    so nothing is hidden from accounting.
+    """
 
     def _client(self):
         prices = [15.00, 15.00, 13.00, 15.00, 13.00, 609.00, 1.40]
@@ -651,21 +657,53 @@ class PriceBand(unittest.TestCase):
             ).execute()
         return client
 
-    def test_the_range_excludes_the_outliers(self):
+    @staticmethod
+    def _purchase_log(text):
+        """Just the purchase list — not the exclusion notice under it."""
+        block = text[text.index("🧾 Recent purchases"):]
+        return block.split("\n\n")[0]
+
+    def test_an_outlier_is_not_listed_among_the_real_purchases(self):
+        text = build_item_report(self._client(), "ayam", today=TODAY)
+        log = self._purchase_log(text)
+        self.assertNotIn("RM609.00", log)
+        self.assertNotIn("RM1.40", log)
+        self.assertIn("RM15.00", log)
+
+    def test_the_counts_describe_the_rows_that_are_shown(self):
+        # 7 rows, 2 suspect -> the header must say 5, not 7.
+        text = build_item_report(self._client(), "ayam", today=TODAY)
+        self.assertIn("5 purchases", text)
+        self.assertNotIn("7 purchases", text)
+
+    def test_the_range_is_computed_from_the_same_clean_rows(self):
         text = build_item_report(self._client(), "ayam", today=TODAY)
         self.assertIn("usually RM13.00–RM15.00", text)
         self.assertNotIn("RM1.40–RM609.00", text)
 
-    def test_the_outliers_are_reported_not_hidden(self):
+    def test_the_exclusion_is_declared_with_a_pointer_to_debug(self):
         text = build_item_report(self._client(), "ayam", today=TODAY)
-        self.assertIn("2 row(s) may be OCR errors", text)
+        self.assertIn("2 purchases excluded as a possible OCR error", text)
         self.assertIn("RM609.00", text)
-        self.assertIn("/shop_prices ayam debug", text)
+        self.assertIn("→ /shop_prices ayam debug", text)
 
-    def test_a_suspect_price_is_marked_where_it_is_read(self):
-        text = build_item_report(self._client(), "ayam", today=TODAY)
-        line = next(l for l in text.splitlines() if "RM609.00" in l and l.startswith("•"))
-        self.assertIn("⚠️", line)
+    def test_one_excluded_row_reads_as_one_purchase(self):
+        client = FakeSupabase()
+        for i, price in enumerate([15.00, 15.00, 13.00, 609.00], start=1):
+            client.table("item_prices").insert(
+                _row("ayam", "BESTARI FARM", price, i, days_ago=i)
+            ).execute()
+        text = build_item_report(client, "ayam", today=TODAY)
+        self.assertIn("1 purchase excluded as a possible OCR error", text)
+
+    def test_debug_keeps_every_excluded_row_in_full(self):
+        text = build_item_report(self._client(), "ayam debug", today=TODAY)
+        detail = text[text.index("excluded from the figures above"):]
+        self.assertIn("RM609.00", detail)
+        self.assertIn("RM1.40", detail)
+        self.assertIn("BESTARI FARM", detail)
+        self.assertIn("SEK6", detail)                  # the outlet is kept
+        self.assertIn("median", detail)                # and what it was judged on
 
     def test_clean_prices_raise_no_warning(self):
         client = FakeSupabase()
@@ -674,12 +712,15 @@ class PriceBand(unittest.TestCase):
                 _row("ayam", "BESTARI FARM", price, i, days_ago=i)
             ).execute()
         text = build_item_report(client, "ayam", today=TODAY)
-        self.assertNotIn("may be OCR errors", text)
+        self.assertNotIn("excluded as a possible OCR error", text)
         self.assertIn("usually RM13.00–RM15.00", text)
+        self.assertIn("3 purchases", text)
 
     def test_one_shops_garbage_cannot_become_its_own_normal(self):
         # A shop whose every row is an OCR merge is judged against the
-        # ITEM's median, not against itself.
+        # ITEM's median, not against itself — so its rows are excluded
+        # and the shop drops out of the answer rather than reporting
+        # RM880-RM910 as its usual prices.
         client = FakeSupabase()
         for i, price in enumerate([15.00, 15.00, 14.00, 13.00], start=1):
             client.table("item_prices").insert(
@@ -690,9 +731,19 @@ class PriceBand(unittest.TestCase):
                 _row("ayam", "JUTA RIA", price, i, days_ago=2)
             ).execute()
         text = build_item_report(client, "ayam", today=TODAY)
-        juta = next(l for l in text.splitlines() if "JUTA RIA" in l and l.startswith("•"))
-        self.assertNotIn("usually", juta)
-        self.assertIn("may be OCR errors", text)
+        shop_block = text[text.index("🏪"):text.index("🧾")]
+        self.assertNotIn("JUTA RIA", shop_block)
+        self.assertIn("2 purchases excluded", text)
+        # …but accounting can still find them.
+        self.assertIn("JUTA RIA", build_item_report(client, "ayam debug", today=TODAY))
+
+    def test_a_degenerate_set_still_answers(self):
+        # If the filter would empty the report, keep the rows rather than
+        # return nothing.
+        client = _client([_row("ayam", "BESTARI FARM", 15.00, 1, days_ago=2)])
+        text = build_item_report(client, "ayam", today=TODAY)
+        self.assertIn("1 purchase", text)
+        self.assertIn("BESTARI FARM", text)
 
 
 class AnswerRouting(unittest.TestCase):
