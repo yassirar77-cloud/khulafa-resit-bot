@@ -57,6 +57,29 @@ def outlet_display_name(code: Any) -> str:
     return _DISPLAY_NAMES.get(key, code.strip() or "?")
 
 
+def outlet_match(text: Any) -> tuple[str, str] | None:
+    """``(outlet_code, matched_needle)`` for the first rule that hits.
+
+    Same ordered substring match as ``outlet_from_chat_title`` — this is
+    the one place the rules are applied — but it also hands back WHICH
+    needle matched. A caller resolving an outlet out of a free-text
+    question ("Khulafa bistro ayam whole leg") needs that so it can
+    remove the outlet words before reading what is left as a cut.
+
+    Returns ``None`` when nothing matches, the text is empty, or the
+    input is not a string.
+    """
+    if not isinstance(text, str):
+        return None
+    haystack = text.lower()
+    if not haystack:
+        return None
+    for needle, code in _RULES:
+        if needle in haystack:
+            return code, needle
+    return None
+
+
 def outlet_from_chat_title(chat_title: Any) -> str | None:
     """Resolve a Telegram chat title to a POS outlet code.
 
@@ -64,12 +87,5 @@ def outlet_from_chat_title(chat_title: Any) -> str | None:
     intentionally absent from the March 2026 benchmarks), empty strings,
     or non-string inputs.
     """
-    if not isinstance(chat_title, str):
-        return None
-    haystack = chat_title.lower()
-    if not haystack:
-        return None
-    for needle, code in _RULES:
-        if needle in haystack:
-            return code
-    return None
+    match = outlet_match(chat_title)
+    return match[0] if match else None

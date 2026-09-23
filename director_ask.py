@@ -107,6 +107,20 @@ MAX_SHOPS_LISTED = 12
 MAX_PURCHASE_LINES = 10
 MAX_COMPARE_GROUPS = 3
 
+# A question that names a cut and an outlet has already said what it
+# wants; the answer should fit on a phone screen, not scroll.
+MAX_PURCHASE_LINES_FILTERED = 3
+
+# A price this far from the item's median is not a price — it is an OCR
+# column merge (RM609 on a chicken line) or a fragment (RM1.40). Five is
+# the same multiple the order generator uses to reject qty outliers.
+OUTLIER_FACTOR = 5.0
+
+# How many suspect prices to quote in the warning before summarising.
+MAX_SUSPECT_QUOTED = 3
+
+_RECEIPTS_TABLE = "receipts"
+
 _UNKNOWN = "Unknown shop"
 
 _MONTHS_EN = [
@@ -742,6 +756,177 @@ def build_spend_summary(
         return "Failed to total the purchases."
 
 
+def resolve_outlet(text: Any) -> tuple[str | None, str]:
+    """``(outlet_code, matched_words)`` named in the question.
+
+    Delegates to ``outlet_mapping.outlet_match`` — the same ordered rules
+    the receipt pipeline uses to turn a chat title into an outlet code,
+    so "bistro" means BISTRO7 here exactly as it does there. The matched
+    words come back too, because they have to be removed before what is
+    left can be read as a cut. Never raises.
+    """
+    try:
+        from outlet_mapping import outlet_match
+
+        match = outlet_match(text)
+        return (match[0], match[1]) if match else (None, "")
+    except Exception:
+        logger.exception("resolve_outlet: unexpected failure (%r)", text)
+        return None, ""
+
+
+def cut_phrase(text: Any, canonical: str, outlet_words: str = "") -> str:
+    """What is left of the question once the item and outlet are removed.
+
+    "Khulafa bistro ayam whole leg price" -> "whole leg". This is only
+    preparation — the matching itself is ``shop_price_comparison
+    .pick_variant``, which already knows how to line a phrase up against
+    the cuts actually on the receipts.
+
+    The item's own name has to go first. Left in, "ayam" matches the cut
+    literally called AYAM as well as WHOLE LEG, ``pick_variant`` sees two
+    candidates and gives up — so naming a cut would do nothing. Synonyms
+    go too ("chicken whole leg"), by asking the resolver whether a token
+    resolves to the same item on its own.
+    """
+    try:
+        from shop_price_comparison import resolve_item_query
+
+        words = extract_item_text(text).split()
+        outlet_tokens = set(_norm(outlet_words).split())
+        item_tokens = set(str(canonical or "").split("_"))
+        kept = []
+        for word in words:
+            if word in outlet_tokens or word in item_tokens:
+                continue
+            if (resolve_item_query(word) or {}).get("canonical") == canonical:
+                continue
+            kept.append(word)
+        return " ".join(kept)
+    except Exception:
+        logger.exception("cut_phrase: unexpected failure (%r)", text)
+        return ""
+
+
+def _price_band(rows: list[dict], median: float | None = None) -> dict:
+    """A price range that describes the item instead of its worst rows.
+
+    ``range RM1.40-RM609.00`` is a true min-max and a useless one: over
+    160 rows it is guaranteed to quote an OCR column merge at one end and
+    a fragment at the other. The band is taken from the prices within
+    ``OUTLIER_FACTOR`` of the median instead, and the ones outside it are
+    handed back to be flagged, not printed as if they were prices.
+
+    Pass ``median`` to judge a subset (one shop's rows) against the whole
+    item's median, so a shop whose every row is garbage cannot make that
+    garbage its own normal.
+
+    Returns ``{'low', 'high', 'median', 'suspect'}``; ``low``/``high`` are
+    ``None`` when there is nothing to describe. Never raises.
+    """
+    out: dict = {"low": None, "high": None, "median": None, "suspect": []}
+    try:
+        from price_sanity import median_stats
+
+        prices = [
+            float(r["unit_price"]) for r in rows
+            if isinstance(r, dict) and isinstance(r.get("unit_price"), (int, float))
+            and float(r["unit_price"]) > 0
+        ]
+        if not prices:
+            return out
+        if not median or median <= 0:
+            median = median_stats(rows).get("median_price")
+        if not median or median <= 0:
+            median = sorted(prices)[len(prices) // 2]
+        out["median"] = median
+
+        ceiling, floor = median * OUTLIER_FACTOR, median / OUTLIER_FACTOR
+        sane = [p for p in prices if floor <= p <= ceiling]
+        out["suspect"] = sorted({p for p in prices if p < floor or p > ceiling})
+        if sane:
+            out["low"], out["high"] = min(sane), max(sane)
+        return out
+    except Exception:
+        logger.exception("_price_band: unexpected failure")
+        return out
+
+
+def _plural(count: int, noun: str) -> str:
+    """``1 shop`` / ``4 shops`` — a count a director reads, not a log line."""
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _cut_label(variant: Any, canonical: str) -> str:
+    """``AYAM WHOLE LEG`` under the item Ayam -> ``Whole Leg``.
+
+    The heading already names the item, and "Ayam · Bistro · Ayam Whole
+    Leg" reads like a stutter. A cut that is only the item name keeps it,
+    because dropping it would leave nothing.
+    """
+    text = str(variant or "").strip()
+    if not text:
+        return ""
+    item_tokens = set(str(canonical or "").split("_"))
+    kept = [w for w in text.split() if w.lower() not in item_tokens]
+    return " ".join(kept).title() if kept else text.title()
+
+
+def _band_text(band: dict) -> str:
+    """``· usually RM13.00–RM15.00`` — empty when there is no spread."""
+    low, high = band.get("low"), band.get("high")
+    if low is None or high is None or high - low <= 0.005:
+        return ""
+    return f" · usually {_money(low)}–{_money(high)}"
+
+
+def _unclassified_note(supabase_client, start_iso: str, end_iso: str) -> list[str]:
+    """Receipts in the window that never got a type — the blind spot the
+    "Left out" line cannot see.
+
+    ``bot.py`` writes ``item_prices`` only for a receipt classified
+    SUPPLIER_PURCHASE; an UNKNOWN one returns early. Those purchases have
+    no rows at all, so no drop counter can mention them — the shop simply
+    is not there. Counting the receipts says so out loud. Debug only, and
+    never raises: a failed count must not cost the report.
+    """
+    try:
+        result = (
+            supabase_client.table(_RECEIPTS_TABLE)
+            .select("id, merchant, receipt_type, receipt_date")
+            .gte("receipt_date", start_iso)
+            .lte("receipt_date", end_iso)
+            .execute()
+        )
+        rows = getattr(result, "data", None) or []
+        unknown = [
+            r for r in rows
+            if isinstance(r, dict)
+            and (r.get("receipt_type") or "UNKNOWN").strip().upper() == "UNKNOWN"
+        ]
+        if not unknown:
+            return []
+        names: dict[str, int] = {}
+        for row in unknown:
+            name = str(row.get("merchant") or "?").strip() or "?"
+            if name in names or len(names) < MAX_SHOPS_LISTED:
+                names[name] = names.get(name, 0) + 1
+        listed = ", ".join(
+            f"{n} ({c}x)" if c > 1 else n
+            for n, c in sorted(names.items(), key=lambda kv: (-kv[1], kv[0]))
+        )
+        return [
+            "",
+            f"🚫 {len(unknown)} receipt(s) in this window were never classified, "
+            "so NONE of their items reached item_prices — they cannot appear "
+            "above whatever they contained:",
+            f"   {listed}",
+        ]
+    except Exception:
+        logger.exception("_unclassified_note: lookup failed")
+        return []
+
+
 def _shop_summaries(rows: list[dict]) -> list[dict]:
     """One entry per shop, most recently bought first.
 
@@ -868,15 +1053,26 @@ def build_item_report(
 ) -> str:
     """"Which shops do we buy this from, when, and for how much."
 
-    The full picture for one item in one message: every supplier that sold
-    it, the most recent purchases with date, shop, line, price, quantity
-    and the outlet that bought it, which outlets buy it at all, and — only
-    where it is honest — the cheapest shop for a like-for-like cut.
+    Honours everything the question names, not just the item:
+
+    - **Item** — "ayam", through the resolver ``/shop_prices`` uses.
+    - **Outlet** — "Khulafa bistro" -> BISTRO7, through
+      ``outlet_mapping.outlet_match``, the same rules the receipt
+      pipeline uses on a chat title.
+    - **Cut** — "whole leg", through
+      ``shop_price_comparison.pick_variant`` against the cuts actually on
+      the receipts.
+
+    Name a cut or an outlet and the answer is only those rows, short
+    enough to read on a phone. Name neither and it stays the full
+    picture: every supplier, the recent purchases, which outlets buy it,
+    and the cheapest like-for-like cut.
 
     Blocking (Supabase I/O). Always returns a string; never raises.
     """
     try:
-        from shop_price_comparison import load_price_rows_with_stats
+        from shop_price_comparison import load_price_rows_with_stats, pick_variant
+        from outlet_mapping import outlet_display_name
 
         raw = str(query or "").strip()
         parts = raw.split()
@@ -886,26 +1082,44 @@ def build_item_report(
         if not raw:
             return HELP_TEXT
 
-        resolved = _resolve_item(raw)
+        # The ITEM is resolved from the cleaned text, which is what keeps
+        # a stray question word from matching an item. The OUTLET has to
+        # be read from the ORIGINAL: cleaning drops bare numbers, so
+        # "sek 6" arrives as "sek" and the rules — which match the
+        # literal "sek 6" — never fire. That is how "Khulafa sek 6 ayam
+        # whole leg price" parsed an outlet and then answered about all
+        # four of them.
+        cleaned = extract_item_text(raw) or raw
+        resolved = _resolve_item(cleaned)
         canonical = resolved.get("canonical")
         if not canonical:
             return _miss_text({
-                "raw": raw, "item_text": raw,
+                "raw": raw, "item_text": cleaned,
                 "suggestions": resolved.get("suggestions") or [],
             })
 
         base_today = today or date.today()
         window_days = int(lookback_days or DEFAULT_ITEM_LOOKBACK_DAYS)
+        outlet_code, outlet_words = resolve_outlet(raw)
+        wanted_cut = cut_phrase(raw, canonical, outlet_words)
+
         rows, stats = load_price_rows_with_stats(
             supabase_client, canonical, lookback_days=window_days, today=base_today
         )
         rows = [r for r in rows if isinstance(r, dict)]
+        title = _display_name(canonical)
 
         # One shop is not an answer to "who sells it". Before saying so,
         # look back a year — a supplier last used in March is still a
-        # supplier worth calling.
+        # supplier worth calling. Only for the unfiltered question: at one
+        # outlet, for one cut, a single supplier is the normal answer, and
+        # widening there just drags in rows nobody asked about.
         widened = False
-        if window_days < 365 and len({r.get("shop_key") for r in rows}) < 2:
+        if (
+            not outlet_code and not wanted_cut
+            and window_days < 365
+            and len({r.get("shop_key") for r in rows}) < 2
+        ):
             wide_rows, wide_stats = load_price_rows_with_stats(
                 supabase_client, canonical, lookback_days=365, today=base_today
             )
@@ -915,13 +1129,39 @@ def build_item_report(
             ):
                 rows, stats, window_days, widened = wide_rows, wide_stats, 365, True
 
-        title = _display_name(canonical)
         if not rows:
             out = f"No supplier bought {title} in the last {window_days} days."
             note = _dropped_note(stats)
-            if note:
-                out += "\n" + note
-            return out
+            return out + ("\n" + note if note else "")
+
+        # --- apply what the question asked for --------------------------
+        scope: list[str] = []
+        if outlet_code:
+            at_outlet = [r for r in rows if r.get("outlet_code") == outlet_code]
+            outlet_label = outlet_display_name(outlet_code)
+            if not at_outlet:
+                bought_at = sorted({
+                    str(r["outlet_code"]) for r in rows if r.get("outlet_code")
+                })
+                return (
+                    f"No {title} bought at {outlet_label} in the last "
+                    f"{window_days} days.\n"
+                    + (f"It was bought at: {', '.join(bought_at)}."
+                       if bought_at else "")
+                ).strip()
+            rows = at_outlet
+            scope.append(outlet_label)
+
+        matched_cut = None
+        if wanted_cut:
+            # pick_variant does the matching; this only hands it the
+            # cuts that survived the outlet filter, so "whole leg at
+            # Bistro" is answered about Bistro's receipts.
+            variants = sorted({str(r.get("variant") or "") for r in rows if r.get("variant")})
+            matched_cut = pick_variant(wanted_cut, [{"variant": v} for v in variants])
+            if matched_cut:
+                rows = [r for r in rows if r.get("variant") == matched_cut]
+                scope.append(_cut_label(matched_cut, canonical))
 
         shops = _shop_summaries(rows)
         outlets: dict[str, int] = {}
@@ -929,62 +1169,82 @@ def build_item_report(
             if row.get("outlet_code"):
                 code = str(row["outlet_code"])
                 outlets[code] = outlets.get(code, 0) + 1
+        band = _price_band(rows)
+        filtered = bool(outlet_code or matched_cut)
 
+        # --- render ------------------------------------------------------
+        heading = " · ".join([title] + scope)
         lines = [
-            f"🔎 {title} — last {window_days} days",
-            f"{len(rows)} purchase(s) · {len(shops)} shop(s)"
-            + (f" · {len(outlets)} outlet(s)" if outlets else ""),
+            f"🔎 {heading} — last {window_days} days",
+            f"{_plural(len(rows), 'purchase')} · {_plural(len(shops), 'shop')}"
+            + (f" · {_plural(len(outlets), 'outlet')}"
+               if outlets and not outlet_code else ""),
             "",
-            "🏪 Shops we buy it from (most recent first)",
         ]
+        lines.append(
+            "🏪 Shop" if filtered and len(shops) == 1
+            else "🏪 Shops we buy it from (most recent first)"
+        )
         for shop in shops[:MAX_SHOPS_LISTED]:
-            prices = shop["prices"]
-            line = (
+            # Each shop's own typical range, but measured against the
+            # item's median — otherwise a shop whose rows are all OCR
+            # merges would report those merges as its normal prices.
+            shop_band = _price_band(
+                [{"unit_price": p} for p in shop["prices"]], median=band.get("median")
+            )
+            lines.append(
                 f"• {shop['shop']} — {_short_date(shop['last_date'])} · "
                 f"{_money(shop['last_price'])} · {shop['times']}x"
+                + _band_text(shop_band)
             )
-            if len(prices) > 1 and max(prices) - min(prices) > 0.005:
-                line += f" · range {_money(min(prices))}–{_money(max(prices))}"
-            lines.append(line)
-            if shop["last_variant"]:
+            # The cut is already in the heading when it was asked for.
+            if shop["last_variant"] and not matched_cut:
                 lines.append(f"   last: {shop['last_variant'].title()}")
         if len(shops) > MAX_SHOPS_LISTED:
             lines.append(f"… +{len(shops) - MAX_SHOPS_LISTED} more shop(s)")
 
-        recent = sorted(rows, key=_row_sort_key, reverse=True)[:MAX_PURCHASE_LINES]
+        suspect_prices = set(band.get("suspect") or [])
+        limit = MAX_PURCHASE_LINES_FILTERED if filtered else MAX_PURCHASE_LINES
+        recent = sorted(rows, key=_row_sort_key, reverse=True)[:limit]
         lines.append("")
         lines.append("🧾 Recent purchases")
         for row in recent:
+            price = float(row.get("unit_price") or 0.0)
+            # Flag it where it is read, not only in the footnote — a
+            # RM609 chicken line listed plainly still looks like a price.
+            mark = " ⚠️" if price in suspect_prices else ""
             bits = [
                 f"• {_short_date(row.get('receipt_date'))}",
                 f"· {row.get('shop')}",
-                f"— {_money(float(row.get('unit_price') or 0.0))}",
+                f"— {_money(price)}{mark}",
             ]
             qty = row.get("qty")
             if isinstance(qty, (int, float)) and float(qty) > 0:
                 bits.append(f"× {_qty(qty)}")
-            if row.get("outlet_code"):
+            if row.get("outlet_code") and not outlet_code:
                 bits.append(f"· {row['outlet_code']}")
             lines.append(" ".join(bits))
             variant = str(row.get("variant") or "")
-            if variant:
+            if variant and not matched_cut:
                 lines.append(f"   {variant.title()}")
         if len(rows) > len(recent):
             lines.append(f"… +{len(rows) - len(recent)} more purchase(s)")
 
-        if outlets:
+        # Redundant once the question named one outlet.
+        if outlets and not outlet_code:
             ranked = sorted(outlets.items(), key=lambda kv: -kv[1])
             listed = ", ".join(f"{code} ({n}x)" for code, n in ranked[:MAX_OUTLET_ROWS])
             lines.append("")
             lines.append(f"🏬 Outlets buying it: {listed}")
 
         groups = _comparable_groups(rows)
-        lines.append("")
         if groups:
+            lines.append("")
             lines.append("💡 Same type, more than one shop — cheapest first")
             for group in groups[:MAX_COMPARE_GROUPS]:
                 lines.append("")
-                lines.append(str(group["variant"]).title())
+                if not matched_cut:
+                    lines.append(str(group["variant"]).title())
                 for i, shop in enumerate(group["shops"][:MAX_SHOP_ROWS]):
                     marker = "🥇" if i == 0 else "•"
                     times = int(shop.get("sample_count") or 0)
@@ -994,11 +1254,27 @@ def build_item_report(
                         f"{_money(float(shop['latest_price']))} · "
                         f"{_short_date(shop.get('latest_date'))}{suffix}"
                     )
-        else:
+        elif not filtered:
+            # Only worth explaining on the wide view. With one cut at one
+            # outlet, a single supplier is the answer, not a shortfall.
+            lines.append("")
             lines.append(
                 "💡 Every type came from one shop only, so there is nothing "
                 "like-for-like to compare — pack sizes and grades differ. The "
                 "shop list above is everyone who sold it."
+            )
+
+        suspect = band.get("suspect") or []
+        if suspect:
+            quoted = ", ".join(_money(p) for p in suspect[:MAX_SUSPECT_QUOTED])
+            more = (
+                f" +{len(suspect) - MAX_SUSPECT_QUOTED} more"
+                if len(suspect) > MAX_SUSPECT_QUOTED else ""
+            )
+            lines.append("")
+            lines.append(
+                f"⚠️ {len(suspect)} row(s) may be OCR errors ({quoted}{more}) — "
+                f"/shop_prices {canonical.replace('_', ' ')} debug"
             )
 
         if widened:
@@ -1019,6 +1295,11 @@ def build_item_report(
                 f"kept {stats.get('kept', 0)}"
             )
             lines.extend(_dropped_detail(stats))
+            lines.extend(_unclassified_note(
+                supabase_client,
+                (base_today - timedelta(days=window_days - 1)).isoformat(),
+                base_today.isoformat(),
+            ))
         return "\n".join(lines)
     except Exception:
         logger.exception("build_item_report failed (%r)", query)
@@ -1050,6 +1331,7 @@ def build_item_index() -> str:
 HELP_TEXT = (
     "🔎 Ask me about any item — plain words, English or Malay:\n"
     "• \"beras beli kat mana\" — which shops sell it, cheapest first\n"
+    "• \"khulafa bistro ayam whole leg price\" — one outlet, one cut\n"
     "• \"harga ayam\" — every shop's latest price, per cut\n"
     "• \"bila last beli telur\" — the last purchases, shop and price\n"
     "• \"berapa belanja minyak bulan ni\" — spend and quantity for a period\n"
@@ -1149,8 +1431,15 @@ def answer_question(supabase_client, text: Any, today: date | None = None) -> st
         # INTENT_SHOP and the bare-item fallback: "where do we buy this,
         # and for how much" is the question that gets asked most, and it
         # wants every shop in one list — not one block per OCR spelling.
+        #
+        # The WHOLE question goes through, not the canonical key: it
+        # still carries the outlet and the cut ("Khulafa sek 6 ayam whole
+        # leg"), and build_item_report reads both — from the original,
+        # because cleaning drops the "6". Collapsing it to "ayam" here is
+        # what used to answer a question about Bistro's whole leg with
+        # every cut at every outlet.
         return build_item_report(
-            supabase_client, item_text, today=base_today,
+            supabase_client, parsed.get("raw") or item_text, today=base_today,
             lookback_days=(
                 _lookback_for(window, base_today) if window.get("explicit")
                 else DEFAULT_ITEM_LOOKBACK_DAYS
