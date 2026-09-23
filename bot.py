@@ -100,6 +100,7 @@ import analytics
 import bill_analysis
 import digest
 import director_ask
+import director_feed
 import food_cost_analytics
 import kitchen_usage
 import manager_registration
@@ -1732,11 +1733,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         # The receipt is already stored — never let a reply failure abort the
         # downstream routing (side tables, price aggregation, audit checks).
         logger.exception("Failed to send receipt confirmation reply")
-    try:
-        for chunk in chunk_message(ops_alert):
-            await context.bot.send_message(chat_id=ALERT_CHAT_ID, text=chunk)
-    except Exception:
-        logger.exception("Failed to send alert to ALERT_CHAT_ID")
+    # Focus mode (default): the director no longer gets every receipt from
+    # every shop — they are in the 23:59 summary and the 23:00 digest. See
+    # director_feed for the full policy.
+    if director_feed.wants_receipt_feed():
+        try:
+            for chunk in chunk_message(ops_alert):
+                await context.bot.send_message(chat_id=ALERT_CHAT_ID, text=chunk)
+        except Exception:
+            logger.exception("Failed to send alert to ALERT_CHAT_ID")
 
     # PR #24: route non-purchase receipts to their side tables and skip
     # everything below. Only SUPPLIER_PURCHASE flows through price
@@ -1877,6 +1882,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 stored.get("merchant"),
             )
             for spike in spikes:
+                # Small jumps still reach the manager below and the 21:30
+                # bill analysis; only the big ones interrupt the director.
+                if not director_feed.wants_spike(spike):
+                    continue
                 msg = format_spike_message(spike)
                 if not msg:
                     continue

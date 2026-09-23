@@ -1,0 +1,68 @@
+# Director feed — who sees what
+
+The director chat (`ALERT_CHAT_ID`) was receiving 20+ kinds of message a day,
+most of them per-receipt noise. This page is the map of every message the bot
+sends, sorted by **who needs it** and **when**.
+
+## The rule
+
+> **Director = decisions and exceptions. Manager = actions in their own shop.**
+
+The director should only see:
+1. **Money that moved abnormally** (big price jump, big purchase, food cost % off).
+2. **People not doing their job** (forms ignored, questions unanswered, bills missing).
+3. **One daily scorecard and one weekly scorecard** comparing the shops.
+
+Everything else goes to the shop manager, or is already in a scheduled report.
+
+## Director — what stays
+
+| When | Message | Why the director needs it |
+|---|---|---|
+| Live | Price jump ≥ 20% (`DIRECTOR_SPIKE_MIN_PCT`) | Real cost leak, act today |
+| Live | Receipt could not be classified | Needs a human tag |
+| Live | Manager's answer to an audit question | Closes the loop the director opened |
+| 09:00 | Kitchen Used-vs-POS comparison (+14:00 missing-POS alert) | Wastage / theft signal |
+| 17:00 | Who has gone quiet on questions | Manager accountability |
+| 21:30 | Bill analysis — every increase + cheaper branch | All small increases live here |
+| 23:00 | Nightly digest (sales, food cost %, top items, cash-no-receipt) | **The** daily scorecard |
+| Mon 09:00 | HQ weekly food-cost summary | **The** weekly scorecard |
+| Mon 11:00 | Response scoreboard | Who answers, who doesn't |
+| 1st of month | kg-per-protein report | Monthly buying trend |
+
+## Director — what was cut from the live feed (focus mode)
+
+| Message | Where it still is |
+|---|---|
+| "New receipt logged" + full item list, for every receipt | 23:59 daily summary, 23:00 digest; manager still gets the confirmation |
+| Price increase 10–20% on a single item | 21:30 bill analysis; manager still gets the Tamil spike question |
+
+Set `DIRECTOR_FEED=full` on Render to bring both back.
+
+## Shop manager — what each one should get
+
+| When | Message |
+|---|---|
+| Live | Receipt confirmation, anomaly note, audit question (big purchase / new supplier / odd item price) |
+| Live | Tamil price-spike question with cheaper shops |
+| 10:30 | Key stock check |
+| 10:45 | Slow items to push today |
+| 11:00 | Cook-to-demand plan (how much to cook) |
+| 18:00 / 00:00 / 02:00 | COOKED / night / LEFT kitchen forms (+ reminders) |
+| 20:00 | Tomorrow's order draft |
+| 21:00 | Missing supplier bills |
+| 21:30 | Their own bill analysis (what went up, which branch buys cheaper) |
+| Mon 09:00 / 09:30 | Weekly food cost, overbuying question |
+| Mon 11:00 | Praise for full responders |
+
+## The other big source of noise: `MANAGER_DELIVERY_ENABLED`
+
+While this flag is **off** (the default), every manager message in the table
+above is sent to the director instead, prefixed `[TEST — would go to … manager]`.
+With 5+ shops that is dozens of messages a day meant for someone else.
+
+Once each outlet has a registered manager (`/register_manager`), set
+`MANAGER_DELIVERY_ENABLED=true` on Render. Those messages then go to the
+managers, and the director only keeps the HQ summaries above. Any outlet
+without a manager still falls back to the director with a
+`[NO MANAGER REGISTERED]` prefix, so nothing is silently dropped.
