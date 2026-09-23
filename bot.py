@@ -2069,8 +2069,11 @@ HELP_TEXT = (
     "/start — short greeting\n"
     "/summary — today's spending grouped by merchant\n"
     "/compare <item> — compare an item's unit price across outlets\n"
-    "/shop_prices <item> — every shop's price for that item, cheapest first\n"
+    "/shop_prices <item> — every shop we buy that item from: names, dates, "
+    "prices, quantities and the outlet\n"
     "   (aliases: /all_prices, /harga — works for any item, e.g. ayam, telur, minyak)\n"
+    "   add 'cuts' for the per-cut price comparison, 'debug' for what was "
+    "filtered out\n"
     "/ask <question> — ask about any item in plain words, English or Malay\n"
     "   (aliases: /tanya, /cari, /search). Examples:\n"
     "   \u2022 beras beli kat mana — which shops sell it, cheapest first\n"
@@ -3855,13 +3858,23 @@ async def price_quarantine_command(update: Update, context: ContextTypes.DEFAULT
 
 
 async def shop_prices_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """``/shop_prices <item>`` — every shop's price for ANY item.
+    """``/shop_prices <item>`` — every shop we buy ANY item from.
 
-    The same comparison that rides along with a price-spike alert, on
-    demand: latest price per supplier, cheapest first, so the director can
-    check any item without waiting for it to spike. Answers in the alert
-    group (where the alerts land) and to reviewers anywhere; supplier
-    pricing isn't for arbitrary outlet groups.
+    Shop names, dates, prices, quantities and the outlet that bought it,
+    in one message, so the director can check any item without waiting for
+    it to spike.
+
+    The default view is ITEM-LEVEL. It used to group by ``item_variant``,
+    which is the raw receipt line with the pack size stripped — so every
+    OCR spelling and brand prefix became its own "cut" (ayam alone made 41
+    of them: "I AYAM", "1ST AYAM", "MR CM AYAM"). Capped at a few blocks,
+    that split one item into one-shop blocks and hid most of the real
+    suppliers behind "+38 more type(s)", then reported "only one supplier
+    has priced this item". ``/shop_prices <item> cuts`` still gives the
+    per-cut comparison when that is what's wanted.
+
+    Answers in the alert group (where the alerts land) and to reviewers
+    anywhere; supplier pricing isn't for arbitrary outlet groups.
     """
     message = update.effective_message
     if not message:
@@ -3874,21 +3887,29 @@ async def shop_prices_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not query:
         await message.reply_text(
             "Usage: /shop_prices <item>\n"
-            "Example: /shop_prices ayam — every shop's price, grouped by cut.\n"
-            "Add a cut to narrow it (/shop_prices paha ayam), or 'debug' to see "
-            "what was filtered out."
+            "Example: /shop_prices beras — every shop we buy it from, with "
+            "dates, prices and the outlet.\n"
+            "Add 'cuts' for the per-cut price comparison "
+            "(/shop_prices ayam cuts), or 'debug' to see what was filtered out."
         )
         return
 
+    # "cuts" (or the old "variants") asks for the per-cut comparison.
+    parts = query.split()
+    per_cut = len(parts) > 1 and parts[-1].lower() in ("cuts", "cut", "variants")
+    if per_cut:
+        query = " ".join(parts[:-1])
+        builder = shop_price_comparison.build_shop_price_report
+    else:
+        builder = director_ask.build_item_report
+
     try:
-        text = await asyncio.to_thread(
-            shop_price_comparison.build_shop_price_report, supabase, query
-        )
+        text = await asyncio.to_thread(builder, supabase, query)
     except Exception:
         logger.exception("shop_prices failed (query=%r)", query)
         await message.reply_text("Failed to read item prices.")
         return
-    await message.reply_text(text)
+    await _reply_chunked(message, text)
 
 
 # === Plain-language item search ("ask the bot") ==============================

@@ -74,6 +74,18 @@ class DirectorAskWiring(unittest.TestCase):
         # Nothing that misses the bar gets a reply.
         self.assertIn("if not interesting:\n        return", block)
 
+    def test_shop_prices_defaults_to_the_item_level_report(self):
+        # Grouping by item_variant fragmented one item into dozens of
+        # one-shop blocks and hid the real suppliers behind "+N more
+        # type(s)". The default view lists every shop; the per-cut
+        # comparison is still reachable with "cuts".
+        block = _block(self.src, "async def shop_prices_command(")
+        self.assertIn("director_ask.build_item_report", block)
+        self.assertIn('("cuts", "cut", "variants")', block)
+        self.assertIn("shop_price_comparison.build_shop_price_report", block)
+        # The full listing is longer than one Telegram message.
+        self.assertIn("_reply_chunked(message, text)", block)
+
     def test_answers_go_off_thread_and_chunked(self):
         block = _block(self.src, "async def _send_answer(")
         self.assertIn("asyncio.to_thread(", block)
