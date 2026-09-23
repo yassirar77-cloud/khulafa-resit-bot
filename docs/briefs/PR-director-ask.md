@@ -59,6 +59,48 @@ month"* is money, not a purchase list.
 (`shop_price_comparison` for "which shop", `bill_analysis` for "which branch"),
 and build the two that did not: `build_last_purchases` and `build_spend_summary`.
 
+## The fragmentation bug this had to fix first
+
+The first live test of `/shop_prices beras` came back with three blocks — "Beras
+Rebus Saga", "Basmati King Jasmine", "Beras Idly" — all from one wholesaler, and
+the verdict *"Only one supplier has priced this item."* The director buys beras
+from several shops, mini markets included. `/shop_prices ayam` was worse: four
+blocks and `… +38 more type(s): I Ayam, Knorr Stock Ayam, 1St Ayam, Mr Cm Ayam,
+Lai Ayam`.
+
+`item_variant` is the raw receipt line with the pack size stripped:
+
+```
+BERAS REBUS SAGA 10KG     -> 'BERAS REBUS SAGA'
+BASMATI KING JASMINE 5KG  -> 'BASMATI KING JASMINE'
+I AYAM                    -> 'I AYAM'
+MR CM AYAM                -> 'MR CM AYAM'
+```
+
+So every OCR spelling and brand prefix becomes its own "cut". Grouping the
+answer by that splits one item into dozens of blocks that each hold one shop,
+the block cap then hides most of them, and the one-shop check fires on a
+fragment rather than on the item. The suppliers were never missing from the
+database — they were behind "+38 more type(s)".
+
+`build_item_report` answers at ITEM level instead: every shop that sold it, in
+one list, ordered by most recent, with the price range where a shop sells
+several pack sizes. Underneath, the recent purchases carry date, shop, line,
+price, quantity and the outlet that bought it, then which outlets buy it at all.
+
+The per-cut comparison is kept, because it is the honest half of the old report:
+a RM110 sack of beras idly is not a quote for the same thing as a RM33.90 bag of
+basmati. "Cheapest" is claimed **only inside one variant, and only when two or
+more shops sold it**. When no cut clears that bar the report says so plainly and
+points at the shop list, instead of "only one supplier has priced this item".
+
+Rows the pipeline drops (own-outlet transfers, non-supplier receipts, bad dates
+and prices) are now counted in a `⚠️ Left out:` line, so a supplier that really
+is missing is visible rather than silent.
+
+`/shop_prices <item>` serves this view by default; `/shop_prices <item> cuts`
+still gives the per-cut comparison, and `debug` still breaks down the filtering.
+
 ## The three rules it is built on
 
 **Never guess an item.** A confident answer about the wrong item is worse than no

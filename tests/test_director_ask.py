@@ -24,6 +24,7 @@ from tests.fake_supabase import FakeSupabase  # noqa: E402
 
 import director_ask  # noqa: E402
 from director_ask import (  # noqa: E402
+    build_item_report,
     INTENT_BRANCH,
     INTENT_ITEMS,
     INTENT_LAST,
@@ -338,6 +339,116 @@ class SpendSummary(unittest.TestCase):
         self.assertIsInstance(build_spend_summary(None, "beras", today=TODAY), str)
 
 
+class ItemReport(unittest.TestCase):
+    """The regression this report exists for.
+
+    ``item_variant`` is the raw receipt line with the pack size stripped,
+    so every OCR spelling becomes its own "cut". Grouping the answer by
+    that turned one item into dozens of one-shop blocks, capped the blocks,
+    and reported "only one supplier has priced this item" while the
+    director's other suppliers sat behind "+38 more type(s)".
+    """
+
+    def _mixed_shop_client(self):
+        return _client([
+            # One wholesaler under three different OCR line texts …
+            _row("beras", "BESTARI WHOLESALE", 39.80, 1, days_ago=4,
+                 item="BERAS REBUS SAGA 10KG"),
+            _row("beras", "BESTARI WHOLESALE", 33.90, 2, days_ago=4,
+                 item="BASMATI KING JASMINE 5KG"),
+            _row("beras", "BESTARI WHOLESALE", 110.00, 3, days_ago=9,
+                 item="BERAS IDLY 10KG"),
+            # … and the shops that used to be invisible behind them.
+            _row("beras", "PASARAYA MINI JAYA", 42.00, 4, days_ago=6,
+                 item="BERAS SIAM WANGI 10KG", outlet="KLANG"),
+            _row("beras", "KEDAI RUNCIT AHMAD", 41.00, 5, days_ago=11,
+                 item="BERAS SIAM WANGI 10KG", outlet="SEK20"),
+        ])
+
+    def test_every_shop_is_listed_not_just_the_first_few_cuts(self):
+        text = build_item_report(self._mixed_shop_client(), "beras", today=TODAY)
+        for shop in ("BESTARI WHOLESALE", "PASARAYA MINI JAYA", "KEDAI RUNCIT AHMAD"):
+            self.assertIn(shop, text)
+        self.assertIn("3 shop(s)", text)
+        # The old report's verdict on exactly this data.
+        self.assertNotIn("Only one supplier", text)
+
+    def test_one_shop_appears_once_however_many_line_spellings_it_has(self):
+        text = build_item_report(self._mixed_shop_client(), "beras", today=TODAY)
+        shop_block = text[text.index("🏪"):text.index("🧾")]
+        self.assertEqual(shop_block.count("BESTARI WHOLESALE"), 1)
+        # …and its spread across those lines is shown rather than hidden.
+        self.assertIn("range RM33.90–RM110.00", shop_block)
+
+    def test_it_carries_dates_prices_quantities_and_the_outlet(self):
+        text = build_item_report(self._mixed_shop_client(), "beras", today=TODAY)
+        self.assertIn("🧾 Recent purchases", text)
+        self.assertIn("RM42.00", text)
+        self.assertIn("KLANG", text)
+        self.assertIn("🏬 Outlets buying it:", text)
+        self.assertIn("SEK20", text)
+
+    def test_cheapest_is_only_claimed_within_one_comparable_cut(self):
+        text = build_item_report(self._mixed_shop_client(), "beras", today=TODAY)
+        compare = text[text.index("💡"):]
+        # Both shops sold BERAS SIAM WANGI, so that one compares.
+        self.assertIn("Beras Siam Wangi", compare)
+        self.assertIn("🥇 KEDAI RUNCIT AHMAD", compare)
+        # RM110 idly rice is never ranked against RM33.90 basmati.
+        self.assertNotIn("Beras Idly", compare)
+
+    def test_nothing_comparable_says_so_instead_of_blaming_the_data(self):
+        client = _client([
+            _row("beras", "BESTARI WHOLESALE", 39.80, 1, days_ago=4,
+                 item="BERAS REBUS SAGA 10KG"),
+            _row("beras", "JUTA RIA", 33.90, 2, days_ago=6,
+                 item="BASMATI KING JASMINE 5KG"),
+        ])
+        text = build_item_report(client, "beras", today=TODAY)
+        self.assertIn("nothing", text.lower())
+        # Both shops are still named — that is the answer to the question.
+        self.assertIn("BESTARI WHOLESALE", text)
+        self.assertIn("JUTA RIA", text)
+
+    def test_it_widens_to_a_year_rather_than_reporting_one_shop(self):
+        client = _client([
+            _row("beras", "BESTARI WHOLESALE", 39.80, 1, days_ago=4),
+            _row("beras", "JUTA RIA", 38.50, 2, days_ago=200),
+        ])
+        text = build_item_report(client, "beras", today=TODAY)
+        self.assertIn("JUTA RIA", text)
+        self.assertIn("widened to a year", text)
+
+    def test_filtered_rows_are_declared_not_silent(self):
+        client = _client([
+            _row("beras", "BESTARI WHOLESALE", 39.80, 1, days_ago=4),
+            _row("beras", "JUTA RIA", 38.50, 2, days_ago=6),
+            # An own-outlet transfer: correctly dropped, but the director
+            # must be able to see that it WAS dropped.
+            _row("beras", "RESTORAN KHULAFA", 1.70, 3, days_ago=5),
+        ])
+        text = build_item_report(client, "beras", today=TODAY)
+        self.assertNotIn("KHULAFA", text.upper())
+        self.assertIn("Left out", text)
+
+    def test_debug_shows_the_read_and_kept_counts(self):
+        text = build_item_report(self._mixed_shop_client(), "beras debug", today=TODAY)
+        self.assertIn("read 5 row(s)", text)
+
+    def test_unknown_item_still_never_guesses(self):
+        text = build_item_report(self._mixed_shop_client(), "ayamm", today=TODAY)
+        self.assertIn("Did you mean", text)
+        self.assertNotIn("BESTARI", text)
+
+    def test_nothing_bought_says_so(self):
+        self.assertIn("No supplier bought Beras",
+                      build_item_report(_client([]), "beras", today=TODAY))
+
+    def test_never_raises(self):
+        self.assertIsInstance(build_item_report(None, "beras", today=TODAY), str)
+        self.assertIsInstance(build_item_report(_client([]), None, today=TODAY), str)
+
+
 class AnswerRouting(unittest.TestCase):
     def setUp(self):
         self.client = _client([
@@ -345,11 +456,12 @@ class AnswerRouting(unittest.TestCase):
             _row("beras", "MYMOON'S KITCHEN", 3.40, 2, days_ago=5, qty=10),
         ])
 
-    def test_where_do_we_buy_it_lists_the_shops_cheapest_first(self):
+    def test_where_do_we_buy_it_lists_every_shop(self):
         text = answer_question(self.client, "beras buy from where", today=TODAY)
+        self.assertIn("🏪 Shops we buy it from", text)
         self.assertIn("BALAJI", text)
         self.assertIn("MYMOON", text)
-        self.assertLess(text.index("BALAJI"), text.index("MYMOON"))
+        self.assertIn("2 shop(s)", text)
 
     def test_malay_phrasing_reaches_the_same_answer(self):
         english = answer_question(self.client, "where we buy beras", today=TODAY)

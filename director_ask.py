@@ -21,9 +21,23 @@ nothing else:
    days"), strip the question away and resolve what is left to a canonical
    item through the same resolver ``/shop_prices`` uses.
 2. **Answer it** (``answer_question``) — route to the report that already
-   exists where there is one (``shop_price_comparison`` for "which shop",
-   ``bill_analysis`` for "which branch"), and build the two that did not
-   exist: the item's last purchases, and what it cost us over a window.
+   exists where there is one (``bill_analysis`` for "which branch"), and
+   build the three that did not: the whole picture for one item
+   (``build_item_report``), its last purchases, and what it cost us over a
+   window.
+
+Why ``build_item_report`` exists rather than reusing
+``shop_price_comparison.build_shop_price_report``: that report groups by
+``item_variant``, which is the raw receipt line with the pack size
+stripped. Every OCR spelling and brand prefix therefore becomes its own
+"cut" — ayam alone produced 41 of them ("I AYAM", "1ST AYAM", "MR CM
+AYAM", "LAI AYAM"). Capped at a few blocks, that splits one item into
+one-shop blocks, hides most of the real suppliers behind "+38 more
+type(s)", and then reports "only one supplier has priced this item" to a
+director who buys it from five. The answer to "where do we buy this" is
+one list of shops; the per-cut comparison is a second, narrower question,
+and is kept for where it is honest (a like-for-like cut two shops both
+sold).
 
 Intents, in the order they are matched (first hit wins):
 
@@ -81,6 +95,19 @@ DEFAULT_LAST_LIMIT = 5
 # stops being readable.
 MAX_SHOP_ROWS = 6
 MAX_OUTLET_ROWS = 6
+
+# "Where do we buy this" looks at a quarter by default — long enough to
+# catch a supplier used monthly, short enough that the prices still mean
+# something.
+DEFAULT_ITEM_LOOKBACK_DAYS = 90
+
+# The shop list is the answer to the question, so it is generous. The
+# purchase log underneath is a sample, not a ledger.
+MAX_SHOPS_LISTED = 12
+MAX_PURCHASE_LINES = 10
+MAX_COMPARE_GROUPS = 3
+
+_UNKNOWN = "Unknown shop"
 
 _MONTHS_EN = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -715,6 +742,259 @@ def build_spend_summary(
         return "Failed to total the purchases."
 
 
+def _shop_summaries(rows: list[dict]) -> list[dict]:
+    """One entry per shop, most recently bought first.
+
+    Deliberately NOT grouped by variant. ``item_variant`` is the raw
+    receipt line with the pack size stripped, so every OCR spelling and
+    brand prefix becomes its own "cut" — ayam alone produced 41 of them
+    ("I AYAM", "1ST AYAM", "MR CM AYAM"). Grouping the answer by that
+    splits one item into dozens of one-shop blocks, and a report capped at
+    a few blocks then hides most of the suppliers behind them. Whoever
+    sold us the item belongs in the same list.
+    """
+    by_shop: dict[str, dict] = {}
+    for row in rows:
+        key = row.get("shop_key") or row.get("shop") or _UNKNOWN
+        bucket = by_shop.setdefault(key, {
+            "shop": row.get("shop") or _UNKNOWN,
+            "times": 0,
+            "prices": [],
+            "outlets": set(),
+            "last_key": None,
+            "last_date": None,
+            "last_price": None,
+            "last_variant": "",
+        })
+        price = float(row.get("unit_price") or 0.0)
+        bucket["times"] += 1
+        bucket["prices"].append(price)
+        if row.get("outlet_code"):
+            bucket["outlets"].add(str(row["outlet_code"]))
+        sort_key = _row_sort_key(row)
+        if bucket["last_key"] is None or sort_key > bucket["last_key"]:
+            bucket["last_key"] = sort_key
+            bucket["last_date"] = row.get("receipt_date")
+            bucket["last_price"] = price
+            bucket["last_variant"] = str(row.get("variant") or "")
+    shops = list(by_shop.values())
+    shops.sort(key=lambda s: (s["last_key"] or ("", -1)), reverse=True)
+    return shops
+
+
+def _comparable_groups(rows: list[dict]) -> list[dict]:
+    """The cuts where a price comparison is actually honest.
+
+    A RM110 sack of beras idly and a RM33.90 bag of basmati are not two
+    quotes for the same thing, so "cheapest" is only ever claimed inside
+    one variant, and only when two or more shops sold it.
+    """
+    from shop_price_comparison import summarise_shops
+
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        grouped.setdefault(str(row.get("variant") or ""), []).append(row)
+
+    out = []
+    for variant, variant_rows in grouped.items():
+        shops = summarise_shops(variant_rows)
+        if len(shops) < 2:
+            continue
+        out.append({
+            "variant": variant,
+            "shops": shops,
+            "latest_date": max(r.get("receipt_date") or "" for r in variant_rows),
+        })
+    out.sort(key=lambda g: (len(g["shops"]), g["latest_date"]), reverse=True)
+    return out
+
+
+def _dropped_note(stats: dict) -> str:
+    """One line naming what never reached the answer, so a missing
+    supplier is visible instead of silent."""
+    parts = []
+    for label, key in (
+        ("internal transfer / own outlet", "own_outlet"),
+        ("non-supplier receipt", "non_supplier_receipt"),
+        ("non-shop merchant", "non_shop_merchant"),
+        ("bad date", "bad_date"),
+        ("bad price", "bad_price"),
+    ):
+        count = int(stats.get(key) or 0)
+        if key == "own_outlet":
+            count += int(stats.get("non_shop_merchant") or 0)
+        if count:
+            parts.append(f"{count} {label}")
+    if not parts:
+        return ""
+    return "⚠️ Left out: " + ", ".join(parts) + "."
+
+
+def build_item_report(
+    supabase_client,
+    query,
+    lookback_days: int | None = DEFAULT_ITEM_LOOKBACK_DAYS,
+    today: date | None = None,
+    debug: bool = False,
+) -> str:
+    """"Which shops do we buy this from, when, and for how much."
+
+    The full picture for one item in one message: every supplier that sold
+    it, the most recent purchases with date, shop, line, price, quantity
+    and the outlet that bought it, which outlets buy it at all, and — only
+    where it is honest — the cheapest shop for a like-for-like cut.
+
+    Blocking (Supabase I/O). Always returns a string; never raises.
+    """
+    try:
+        from shop_price_comparison import load_price_rows_with_stats
+
+        raw = str(query or "").strip()
+        parts = raw.split()
+        if len(parts) > 1 and parts[-1].lower() in ("debug", "why"):
+            debug = True
+            raw = " ".join(parts[:-1])
+        if not raw:
+            return HELP_TEXT
+
+        resolved = _resolve_item(raw)
+        canonical = resolved.get("canonical")
+        if not canonical:
+            return _miss_text({
+                "raw": raw, "item_text": raw,
+                "suggestions": resolved.get("suggestions") or [],
+            })
+
+        base_today = today or date.today()
+        window_days = int(lookback_days or DEFAULT_ITEM_LOOKBACK_DAYS)
+        rows, stats = load_price_rows_with_stats(
+            supabase_client, canonical, lookback_days=window_days, today=base_today
+        )
+        rows = [r for r in rows if isinstance(r, dict)]
+
+        # One shop is not an answer to "who sells it". Before saying so,
+        # look back a year — a supplier last used in March is still a
+        # supplier worth calling.
+        widened = False
+        if window_days < 365 and len({r.get("shop_key") for r in rows}) < 2:
+            wide_rows, wide_stats = load_price_rows_with_stats(
+                supabase_client, canonical, lookback_days=365, today=base_today
+            )
+            wide_rows = [r for r in wide_rows if isinstance(r, dict)]
+            if len({r.get("shop_key") for r in wide_rows}) > len(
+                {r.get("shop_key") for r in rows}
+            ):
+                rows, stats, window_days, widened = wide_rows, wide_stats, 365, True
+
+        title = _display_name(canonical)
+        if not rows:
+            out = f"No supplier bought {title} in the last {window_days} days."
+            note = _dropped_note(stats)
+            if note:
+                out += "\n" + note
+            return out
+
+        shops = _shop_summaries(rows)
+        outlets: dict[str, int] = {}
+        for row in rows:
+            if row.get("outlet_code"):
+                code = str(row["outlet_code"])
+                outlets[code] = outlets.get(code, 0) + 1
+
+        lines = [
+            f"🔎 {title} — last {window_days} days",
+            f"{len(rows)} purchase(s) · {len(shops)} shop(s)"
+            + (f" · {len(outlets)} outlet(s)" if outlets else ""),
+            "",
+            "🏪 Shops we buy it from (most recent first)",
+        ]
+        for shop in shops[:MAX_SHOPS_LISTED]:
+            prices = shop["prices"]
+            line = (
+                f"• {shop['shop']} — {_short_date(shop['last_date'])} · "
+                f"{_money(shop['last_price'])} · {shop['times']}x"
+            )
+            if len(prices) > 1 and max(prices) - min(prices) > 0.005:
+                line += f" · range {_money(min(prices))}–{_money(max(prices))}"
+            lines.append(line)
+            if shop["last_variant"]:
+                lines.append(f"   last: {shop['last_variant'].title()}")
+        if len(shops) > MAX_SHOPS_LISTED:
+            lines.append(f"… +{len(shops) - MAX_SHOPS_LISTED} more shop(s)")
+
+        recent = sorted(rows, key=_row_sort_key, reverse=True)[:MAX_PURCHASE_LINES]
+        lines.append("")
+        lines.append("🧾 Recent purchases")
+        for row in recent:
+            bits = [
+                f"• {_short_date(row.get('receipt_date'))}",
+                f"· {row.get('shop')}",
+                f"— {_money(float(row.get('unit_price') or 0.0))}",
+            ]
+            qty = row.get("qty")
+            if isinstance(qty, (int, float)) and float(qty) > 0:
+                bits.append(f"× {_qty(qty)}")
+            if row.get("outlet_code"):
+                bits.append(f"· {row['outlet_code']}")
+            lines.append(" ".join(bits))
+            variant = str(row.get("variant") or "")
+            if variant:
+                lines.append(f"   {variant.title()}")
+        if len(rows) > len(recent):
+            lines.append(f"… +{len(rows) - len(recent)} more purchase(s)")
+
+        if outlets:
+            ranked = sorted(outlets.items(), key=lambda kv: -kv[1])
+            listed = ", ".join(f"{code} ({n}x)" for code, n in ranked[:MAX_OUTLET_ROWS])
+            lines.append("")
+            lines.append(f"🏬 Outlets buying it: {listed}")
+
+        groups = _comparable_groups(rows)
+        lines.append("")
+        if groups:
+            lines.append("💡 Same type, more than one shop — cheapest first")
+            for group in groups[:MAX_COMPARE_GROUPS]:
+                lines.append("")
+                lines.append(str(group["variant"]).title())
+                for i, shop in enumerate(group["shops"][:MAX_SHOP_ROWS]):
+                    marker = "🥇" if i == 0 else "•"
+                    times = int(shop.get("sample_count") or 0)
+                    suffix = f" ({times}x)" if times > 1 else ""
+                    lines.append(
+                        f"{marker} {shop['shop']} — "
+                        f"{_money(float(shop['latest_price']))} · "
+                        f"{_short_date(shop.get('latest_date'))}{suffix}"
+                    )
+        else:
+            lines.append(
+                "💡 Every type came from one shop only, so there is nothing "
+                "like-for-like to compare — pack sizes and grades differ. The "
+                "shop list above is everyone who sold it."
+            )
+
+        if widened:
+            lines.append("")
+            lines.append(
+                f"(Fewer than two shops in the last "
+                f"{int(lookback_days or DEFAULT_ITEM_LOOKBACK_DAYS)} days — "
+                "widened to a year.)"
+            )
+        note = _dropped_note(stats)
+        if note:
+            lines.append("")
+            lines.append(note)
+        if debug:
+            lines.append("")
+            lines.append(
+                f"🔍 read {stats.get('fetched', 0)} row(s) from item_prices, "
+                f"kept {stats.get('kept', 0)}"
+            )
+        return "\n".join(lines)
+    except Exception:
+        logger.exception("build_item_report failed (%r)", query)
+        return "Failed to build the item report."
+
+
 def build_item_index() -> str:
     """Every item the director can ask about, so "what can I ask" has a
     real answer instead of a guess. Never raises."""
@@ -837,11 +1117,14 @@ def answer_question(supabase_client, text: Any, today: date | None = None) -> st
             )
 
         # INTENT_SHOP and the bare-item fallback: "where do we buy this,
-        # and for how much" is the question that gets asked most.
-        from shop_price_comparison import build_shop_price_report
-
-        return build_shop_price_report(
-            supabase_client, item_text, today=base_today
+        # and for how much" is the question that gets asked most, and it
+        # wants every shop in one list — not one block per OCR spelling.
+        return build_item_report(
+            supabase_client, item_text, today=base_today,
+            lookback_days=(
+                _lookback_for(window, base_today) if window.get("explicit")
+                else DEFAULT_ITEM_LOOKBACK_DAYS
+            ),
         )
     except Exception:
         logger.exception("answer_question failed (%r)", text)
