@@ -61,7 +61,7 @@ While this flag is **off** (the default), every manager message in the table
 above is sent to the director instead, prefixed `[TEST — would go to … manager]`.
 With 5+ shops that is dozens of messages a day meant for someone else.
 
-Once each outlet has a registered manager (`/register_manager`), set
+Once each outlet has a registered manager (`/register`), set
 `MANAGER_DELIVERY_ENABLED=true` on Render. Those messages then go to the
 managers, and the director only keeps the HQ summaries above. Any outlet
 without a manager still falls back to the director with a
