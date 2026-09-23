@@ -809,25 +809,54 @@ def _comparable_groups(rows: list[dict]) -> list[dict]:
     return out
 
 
+# The drop reasons, in the order a director cares about them, with the
+# wording they read on the receipt rather than the column name.
+_DROP_REASONS = (
+    ("own_outlet", "internal transfer / own outlet"),
+    ("non_shop_merchant", "merchant not categorised as a shop"),
+    ("non_supplier_receipt", "receipt not a supplier purchase"),
+    ("bad_date", "bad date (missing or in the future)"),
+    ("bad_price", "bad price (zero or negative)"),
+    ("no_item", "line not matched to an item"),
+)
+
+
 def _dropped_note(stats: dict) -> str:
     """One line naming what never reached the answer, so a missing
     supplier is visible instead of silent."""
-    parts = []
-    for label, key in (
-        ("internal transfer / own outlet", "own_outlet"),
-        ("non-supplier receipt", "non_supplier_receipt"),
-        ("non-shop merchant", "non_shop_merchant"),
-        ("bad date", "bad_date"),
-        ("bad price", "bad_price"),
-    ):
-        count = int(stats.get(key) or 0)
-        if key == "own_outlet":
-            count += int(stats.get("non_shop_merchant") or 0)
-        if count:
-            parts.append(f"{count} {label}")
+    parts = [
+        f"{int(stats.get(key) or 0)} {label}"
+        for key, label in _DROP_REASONS
+        if int(stats.get(key) or 0)
+    ]
     if not parts:
         return ""
     return "⚠️ Left out: " + ", ".join(parts) + "."
+
+
+def _dropped_detail(stats: dict) -> list[str]:
+    """Which SHOP each dropped row belonged to.
+
+    "3 merchant not categorised as a shop" cannot tell the director which
+    of his suppliers went missing. The names can: a mini market filed
+    under the wrong canonical category shows up here by name, which is
+    the difference between "the data is wrong somewhere" and a one-line
+    fix with /merchant_show.
+    """
+    names = stats.get("dropped_names")
+    if not isinstance(names, dict) or not names:
+        return []
+    lines = ["", "🔍 Which shop each dropped row belonged to"]
+    for key, label in _DROP_REASONS:
+        bucket = names.get(key)
+        if not bucket:
+            continue
+        ranked = sorted(bucket.items(), key=lambda kv: (-kv[1], kv[0]))
+        listed = ", ".join(
+            f"{shop} ({n}x)" if n > 1 else str(shop) for shop, n in ranked
+        )
+        lines.append(f"• {label}: {listed}")
+    return lines if len(lines) > 2 else []
 
 
 def build_item_report(
@@ -989,6 +1018,7 @@ def build_item_report(
                 f"🔍 read {stats.get('fetched', 0)} row(s) from item_prices, "
                 f"kept {stats.get('kept', 0)}"
             )
+            lines.extend(_dropped_detail(stats))
         return "\n".join(lines)
     except Exception:
         logger.exception("build_item_report failed (%r)", query)

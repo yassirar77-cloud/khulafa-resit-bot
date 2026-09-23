@@ -98,6 +98,27 @@ Rows the pipeline drops (own-outlet transfers, non-supplier receipts, bad dates
 and prices) are now counted in a `⚠️ Left out:` line, so a supplier that really
 is missing is visible rather than silent.
 
+A count alone still cannot say *which* supplier vanished, so `debug` adds the
+names. `load_price_rows_with_stats` records the shop behind every dropped row
+(capped at eight distinct names per reason), and the report prints them:
+
+```
+⚠️ Left out: 1 internal transfer / own outlet, 1 merchant not categorised as a
+shop, 1 receipt not a supplier purchase, 1 bad price (zero or negative).
+
+🔍 read 6 row(s) from item_prices, kept 2
+
+🔍 Which shop each dropped row belonged to
+• internal transfer / own outlet: RESTORAN KHULAFA
+• merchant not categorised as a shop: KEDAI RUNCIT AHMAD
+• receipt not a supplier purchase: TNB
+• bad price (zero or negative): SOME SHOP
+```
+
+KEDAI RUNCIT AHMAD is a real mini market filed under `internal_transfer` by
+mistake. Seeing the name turns "the data is wrong somewhere" into a one-line
+fix with `/merchant_show`. The names appear only under `debug`.
+
 `/shop_prices <item>` serves this view by default; `/shop_prices <item> cuts`
 still gives the per-cut comparison, and `debug` still breaks down the filtering.
 

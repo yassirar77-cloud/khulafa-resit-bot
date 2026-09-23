@@ -435,6 +435,53 @@ class ItemReport(unittest.TestCase):
         text = build_item_report(self._mixed_shop_client(), "beras debug", today=TODAY)
         self.assertIn("read 5 row(s)", text)
 
+    def test_debug_names_the_shop_behind_every_dropped_row(self):
+        # A count ("1 merchant not categorised as a shop") cannot tell the
+        # director WHICH supplier went missing. The name can — and here it
+        # is a real mini market filed under internal_transfer by mistake,
+        # which is a one-line fix once it is visible.
+        client = FakeSupabase()
+        rows = [
+            ("BESTARI WHOLESALE", 39.80, 1, None, None),
+            ("JUTA RIA", 38.50, 2, None, None),
+            ("RESTORAN KHULAFA", 1.70, 3, None, None),
+            ("KEDAI RUNCIT AHMAD", 41.00, 4, None, "internal_transfer"),
+            ("TNB", 120.00, 5, "UTILITY", None),
+        ]
+        for shop, price, rid, receipt_type, category in rows:
+            client.table("item_prices").insert(
+                _row("beras", shop, price, rid, days_ago=4)
+            ).execute()
+            canonical_id = None
+            if category:
+                canonical_id = rid * 100
+                client.table("merchant_canonical").insert({
+                    "id": canonical_id, "display_name": shop, "category": category,
+                }).execute()
+            if receipt_type or category:
+                client.table("receipts").insert({
+                    "id": rid, "receipt_type": receipt_type or "UNKNOWN",
+                    "merchant_canonical_id": canonical_id,
+                }).execute()
+
+        text = build_item_report(client, "beras debug", today=TODAY)
+        detail = text[text.index("Which shop each dropped row"):]
+        self.assertIn("RESTORAN KHULAFA", detail)
+        self.assertIn("KEDAI RUNCIT AHMAD", detail)
+        self.assertIn("TNB", detail)
+        # Shops that were KEPT are never listed as dropped.
+        self.assertNotIn("BESTARI WHOLESALE", detail)
+        self.assertNotIn("JUTA RIA", detail)
+
+    def test_the_names_only_appear_under_debug(self):
+        client = _client([
+            _row("beras", "BESTARI WHOLESALE", 39.80, 1, days_ago=4),
+            _row("beras", "RESTORAN KHULAFA", 1.70, 2, days_ago=5),
+        ])
+        plain = build_item_report(client, "beras", today=TODAY)
+        self.assertIn("Left out", plain)
+        self.assertNotIn("Which shop each dropped row", plain)
+
     def test_unknown_item_still_never_guesses(self):
         text = build_item_report(self._mixed_shop_client(), "ayamm", today=TODAY)
         self.assertIn("Did you mean", text)
