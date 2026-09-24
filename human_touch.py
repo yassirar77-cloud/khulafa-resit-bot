@@ -29,6 +29,8 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timezone
 
+import cashier_names
+
 logger = logging.getLogger(__name__)
 
 # Spoken-register Tamil, one thought per line, no literary words.
@@ -45,6 +47,14 @@ _ACKS = [
     "சரி {name}, note பண்ணிட்டேன் ✅ Boss-க்கும் அனுப்பிட்டேன். நன்றி!",
     "Ok {name} 👍 பதிவு ஆச்சு ✅ Boss பாப்பாரு. நன்றி!",
     "நல்லது {name} 🙏 எழுதி வெச்சுட்டேன் ✅ Boss-க்கு காட்டிட்டேன்.",
+]
+
+# Same acks without a name, for outlet groups: the cashier's name is already
+# the first line of every group message.
+_GROUP_ACKS = [
+    "Note பண்ணிட்டேன் ✅ Boss-க்கும் அனுப்பிட்டேன். நன்றி!",
+    "பதிவு ஆச்சு 👍 Boss பாப்பாரு. நன்றி!",
+    "எழுதி வெச்சுட்டேன் ✅ Boss-க்கு காட்டிட்டேன் 🙏",
 ]
 
 _DEFAULT_NAME = "boss"
@@ -69,6 +79,10 @@ def _clean_name(manager_name) -> str:
 
 
 def greeting(manager_name, chat_id, on_date: date | None = None) -> str:
+    # Outlet groups already open with the cashier on shift ("Rahim,") —
+    # added by the bot client on send — so no second, registry-name greeting.
+    if cashier_names.is_outlet_group(chat_id):
+        return ""
     try:
         base = on_date or date.today()
         return _pick(_GREETINGS, chat_id, base).format(
@@ -97,6 +111,8 @@ def ack(manager_name, chat_id, on_date: date | None = None) -> str:
     constant on any failure — the ack must always exist."""
     try:
         base = on_date or date.today()
+        if cashier_names.is_outlet_group(chat_id):
+            return _pick(_GROUP_ACKS, chat_id, base)
         return _pick(_ACKS, chat_id, base).format(name=_clean_name(manager_name))
     except Exception:
         logger.exception("human touch: ack failed")

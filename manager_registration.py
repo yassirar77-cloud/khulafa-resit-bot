@@ -215,19 +215,37 @@ def register_manager(supabase, code, manager_name, chat_id) -> dict:
     return {"ok": True, "outlet_code": outlet_code, "outlet_display": display}
 
 
+# Internal outlet codes that name the same shop as a registry code. Managers
+# are registered under registry codes (outlet_canonical), but item_prices /
+# the order drafts say "D" for Damansara and the kitchen log resolves the
+# "Kl Sg Besi" group to KLRAZAK (config/kitchen_groups.py) — without these,
+# those lookups miss the registered manager and fall back to the director.
+CODE_ALIASES = {"D": "DAMANSARA", "KLRAZAK": "SBESI"}
+
+
 def get_manager(supabase, outlet_code) -> dict | None:
-    resp = (
-        supabase.table(MANAGERS_TABLE)
-        .select("*")
-        .eq("outlet_code", outlet_code)
-        .limit(1)
-        .execute()
-    )
-    rows = resp.data or []
-    return rows[0] if rows else None
+    for code in (outlet_code, CODE_ALIASES.get(str(outlet_code or "").upper())):
+        if not code:
+            continue
+        resp = (
+            supabase.table(MANAGERS_TABLE)
+            .select("*")
+            .eq("outlet_code", code)
+            .limit(1)
+            .execute()
+        )
+        rows = resp.data or []
+        if rows:
+            return rows[0]
+    return None
 
 
 def get_all_managers(supabase) -> dict:
-    """``{outlet_code: manager_row}`` for every registered outlet."""
+    """``{outlet_code: manager_row}`` for every registered outlet, plus the
+    ``CODE_ALIASES`` keys pointing at the same rows."""
     resp = supabase.table(MANAGERS_TABLE).select("*").execute()
-    return {m.get("outlet_code"): m for m in (resp.data or [])}
+    managers = {m.get("outlet_code"): m for m in (resp.data or [])}
+    for alias, code in CODE_ALIASES.items():
+        if code in managers and alias not in managers:
+            managers[alias] = managers[code]
+    return managers

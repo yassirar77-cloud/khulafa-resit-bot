@@ -185,5 +185,36 @@ class Registration(unittest.TestCase):
         self.assertFalse(mr.register_manager(self.sb, None, "X", 1)["ok"])
 
 
+class CodeAliasTests(unittest.TestCase):
+    """Order drafts say "D" and the kitchen log says "KLRAZAK" for outlets
+    registered as DAMANSARA and SBESI — both must find the registered chat."""
+
+    def setUp(self):
+        self.sb = FakeSupabase()
+        self.sb.table(mr.MANAGERS_TABLE).insert([
+            {"outlet_code": "DAMANSARA", "manager_name": "Yusof", "chat_id": -5175147576},
+            {"outlet_code": "SBESI", "manager_name": None, "chat_id": -5163000846},
+            {"outlet_code": "SEK20", "manager_name": "Syed", "chat_id": -5043287182},
+        ]).execute()
+
+    def test_get_manager_follows_alias(self):
+        self.assertEqual(mr.get_manager(self.sb, "D")["chat_id"], -5175147576)
+        self.assertEqual(mr.get_manager(self.sb, "KLRAZAK")["chat_id"], -5163000846)
+        self.assertEqual(mr.get_manager(self.sb, "SEK20")["chat_id"], -5043287182)
+        self.assertIsNone(mr.get_manager(self.sb, "VISTA"))
+
+    def test_get_all_managers_adds_alias_keys(self):
+        managers = mr.get_all_managers(self.sb)
+        self.assertIs(managers["D"], managers["DAMANSARA"])
+        self.assertIs(managers["KLRAZAK"], managers["SBESI"])
+        # Real codes come first, so a chat-id scan finds the registry code.
+        self.assertEqual(list(managers)[:3], ["DAMANSARA", "SBESI", "SEK20"])
+
+    def test_alias_unused_when_target_unregistered(self):
+        sb = FakeSupabase()
+        self.assertEqual(mr.get_all_managers(sb), {})
+        self.assertIsNone(mr.get_manager(sb, "D"))
+
+
 if __name__ == "__main__":
     unittest.main()

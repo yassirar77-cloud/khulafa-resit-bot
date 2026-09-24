@@ -98,12 +98,15 @@ from backfill_items import (
 )
 import analytics
 import bill_analysis
+import cashier_names
 import digest
 import director_ask
 import director_feed
+import group_reports
 import food_cost_analytics
 import kitchen_usage
 import manager_registration
+from outlet_group_bot import OutletGroupBot
 import key_stock_daily
 import item_sales_watch
 import demand_forecast
@@ -1917,13 +1920,24 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     )
                     import weekly_manager_reports as wmr
 
-                    outlet_code = outlet_from_chat_title(chat_title)
+                    # A bill uploaded in a registered outlet group gets its
+                    # question in that same group — the group IS the
+                    # manager. The chat-title rules are only the fallback
+                    # (they send Klang's title to SEK6 and miss Signature,
+                    # SEK 15 and Kl Sg Besi entirely).
+                    outlet_code = cashier_names.outlet_for_chat(message.chat_id)
                     if outlet_code:
-                        mgr = await asyncio.to_thread(
-                            manager_registration.get_manager,
-                            supabase,
-                            outlet_code,
-                        )
+                        mgr = {"chat_id": message.chat_id, "manager_name": None}
+                    else:
+                        outlet_code = outlet_from_chat_title(chat_title)
+                        mgr = None
+                    if outlet_code:
+                        if mgr is None:
+                            mgr = await asyncio.to_thread(
+                                manager_registration.get_manager,
+                                supabase,
+                                outlet_code,
+                            )
                         decision = wmr.route_message(
                             wmr.delivery_enabled(),
                             outlet_display_name(outlet_code),
@@ -2156,6 +2170,8 @@ HELP_TEXT = (
     "\n"
     "Questions:\n"
     "/questions_now — which manager questions are still unanswered\n"
+    "/cashier — cashier on shift per outlet group; /cashier SEK20 night Ismath to change\n"
+    "/ping_managers — test message to every outlet group (director only)\n"
     "/form_chase_now — remind every group whose kitchen form is still "
     "not keyed in\n"
     "/scoreboard_now — 7-day question response scoreboard per chat\n"
@@ -4876,6 +4892,10 @@ async def post_weekly_manager_reports(application: Application, *, notify_chat_i
 
     sent = 0
     for msg in bundle["messages"]:
+        # Food-cost % is a money report: director only, never a staff group
+        # (the HQ summary below carries every outlet's number).
+        if group_reports.blocked(group_reports.FOOD_COST, msg["target"], ALERT_CHAT_ID):
+            continue
         try:
             await application.bot.send_message(chat_id=msg["target"], text=msg["text"])
             sent += 1
@@ -5141,6 +5161,10 @@ async def post_bill_analysis(application: Application, *,
             route.get("manager_chat_id"),
             ALERT_CHAT_ID,
         )
+        if group_reports.blocked(
+            group_reports.BILL_ANALYSIS, decision.target_chat_id, ALERT_CHAT_ID
+        ):
+            continue
         text = human_touch.personalise(
             supervisor.with_reply_footer(text),
             route.get("manager_name"),
@@ -5319,6 +5343,96 @@ async def form_chase_now_command(update: Update,
     await kitchen_usage.post_form_reminders(context.application)
 
 
+async def cashier_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Director-only: show or change the cashier on shift per outlet group.
+
+    ``/cashier`` lists every group; ``/cashier SEK20 night Ismath`` saves a
+    name (several words are fine: ``/cashier SEK6 night Mahadir / Pandi``)."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    await asyncio.to_thread(cashier_names.refresh)
+    args = context.args or []
+    if not args:
+        await message.reply_text(cashier_names.format_roster())
+        return
+    if len(args) < 3:
+        await message.reply_text(
+            "Usage: /cashier <CODE> <morning|night> <name>\n"
+            "e.g. /cashier SEK20 night Ismath"
+        )
+        return
+    code = args[0].strip().upper()
+    known = set(cashier_names.group_chats().values())
+    if code not in known:
+        await message.reply_text(
+            f"Unknown outlet {code}. Registered groups: "
+            + (", ".join(sorted(known)) or "none")
+        )
+        return
+    result = await asyncio.to_thread(
+        cashier_names.set_name,
+        supabase, code, args[1], " ".join(args[2:]), _command_owner_id(update),
+    )
+    if not result.get("ok"):
+        await message.reply_text(f"⚠️ {result.get('error')}")
+        return
+    logger.info(
+        "cashier: %s %s -> %r (by %s)",
+        result["outlet_code"], result["shift"], result["name"],
+        _command_owner_id(update),
+    )
+    await message.reply_text(
+        f"✅ {result['outlet_code']} {result['shift']}: {result['name']}"
+    )
+
+
+async def ping_managers_command(update: Update,
+                                context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Director-only: one test message to every registered outlet chat,
+    addressed to the cashier on shift, each delivery logged for checking."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    await asyncio.to_thread(cashier_names.refresh)
+    try:
+        rows = await asyncio.to_thread(
+            lambda: supabase.table(manager_registration.MANAGERS_TABLE)
+            .select("*").execute().data or []
+        )
+    except Exception:
+        logger.exception("ping_managers: could not read outlet_managers")
+        await message.reply_text("⚠️ Could not read outlet_managers — see logs.")
+        return
+    text = cashier_names.ping_text()
+    shift, _start = cashier_names.shift_at()
+    results = []
+    for row in sorted(rows, key=lambda r: str(r.get("outlet_code") or "")):
+        code = row.get("outlet_code")
+        chat_id = row.get("chat_id")
+        name = cashier_names.name_on_shift(chat_id) or row.get("manager_name")
+        try:
+            sent = await context.bot.send_message(chat_id=chat_id, text=text)
+            logger.info(
+                "ping_managers: outlet=%s chat=%s shift=%s name=%s delivered "
+                "message_id=%s", code, chat_id, shift, name, sent.message_id,
+            )
+            results.append(f"✅ {code} → {name}")
+        except TelegramError as e:
+            new_id = getattr(e, "new_chat_id", None)
+            logger.warning(
+                "ping_managers: outlet=%s chat=%s shift=%s FAILED %s: %s%s",
+                code, chat_id, shift, type(e).__name__, e,
+                f" (new chat id {new_id})" if new_id else "",
+            )
+            detail = f"group moved, new chat id {new_id}" if new_id else str(e)
+            results.append(f"❌ {code} → {type(e).__name__}: {detail}")
+    await message.reply_text(
+        f"🔔 Test sent to {len(rows)} outlet chat(s), shift: {shift}\n\n"
+        + ("\n".join(results) or "No outlet_managers rows.")
+    )
+
+
 async def questions_now_command(update: Update,
                                 context: ContextTypes.DEFAULT_TYPE) -> None:
     """Owner-only: show the unanswered-question overview on demand (does NOT
@@ -5368,6 +5482,8 @@ async def post_weekly_praise(application: Application, *,
     for stat in stats:
         text = human_touch.praise_message(stat)
         if not text:
+            continue
+        if group_reports.blocked(group_reports.PRAISE, stat["chat_id"], ALERT_CHAT_ID):
             continue
         try:
             await application.bot.send_message(
@@ -5851,6 +5967,10 @@ async def post_overbuy_checks(application: Application, *,
             route.get("manager_chat_id"),
             ALERT_CHAT_ID,
         )
+        if group_reports.blocked(
+            group_reports.OVERBUY, decision.target_chat_id, ALERT_CHAT_ID
+        ):
+            continue
         text = human_touch.personalise(
             supervisor.with_reply_footer(text),
             route.get("manager_name"),
@@ -6275,9 +6395,13 @@ async def run_bot() -> None:
     # handler (a multi-second OCR on an uploaded receipt) doesn't block other
     # updates. Without it PTB handles updates sequentially, so kitchen numpad
     # taps would queue behind an in-flight OCR and feel laggy.
+    # OutletGroupBot: every message to an outlet group opens with the name of
+    # the cashier on shift (cashier_names). Load the group/name cache first so
+    # the very first sends are already addressed.
+    cashier_names.configure(supabase)
     app = (
         Application.builder()
-        .token(TELEGRAM_BOT_TOKEN)
+        .bot(OutletGroupBot(token=TELEGRAM_BOT_TOKEN))
         .concurrent_updates(True)
         .build()
     )
@@ -6358,6 +6482,8 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("cook_plan_now", cook_plan_now_command))
     app.add_handler(CommandHandler("forecast_accuracy", forecast_accuracy_command))
     app.add_handler(CommandHandler("questions_now", questions_now_command))
+    app.add_handler(CommandHandler("cashier", cashier_command))
+    app.add_handler(CommandHandler("ping_managers", ping_managers_command))
     app.add_handler(CommandHandler("form_chase_now", form_chase_now_command))
     app.add_handler(CommandHandler("scoreboard_now", scoreboard_now_command))
     app.add_handler(CommandHandler("order_drafts_now", order_drafts_now_command))
