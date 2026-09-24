@@ -108,6 +108,8 @@ import food_cost_analytics
 import kitchen_usage
 import manager_registration
 import staff_chat
+import staff_ai
+import staff_live
 from outlet_group_bot import OutletGroupBot
 import key_stock_daily
 import item_sales_watch
@@ -2182,6 +2184,7 @@ HELP_TEXT = (
     "/ping_managers — test message to every outlet group (director only)\n"
     "/lang SEK20 morning tamil — language a cashier reads\n"
     "/staff_preview <check-in> — preview the natural check-in now\n"
+    "/staff_samples [n] — n Tamil check-ins with back-translations to review\n"
     "/form_chase_now — remind every group whose kitchen form is still "
     "not keyed in\n"
     "/scoreboard_now — 7-day question response scoreboard per chat\n"
@@ -4999,6 +5002,9 @@ async def post_missing_bill_checks(application: Application, *,
         # the rest of the quiet suppliers still appear in the owner summary.
         if not entry.get("ask_today"):
             continue
+        # A live outlet gets the natural 21:05 bills check-in instead.
+        if _staff_live_now(cashier_names.outlet_for_chat(entry.get("chat_id"))):
+            continue
         text = missing_bills.format_missing_bill_message(entry)
         if not text:
             continue
@@ -5603,11 +5609,14 @@ def _build_staff_preview(slot, today):
     vocabulary = staff_chat.item_vocabulary()
     names = cashier_names.all_names()
     recent = _recent_staff_texts(slot, today)
+    earlier = _answers_today(today) if staff_live.live_outlets() else {}
     rows, logs = [], []
     for chat_id, code in groups:
         cashier = cashier_names.name_for(code, shift)
         language = cashier_names.language_for(code, shift)
-        row = {"outlet_code": code, "cashier": cashier, "language": language}
+        live = staff_live.is_live(code)
+        row = {"outlet_code": code, "cashier": cashier, "language": language,
+               "chat_id": chat_id, "live": live, "slot": slot}
         try:
             facts = _staff_slot_facts(slot, code, chat_id, today, bills_by_chat)
         except Exception:
@@ -5619,6 +5628,9 @@ def _build_staff_preview(slot, today):
             row["skip"] = _NO_DATA.get(slot, "nothing to ask")
             rows.append(row)
             continue
+        if live and earlier.get(code):
+            # What they told us earlier today, so the question can refer to it.
+            facts = dict(facts, earlier_today=earlier[code][-3:])
         own = {p.strip() for p in cashier.split("/")}
         result = staff_chat.build_message(
             slot, language, facts,
@@ -5627,16 +5639,34 @@ def _build_staff_preview(slot, today):
             avoid=recent.get(code, []),
         )
         row["result"] = result
+        row["facts"] = facts
         rows.append(row)
         logs.append(staff_chat.log_row(
-            slot, code, chat_id, cashier, language, facts, result, staff_chat.PREVIEW
+            slot, code, chat_id, cashier, language, facts, result,
+            "natural" if live else staff_chat.PREVIEW,
         ))
-    if logs:
-        try:
-            supabase.table(staff_chat.LOG_TABLE).insert(logs).execute()
-        except Exception:
-            logger.exception("staff preview: log insert failed")
+    _insert_staff_logs(logs, "staff preview")
     return rows
+
+
+_MEANING_COLUMNS = ("back_translation", "meaning_ok")
+
+
+def _insert_staff_logs(logs: list[dict], tag: str) -> None:
+    """Write staff_chat_log rows. Until migrations/0046 adds the meaning-check
+    columns, retry without them so the audit trail is never lost."""
+    if not logs:
+        return
+    try:
+        supabase.table(staff_chat.LOG_TABLE).insert(logs).execute()
+        return
+    except Exception:
+        logger.warning("%s: log insert failed; retrying without meaning columns", tag)
+    try:
+        trimmed = [{k: v for k, v in r.items() if k not in _MEANING_COLUMNS} for r in logs]
+        supabase.table(staff_chat.LOG_TABLE).insert(trimmed).execute()
+    except Exception:
+        logger.exception("%s: log insert failed", tag)
 
 
 async def run_staff_preview(application: Application, slot: str, *,
@@ -5661,8 +5691,266 @@ async def run_staff_preview(application: Application, slot: str, *,
         "staff preview %s: %d outlet(s), %d ai, %d template, %d skipped",
         slot, len(rows), ai, fallback, len(rows) - ai - fallback,
     )
+    for row in rows:
+        if row.get("live") and row.get("result") and not force:
+            try:
+                row["live_outcome"] = await _live_send_or_queue(application, row)
+            except Exception:
+                logger.exception("staff live: send failed (%s %s)", slot, row["outlet_code"])
+                row["live_outcome"] = "send failed"
+    preview_rows = [r for r in rows if not (r.get("live") and not force)]
+    if preview_rows:
+        await _send_chunked_to(
+            application, ALERT_CHAT_ID, staff_chat.format_preview(slot, preview_rows)
+        )
+
+
+# === Live staff chat ========================================================
+# Outlets in STAFF_CHAT_LIVE_OUTLETS get the check-ins in their group, one
+# question at a time (staff_live). Everything else stays in preview.
+
+def _staff_live_now(outlet_code) -> bool:
+    """True when this outlet's natural check-ins are live (and so replace
+    the classic cook plan and missing-bill question)."""
+    return staff_chat.style() != staff_chat.CLASSIC and staff_live.is_live(outlet_code)
+
+
+def _thread_select(**eq):
+    q = supabase.table(staff_live.TABLE).select("*")
+    for k, v in eq.items():
+        q = q.eq(k, v)
+    return q
+
+
+def _active_thread(chat_id):
+    rows = (
+        _thread_select(chat_id=chat_id)
+        .in_("status", list(staff_live.ACTIVE))
+        .order("asked_at", desc=True).limit(1).execute().data or []
+    )
+    return rows[0] if rows else None
+
+
+def _thread_update(thread_id, fields: dict) -> None:
+    supabase.table(staff_live.TABLE).update(fields).eq("id", thread_id).execute()
+
+
+def _answers_today(today) -> dict:
+    """``{outlet_code: [English summaries of today's answers]}``."""
+    since = datetime.combine(today, datetime.min.time(), MALAYSIA_TZ).isoformat()
+    try:
+        rows = (
+            _thread_select(status=staff_live.ANSWERED)
+            .gte("answered_at", since).order("answered_at").execute().data or []
+        )
+    except Exception:
+        logger.exception("staff live: answers lookup failed")
+        return {}
+    out: dict = {}
+    for r in rows:
+        if r.get("reply_en"):
+            out.setdefault(r["outlet_code"], []).append(
+                f"{r.get('slot')}: {r['reply_en']}"
+            )
+    return out
+
+
+async def _live_send_or_queue(application, row) -> str:
+    """Send a live check-in, or queue it behind the group's open question."""
+    result, facts = row["result"], row.get("facts") or {}
+    now = datetime.now(MALAYSIA_TZ)
+    question_en = result.get("english") or staff_chat.render_template(
+        row["slot"], "english", facts
+    )
+    common = dict(
+        outlet_code=row["outlet_code"], chat_id=row["chat_id"], slot=row["slot"],
+        text=result["text"], question_en=question_en, facts=facts,
+        language=row["language"], cashier=row["cashier"], now=now,
+    )
+    active = await asyncio.to_thread(_active_thread, row["chat_id"])
+    if active:
+        await asyncio.to_thread(
+            lambda: supabase.table(staff_live.TABLE).insert(
+                staff_live.thread_row(status=staff_live.QUEUED, **common)
+            ).execute()
+        )
+        return "queued"
+    sent = await application.bot.send_message(chat_id=row["chat_id"], text=result["text"])
+    await asyncio.to_thread(
+        lambda: supabase.table(staff_live.TABLE).insert(
+            staff_live.thread_row(status=staff_live.OPEN, message_id=sent.message_id, **common)
+        ).execute()
+    )
+    return "sent"
+
+
+async def _release(application, thread) -> None:
+    sent = await application.bot.send_message(
+        chat_id=thread["chat_id"], text=thread["question_text"]
+    )
+    await asyncio.to_thread(_thread_update, thread["id"], {
+        "status": staff_live.OPEN,
+        "asked_at": datetime.now(MALAYSIA_TZ).isoformat(),
+        "message_id": sent.message_id,
+    })
+
+
+async def staff_live_tick(application: Application) -> None:
+    """Every 10 min: 1-hour reminders, 2-hour no-reply, drop stale queued
+    questions, release the next queued question in a quiet group."""
+    if staff_chat.style() == staff_chat.CLASSIC or not staff_live.live_outlets():
+        return
+    try:
+        threads = await asyncio.to_thread(
+            lambda: supabase.table(staff_live.TABLE).select("*")
+            .in_("status", [staff_live.QUEUED, *staff_live.ACTIVE])
+            .execute().data or []
+        )
+    except Exception:
+        logger.exception("staff live tick: thread read failed")
+        return
+    now = datetime.now(MALAYSIA_TZ)
+    live = staff_live.live_outlets()
+    for t in threads:
+        if t.get("outlet_code") not in live and t.get("status") == staff_live.QUEUED:
+            await asyncio.to_thread(_thread_update, t["id"], {"status": staff_live.DROPPED})
+    threads = [t for t in threads if t.get("outlet_code") in live]
+    for action, t in staff_live.plan_tick(threads, now):
+        try:
+            if action == "remind":
+                await application.bot.send_message(
+                    chat_id=t["chat_id"], text=staff_live.reminder_text(t.get("language")),
+                    reply_to_message_id=t.get("message_id"),
+                    allow_sending_without_reply=True,
+                )
+                await asyncio.to_thread(_thread_update, t["id"], {
+                    "status": staff_live.REMINDED, "reminded_at": now.isoformat()})
+            elif action == "expire":
+                await asyncio.to_thread(_thread_update, t["id"], {"status": staff_live.NO_REPLY})
+            elif action == "drop":
+                await asyncio.to_thread(_thread_update, t["id"], {"status": staff_live.DROPPED})
+            elif action == "release":
+                await _release(application, t)
+            logger.info("staff live: %s %s %s", action, t.get("outlet_code"), t.get("slot"))
+        except Exception:
+            logger.exception("staff live tick: %s failed (thread %s)", action, t.get("id"))
+
+
+async def handle_staff_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A staff message in a LIVE outlet group while a check-in is open:
+    read it, save the answer (or ask once more), then release the next
+    queued question. Runs alongside the other handlers (group 1)."""
+    message = update.effective_message
+    if not message or not message.text or staff_chat.style() == staff_chat.CLASSIC:
+        return
+    if message.from_user and message.from_user.is_bot:
+        return
+    code = cashier_names.outlet_for_chat(message.chat_id)
+    if not code or not staff_live.is_live(code):
+        return
+    thread = await asyncio.to_thread(_active_thread, message.chat_id)
+    if not thread:
+        return
+    reply_to = message.reply_to_message
+    is_reply = bool(reply_to and reply_to.message_id == thread.get("message_id"))
+    parsed = await asyncio.to_thread(
+        staff_live.parse_reply, thread.get("question_en"), thread.get("question_text"),
+        message.text, staff_ai.complete_json,
+    )
+    action = staff_live.decide_reply(thread, parsed, is_reply_to_question=is_reply)
+    now = datetime.now(MALAYSIA_TZ)
+    if action == "clarify":
+        await message.reply_text(staff_live.clarify_text(thread.get("language")))
+        await asyncio.to_thread(_thread_update, thread["id"], {"clarify_sent_at": now.isoformat()})
+        return
+    if action != "answer":
+        return
+    await asyncio.to_thread(_thread_update, thread["id"], {
+        "status": staff_live.ANSWERED,
+        "answered_at": now.isoformat(),
+        "reply_text": message.text,
+        "reply_en": (parsed or {}).get("summary_en") or None,
+        "reply_status": (parsed or {}).get("status") or "other",
+    })
+    logger.info("staff live: answered %s %s (%s)", code, thread.get("slot"),
+                (parsed or {}).get("status"))
+    # One question at a time: the group's next queued check-in goes now.
+    await staff_live_tick(context.application)
+
+
+async def post_staff_morning_summary(application: Application) -> None:
+    """08:30: the director's daily replies line per live outlet, what went
+    unanswered, and the problems staff reported — last 24 hours."""
+    if staff_chat.style() == staff_chat.CLASSIC or not staff_live.live_outlets():
+        return
+    since = (datetime.now(MALAYSIA_TZ) - timedelta(hours=24)).isoformat()
+    try:
+        threads = await asyncio.to_thread(
+            lambda: supabase.table(staff_live.TABLE).select("*")
+            .gte("created_at", since).execute().data or []
+        )
+    except Exception:
+        logger.exception("staff morning summary: read failed")
+        return
+    text = staff_live.format_morning_summary(threads)
+    if text:
+        await _send_chunked_to(application, ALERT_CHAT_ID, text)
+
+
+def _build_tamil_samples(n, today):
+    """``n`` Tamil check-ins across slots and outlets, real facts, full
+    checks — for the director to review. Logged with mode 'sample'."""
+    cashier_names.refresh()
+    groups = sorted(cashier_names.group_chats().items(), key=lambda kv: kv[1])
+    slots = list(staff_chat.SLOTS)
+    vocabulary = staff_chat.item_vocabulary()
+    names = cashier_names.all_names()
+    bills_by_chat: dict = {}
+    for entry in _gather_missing_bills(today=today)["entries"]:
+        bills_by_chat.setdefault(entry["chat_id"], []).append(entry)
+    rows, logs, tries = [], [], 0
+    while len(rows) < n and tries < n * 4 and groups:
+        slot = slots[tries % len(slots)]
+        chat_id, code = groups[(tries // len(slots) + tries) % len(groups)]
+        tries += 1
+        try:
+            facts = _staff_slot_facts(slot, code, chat_id, today, bills_by_chat)
+        except Exception:
+            logger.exception("staff samples: facts failed (%s %s)", slot, code)
+            continue
+        if facts is None:
+            continue
+        cashier = cashier_names.name_for(code, staff_chat.SLOTS[slot][0])
+        own = {p.strip() for p in cashier.split("/")}
+        result = staff_chat.build_message(
+            slot, "tamil", facts,
+            seed=staff_chat.seed_for(slot, code, today) + f"-s{tries}",
+            vocabulary=vocabulary, other_names=sorted(names - own),
+        )
+        rows.append({"slot": slot, "outlet_code": code, "cashier": cashier,
+                     "result": result})
+        logs.append(staff_chat.log_row(
+            slot, code, chat_id, cashier, "tamil", facts, result, "sample"
+        ))
+    _insert_staff_logs(logs, "staff samples")
+    return rows
+
+
+async def staff_samples_command(update: Update,
+                                context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Director-only: /staff_samples [n] — n (default 10) Tamil check-ins
+    with back-translations, to review the wording. Never sent to groups."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    try:
+        n = max(1, min(20, int(context.args[0]))) if context.args else 10
+    except ValueError:
+        n = 10
+    await message.reply_text(f"Writing {n} Tamil samples…")
+    rows = await asyncio.to_thread(_build_tamil_samples, n, _my_today())
     await _send_chunked_to(
-        application, ALERT_CHAT_ID, staff_chat.format_preview(slot, rows)
+        context.application, message.chat_id, staff_chat.format_samples(rows)
     )
 
 
@@ -6064,6 +6352,9 @@ async def post_cook_plans(application: Application, *,
     enabled = bundle["enabled"]
     sent = 0
     for entry in entries:
+        # A live outlet gets the natural 11:05 cook check-in instead.
+        if _staff_live_now(entry.get("outlet_code")):
+            continue
         text = demand_forecast.format_cook_plan(entry)
         if not text:
             continue
@@ -6762,6 +7053,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("ping_managers", ping_managers_command))
     app.add_handler(CommandHandler("lang", lang_command))
     app.add_handler(CommandHandler("staff_preview", staff_preview_command))
+    app.add_handler(CommandHandler("staff_samples", staff_samples_command))
     app.add_handler(CommandHandler("form_chase_now", form_chase_now_command))
     app.add_handler(CommandHandler("scoreboard_now", scoreboard_now_command))
     app.add_handler(CommandHandler("order_drafts_now", order_drafts_now_command))
@@ -6801,6 +7093,13 @@ async def run_bot() -> None:
     # first refusal; ~REPLY keeps it off audit replies entirely.
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.REPLY, handle_ask_text)
+    )
+    # Live staff chat: reads staff messages in live outlet groups. Group 1 so
+    # it runs IN ADDITION to the handlers above, never instead of them.
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
+                       handle_staff_reply),
+        group=1,
     )
 
     stop = asyncio.Event()
@@ -7121,6 +7420,26 @@ async def run_bot() -> None:
             id=f"staff_chat_{_slot}",
             replace_existing=True,
         )
+
+    # Live staff chat: reminders / no-reply / next question every 10 minutes,
+    # and the director's morning replies summary at 08:30.
+    scheduler.add_job(
+        staff_live_tick,
+        trigger="cron",
+        minute="*/10",
+        args=[app],
+        id="staff_live_tick",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        post_staff_morning_summary,
+        trigger="cron",
+        hour=8,
+        minute=30,
+        args=[app],
+        id="staff_morning_summary",
+        replace_existing=True,
+    )
 
     async with app:
         await app.start()
