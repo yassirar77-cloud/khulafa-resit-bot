@@ -335,40 +335,40 @@ def format_manager_overbuy(entry: dict) -> str:
         purchase_drop = float(entry["purchase_drop_pct"])
 
         lines = [
-            f"📉 Sales iranguthu, order appadiye — {outlet}",
+            f"📉 Sales இறங்குது, order அப்படியே — {outlet}",
             "",
-            f"Pona 7 naal sales: RM{week_sales:,.0f} "
-            f"(vazhakkamaa RM{base_sales:,.0f} — {sales_drop:.0f}% kammi)",
+            f"போன 7 நாள் sales: RM{week_sales:,.0f} "
+            f"(வழக்கமா RM{base_sales:,.0f} — {sales_drop:.0f}% கம்மி)",
         ]
         if purchase_drop <= 0:
             lines.append(
-                f"Aanaa purchase RM{week_purch:,.0f} "
-                f"(vazhakkamaa RM{base_purch:,.0f}) — koraiyave illa."
+                f"ஆனா purchase RM{week_purch:,.0f} "
+                f"(வழக்கமா RM{base_purch:,.0f}) — குறையவே இல்ல."
             )
         else:
             lines.append(
-                f"Aanaa purchase RM{week_purch:,.0f} "
-                f"(vazhakkamaa RM{base_purch:,.0f}) — "
-                f"{purchase_drop:.0f}% thaan koranjirukku."
+                f"ஆனா purchase RM{week_purch:,.0f} "
+                f"(வழக்கமா RM{base_purch:,.0f}) — "
+                f"{purchase_drop:.0f}% தான் குறைஞ்சிருக்கு."
             )
 
         items = entry.get("items") or []
         if items:
-            lines += ["", "Ithellaam innum pazhaya alavulaye vaangureenga:"]
+            lines += ["", "இதெல்லாம் இன்னும் பழைய அளவுலயே வாங்குறீங்க:"]
             for item in items:
                 emoji = f"{item['emoji']} " if item.get("emoji") else ""
                 lines.append(
                     f"• {emoji}{item['label']}: {_fmt_qty(item['week_qty'])} "
-                    f"{item['unit']} (vazhakkamaa {_fmt_qty(item['base_qty'])} "
+                    f"{item['unit']} (வழக்கமா {_fmt_qty(item['base_qty'])} "
                     f"{item['unit']})"
                 )
 
         lines += [
             "",
-            "Sales kammi aachunnaa order-um athukku etha maathiri korayanum — "
-            "illanna micha stock wastage aagum, cash-um lock aagum.",
-            "Yen intha items koraikkalannu sollunga. "
-            "Sales paathu supplier order-a adjust pannunga. 🙏",
+            "Sales கம்மி ஆச்சுன்னா order-உம் அதுக்கு ஏத்த மாதிரி குறையணும் — "
+            "இல்லன்னா மிச்ச stock wastage ஆகும், cash-um lock ஆகும்.",
+            "ஏன் இந்த items குறைக்கலன்னு சொல்லுங்க. "
+            "Sales பாத்து supplier order-அ adjust பண்ணுங்க. 🙏",
         ]
         return "\n".join(lines)
     except Exception:

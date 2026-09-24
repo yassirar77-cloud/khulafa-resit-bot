@@ -35,26 +35,26 @@ logger = logging.getLogger(__name__)
 
 # Spoken-register Tamil, one thought per line, no literary words.
 _GREETINGS = [
-    "Vanakkam {name} 🙏",
-    "{name}, oru nimisham 🙏",
-    "{name}, konjam itha paarunga 👇",
-    "{name}, oru vishayam sollanum",
+    "வணக்கம் {name} 🙏",
+    "{name}, ஒரு நிமிஷம் 🙏",
+    "{name}, கொஞ்சம் இத பாருங்க 👇",
+    "{name}, ஒரு விஷயம் சொல்லணும்",
 ]
 
 # Every variant truthfully reports the upward step: the reply handler
 # forwards the answer to the owner right after this ack is sent.
 _ACKS = [
-    "Sari {name}, note panniten ✅ Boss-kkum anuppitten. Nandri!",
-    "Ok {name} 👍 pathivu aachu ✅ Boss paappaaru. Nandri!",
-    "Nallathu {name} 🙏 ezhuthi vechitten ✅ Boss-kku kaattitten.",
+    "சரி {name}, note பண்ணிட்டேன் ✅ Boss-க்கும் அனுப்பிட்டேன். நன்றி!",
+    "Ok {name} 👍 பதிவு ஆச்சு ✅ Boss பாப்பாரு. நன்றி!",
+    "நல்லது {name} 🙏 எழுதி வெச்சுட்டேன் ✅ Boss-க்கு காட்டிட்டேன்.",
 ]
 
 # Same acks without a name, for outlet groups: the cashier's name is already
 # the first line of every group message.
 _GROUP_ACKS = [
-    "Note panniten ✅ Boss-kkum anuppitten. Nandri!",
-    "Pathivu aachu 👍 Boss paappaaru. Nandri!",
-    "Ezhuthi vechitten ✅ Boss-kku kaattitten 🙏",
+    "Note பண்ணிட்டேன் ✅ Boss-க்கும் அனுப்பிட்டேன். நன்றி!",
+    "பதிவு ஆச்சு 👍 Boss பாப்பாரு. நன்றி!",
+    "எழுதி வெச்சுட்டேன் ✅ Boss-க்கு காட்டிட்டேன் 🙏",
 ]
 
 _DEFAULT_NAME = "boss"
@@ -116,7 +116,7 @@ def ack(manager_name, chat_id, on_date: date | None = None) -> str:
         return _pick(_ACKS, chat_id, base).format(name=_clean_name(manager_name))
     except Exception:
         logger.exception("human touch: ack failed")
-        return "Sari boss, bathil note panniten ✅ Nandri!"
+        return "சரி boss, பதில் note பண்ணிட்டேன் ✅ நன்றி!"
 
 
 async def show_typing(bot, chat_id) -> None:
@@ -184,9 +184,9 @@ def praise_message(stat: dict) -> str:
         if asked == 0 or answered < asked:
             return ""
         return (
-            "🌟 Intha vaaram super!\n"
-            f"Ketta {asked} kelvikkum bathil sonneenga 👏\n"
-            "Boss-kkum theriyum. Ippadiye continue pannunga 🙏"
+            "🌟 இந்த வாரம் சூப்பர்!\n"
+            f"கேட்ட {asked} கேள்விக்கும் பதில் சொன்னீங்க 👏\n"
+            "Boss-க்கும் தெரியும். இப்படியே continue பண்ணுங்க 🙏"
         )
     except Exception:
         logger.exception("human touch: praise failed")

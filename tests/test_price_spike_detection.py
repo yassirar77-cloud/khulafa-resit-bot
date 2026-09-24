@@ -680,19 +680,19 @@ class FormatSpikeMessageTamil(unittest.TestCase):
 
     def test_full_message_with_cheaper_shops(self):
         expected = (
-            "⚠️ Vilai eriduchu! Price naik!\n"
+            "⚠️ விலை ஏறிடுச்சு! Price naik!\n"
             "\n"
             "Paha Ayam — BESTARI FARM\n"
-            "Munnaadi average: RM10.00 (8 resit)\n"
-            "Innaikku: RM13.00 (+30.0%)\n"
+            "முன்னாடி average: RM10.00 (8 resit)\n"
+            "இன்னைக்கு: RM13.00 (+30.0%)\n"
             "\n"
-            "👉 Supplier-kitta yen vilai eruchu-nu kelunga.\n"
+            "👉 சப்ளையர்கிட்ட ஏன் விலை ஏறுச்சு-னு கேளுங்க.\n"
             "\n"
-            "Vera kadaiyila innum cheap-aa irukku:\n"
+            "வேற கடையில இன்னும் cheap-ஆ இருக்கு:\n"
             "• SEGAR FARM: RM9.50\n"
             "• ANI TRADING: RM9.80\n"
             "\n"
-            "Anga rate-a compare panni paarunga. 🙏"
+            "அங்க rate-அ compare பண்ணி பாருங்க. 🙏"
         )
         self.assertEqual(format_spike_message_tamil(self._spike()), expected)
 
@@ -702,14 +702,14 @@ class FormatSpikeMessageTamil(unittest.TestCase):
             {"shop": "BESTARI FARM", "latest_price": 13.00},
         ])
         out = format_spike_message_tamil(spike)
-        self.assertIn("Vera kadaiyilayum ippo ithukku cheap-aa illa", out)
+        self.assertIn("வேற கடையிலயும் இப்போ இதுக்கு cheap-ஆ இல்ல", out)
         self.assertNotIn("•", out)
 
     def test_no_comparison_data_omits_shop_section_entirely(self):
         out = format_spike_message_tamil(self._spike(shop_prices=[]))
-        self.assertIn("Supplier-kitta", out)
-        self.assertNotIn("Vera kadaiyila", out)
-        self.assertNotIn("cheap-aa illa", out)
+        self.assertIn("சப்ளையர்கிட்ட", out)
+        self.assertNotIn("வேற கடையில", out)
+        self.assertNotIn("cheap-ஆ இல்ல", out)
 
     def test_falls_back_to_canonical_when_no_variant(self):
         out = format_spike_message_tamil(self._spike(shop_variant=""))

@@ -1,7 +1,7 @@
 """Cook-to-demand forecast — how much each kitchen should cook TODAY.
 
-Every wastage alert this bot sends ends the same way: *"sales paathu alavaa
-masak pannunga"* — cook to the sales. Nobody has ever been given the number.
+Every wastage alert this bot sends ends the same way: *"sales பாத்து அளவா
+masak பண்ணுங்க"* — cook to the sales. Nobody has ever been given the number.
 This module produces it: for each outlet and each tracked kitchen item, the
 demand expected for today's business day, and the quantity to cook to meet it
 without leaving a tray of ayam behind at 02:00.
@@ -627,32 +627,32 @@ def _plan_line(fc: dict) -> str:
     if fc["action"] == "CUT" and usual is not None:
         return (
             f"{head}  ⬇️\n"
-            f"   ippa {usual_txt} masak panreenga — "
-            f"~{_fmt(fc.get('surplus'), unit)} {unit} adhigam, adhu thaan "
-            f"dhinamum micham aaguthu."
+            f"   இப்ப {usual_txt} masak பண்றீங்க — "
+            f"~{_fmt(fc.get('surplus'), unit)} {unit} அதிகம், அது தான் "
+            f"தினமும் மிச்சம் ஆகுது."
         )
     if fc["action"] == "RAISE":
         if reason == "sellout":
             note = (
-                f"{head}  ⬆️\n   kadantha {_RECENT_DAYS} naalla {fc['sellouts']} naal "
-                "muzhusaa theendhu pochu — customer kettum kudukka mudiyala."
+                f"{head}  ⬆️\n   கடந்த {_RECENT_DAYS} நாள்ல {fc['sellouts']} நாள் "
+                "முழுசா தீந்து போச்சு — customer கேட்டும் குடுக்க முடியல."
             )
             if usual:
-                note += f" ippa {usual_txt} thaan masak aaguthu."
+                note += f" இப்ப {usual_txt} தான் masak ஆகுது."
             return note
         if reason == "busy_day":
-            day = fc.get("day_name") or "intha naal"
+            day = fc.get("day_name") or "இந்த நாள்"
             return (
                 f"{head}  ⬆️\n"
-                f"   {day} vazhakkamaa busy — unga usual {usual_txt}-a vida "
-                "konjam kootti vechukkunga."
+                f"   {day} வழக்கமா busy — உங்க usual {usual_txt}-அ விட "
+                "கொஞ்சம் கூட்டி வெச்சுக்குங்க."
             )
         return (
             f"{head}  ⬆️\n"
-            f"   kadantha sila vaaramaa sales eritu varuthu — usual {usual_txt}-a "
-            "vida konjam adhigam thevaippadum."
+            f"   கடந்த சில வாரமா sales ஏறிட்டு வருது — usual {usual_txt}-அ "
+            "விட கொஞ்சம் அதிகம் தேவைப்படும்."
         )
-    return f"{head}  ✅\n   ippa irukkira alavu sariyaa irukku, appadiye thodarunga."
+    return f"{head}  ✅\n   இப்பயிருக்கிற அளவு சரியா இருக்கு, அப்படியே தொடருங்க."
 
 
 def format_cook_plan(entry: dict) -> str:
@@ -680,9 +680,9 @@ def format_cook_plan(entry: dict) -> str:
         lines = [
             header,
             "",
-            f"kadantha {_LEVEL_DAYS} naal sales-a vechu, innaikku "
-            f"{day_name or 'intha naal'} evvalavu pogumnu paathu solren. "
-            "idhu oru guide — neenga paathu mudivu pannunga:",
+            f"கடந்த {_LEVEL_DAYS} நாள் sales-அ வெச்சு, இன்னைக்கு "
+            f"{day_name or 'இந்த நாள்'} எவ்வளவு போகும்னு பாத்து சொல்றேன். "
+            "இது ஒரு guide — நீங்க பாத்து முடிவு பண்ணுங்க:",
             "",
         ]
         for fc in items:
@@ -693,18 +693,18 @@ def format_cook_plan(entry: dict) -> str:
         lines.append("")
         if cuts:
             lines.append(
-                "⬇️ = thevaikku mela masak aaguthu. micham = wastage = kadaikku "
-                "loss. konjam koraichu paarunga."
+                "⬇️ = தேவைக்கு மேல masak ஆகுது. மிச்சம் = wastage = கடைக்கு "
+                "loss. கொஞ்சம் குறைச்சு பாருங்க."
             )
         if raises:
             lines.append(
-                "⬆️ = pothala, munnaadiye theendhudhu. konjam kootti masak "
-                "pannunga — vikka mudiyaatha sales thaan periya loss."
+                "⬆️ = போதலை, முன்னாடியே தீந்துடுது. கொஞ்சம் கூட்டி masak "
+                "பண்ணுங்க — வித்த முடியாத sales தான் பெரிய loss."
             )
         lines += [
             "",
-            "Number sariyillainu thonuthaa? vizhaa, order, mazhai — edhaavathu "
-            "irundhaa sollunga, adhukketha maathiri paakkalaam. 🙏",
+            "Number சரியில்லைனு தோணுதா? விழா, order, மழை — ஏதாவது "
+            "இருந்தா சொல்லுங்க, அதுக்கேத்த மாதிரி பாக்கலாம். 🙏",
         ]
         return "\n".join(lines)
     except Exception:

@@ -99,14 +99,16 @@ class TemplateTests(unittest.TestCase):
         }
         for lang in sc.LANGUAGES:
             for slot in sc.SLOTS:
-                text = sc.render_template(slot, lang, facts.get(slot, {}))
-                self.assertTrue(text, (lang, slot))
-                self.assertNotIn("{", text, (lang, slot))
-                # The plain template always passes its own fact check.
-                self.assertEqual(
-                    sc.fact_check(text, facts.get(slot, {}), vocabulary=VOCAB), [],
-                    (lang, slot, text),
-                )
+                for variant in (0, 1):
+                    text = sc.render_template(slot, lang, facts.get(slot, {}), variant)
+                    self.assertTrue(text, (lang, slot))
+                    self.assertNotIn("{", text, (lang, slot))
+                    # Every plain template passes its own fact check.
+                    self.assertEqual(
+                        sc.fact_check(text, facts.get(slot, {}), vocabulary=VOCAB,
+                                      language=lang, slot=slot), [],
+                        (lang, slot, variant, text),
+                    )
 
     def test_bm_tamil_is_two_lines(self):
         text = sc.render_template("open", sc.BM_TAMIL, {})
@@ -156,9 +158,9 @@ class BuildMessageTests(unittest.TestCase):
 
     def test_ai_wording_used_when_it_passes(self):
         res = sc.build_message("stock", "bm", self.facts, vocabulary=VOCAB,
-                               complete=_ai("Ayam 75kg tu cukup sampai malam?"))
+                               complete=_ai("Ayam 75kg Bestari Farm tu cukup sampai malam?"))
         self.assertEqual(res["source"], "ai")
-        self.assertEqual(res["text"], "Ayam 75kg tu cukup sampai malam?")
+        self.assertEqual(res["text"], "Ayam 75kg Bestari Farm tu cukup sampai malam?")
         self.assertEqual(res["english"], "EN")
         self.assertEqual(res["tokens_in"], 500)
 
@@ -269,26 +271,68 @@ class StaffAiTests(unittest.TestCase):
 
 
 class ScriptAndRetryTests(unittest.TestCase):
-    def test_tamil_or_bengali_script_rejected(self):
-        self.assertIn("Tamil/Bengali script, not English letters",
-                      sc.fact_check("கடை ரெடியா?", {}, vocabulary=VOCAB))
-        self.assertIn("Tamil/Bengali script, not English letters",
-                      sc.fact_check("দোকান রেডি?", {}, vocabulary=VOCAB))
+    def test_script_must_match_the_cashiers_language(self):
+        tamil = "கடை ரெடியா?"
+        self.assertEqual(sc.fact_check(tamil, {}, vocabulary=VOCAB, language="tamil"), [])
+        self.assertEqual(sc.fact_check(tamil, {}, vocabulary=VOCAB, language="bm_tamil"), [])
+        self.assertIn("Tamil script for a non-Tamil cashier",
+                      sc.fact_check(tamil, {}, vocabulary=VOCAB, language="bm"))
+        self.assertIn("Tamil script for a non-Tamil cashier",
+                      sc.fact_check(tamil, {}, vocabulary=VOCAB, language="bengali"))
+        bengali = "দোকান রেডি?"
+        for lang in ("tamil", "bengali", "bm"):
+            self.assertIn("Bengali script (Bengali goes in English letters)",
+                          sc.fact_check(bengali, {}, vocabulary=VOCAB, language=lang))
 
-    def test_templates_are_english_letters_and_pass_real_vocabulary(self):
+    def test_items_suppliers_numbers_must_stay_as_in_the_data(self):
+        facts = {"item": "Ayam", "qty": "75", "pack": "kg", "supplier": "Bestari Farm"}
+        ok = "இன்னைக்கு draft-ல Bestari Farm Ayam 75 kg. இரவு வரைக்கும் போதுமா?"
+        self.assertEqual(sc.fact_check(ok, facts, vocabulary=VOCAB,
+                                       language="tamil", slot="stock"), [])
+        # Supplier transliterated into Tamil script / item translated: rejected.
+        bad = "இன்னைக்கு பெஸ்டாரி ஃபார்ம் கோழி 75 kg போதுமா?"
+        problems = sc.fact_check(bad, facts, vocabulary=VOCAB, language="tamil", slot="stock")
+        self.assertIn("'Bestari Farm' not written as in the data", problems)
+        self.assertIn("'Ayam' not written as in the data", problems)
+
+    def test_order_items_must_all_appear(self):
+        facts = sc.order_facts(DRAFT)
+        text = sc.render_template("order", "tamil", facts)
+        self.assertEqual(sc.fact_check(text, facts, vocabulary=VOCAB,
+                                       language="tamil", slot="order"), [])
+        dropped = text.replace("Sotong 19kg, ", "")
+        self.assertTrue(sc.fact_check(dropped, facts, vocabulary=VOCAB,
+                                      language="tamil", slot="order"))
+
+    def test_templates_keep_facts_latin_and_tamil_in_script(self):
         import re
-        vocab = sc.item_vocabulary()
-        facts = {
-            "stock": sc.stock_facts(DRAFT), "order": sc.order_facts(DRAFT),
-            "cook": sc.cook_facts(FORECAST),
-            "bills": {"supplier": "Fook Leong", "days": "19", "last": "05/09"},
-        }
-        for lang in sc.LANGUAGES:
-            for slot in sc.SLOTS:
-                text = sc.render_template(slot, lang, facts.get(slot, {}))
-                self.assertIsNone(re.search("[\u0980-\u09FF\u0B80-\u0BFF]", text), text)
-                self.assertEqual(sc.fact_check(text, facts.get(slot, {}), vocabulary=vocab),
-                                 [], (lang, slot, text))
+        facts = sc.stock_facts(DRAFT)
+        text = sc.render_template("stock", "tamil", facts)
+        self.assertTrue(re.search("[\u0B80-\u0BFF]", text))
+        for v in ("Ayam", "75", "Bestari Farm"):
+            self.assertIn(v, text)
+        for lang in ("bm", "english", "indonesian", "bengali"):
+            text = sc.render_template("stock", lang, facts)
+            self.assertIsNone(re.search("[\u0980-\u09FF\u0B80-\u0BFF]", text), lang)
+
+    def test_wording_varies_by_day(self):
+        seeds = [sc.seed_for("open", "BISTRO7", date(2026, 9, d)) for d in range(20, 28)]
+        texts = {sc.render_template("open", "tamil", {}, sc.variant_for(x)) for x in seeds}
+        self.assertEqual(len(texts), 2)
+
+    def test_recent_messages_passed_to_ai_to_avoid(self):
+        seen = {}
+
+        def capture(system, user):
+            seen["user"] = json.loads(user)
+            return None
+        sc.build_message("open", "tamil", {}, complete=capture,
+                         avoid=["நேத்து text", "", "முந்தாநேத்து"])
+        self.assertEqual(seen["user"]["recent_messages_do_not_repeat"],
+                         ["நேத்து text", "முந்தாநேத்து"])
+        self.assertIn("never repeat", sc.SYSTEM_PROMPT)
+        self.assertIn("TAMIL SCRIPT", seen["user"]["language"])
+        self.assertIn("English letters and 0-9 digits", seen["user"]["language"])
 
     def _fake(self, *contents):
         fake = mock.MagicMock()

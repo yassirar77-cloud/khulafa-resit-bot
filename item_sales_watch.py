@@ -262,20 +262,20 @@ def format_manager_slow_items(entry: dict) -> str:
         lines = [
             f"📉 Jualan item kurang — {outlet} • {day}",
             "",
-            "Nethu FULL business day kanakku "
-            "(day shift + night shift, 24 mani neram serthu):",
+            "நேத்து FULL business day கணக்கு "
+            "(day shift + night shift, 24 மணி நேரம் சேர்த்து):",
             "",
         ]
         for f in flags:
             lines.append(
-                f"• {f['label']}: {_fmt_qty(f['qty'])} thaan pochu — "
-                f"vazhakkamaa ~{_fmt_qty(f['median'])} pogum (-{f['drop_pct']}%)"
+                f"• {f['label']}: {_fmt_qty(f['qty'])} தான் போச்சு — "
+                f"வழக்கமா ~{_fmt_qty(f['median'])} போகும் (-{f['drop_pct']}%)"
             )
         lines += [
             "",
-            "Innaikku intha items-a push pannunga 👉 customer-kitta "
-            "recommend panna sollunga, fresh-aa ready vechirunga, "
-            "counter/board-la nallaa theriyara maathiri vainga.",
+            "இன்னைக்கு இந்த items-அ push பண்ணுங்க 👉 customer-கிட்ட "
+            "recommend பண்ணச் சொல்லுங்க, fresh-ஆ ready வெச்சிருங்க, "
+            "counter/board-ல நல்லா தெரியற மாதிரி வைங்க.",
         ]
         streaked = [f for f in flags if f.get("streak", 0) >= _STREAK_DAYS]
         if streaked:
@@ -283,15 +283,15 @@ def format_manager_slow_items(entry: dict) -> str:
             days = max(f["streak"] for f in streaked)
             lines += [
                 "",
-                f"⚠️ {names}: {days} naal thodarnthu korayvaa poguthu. "
-                "Promotion problem mattum illa —",
-                "taste/quality-la issue irukkaannu paarunga: bandari-kitta "
-                "kelunga — recipe maariduchaa, fresh-aa irukkaa, portion "
-                "sariyaa irukkaa. Enna thevainnaa add panni, sari pannunga.",
+                f"⚠️ {names}: {days} நாள் தொடர்ந்து குறைவா போகுது. "
+                "Promotion problem மட்டும் இல்ல —",
+                "taste/quality-ல issue இருக்கான்னு பாருங்க: பண்டாரிகிட்ட "
+                "கேளுங்க — recipe மாறிடுச்சா, fresh-ஆ இருக்கா, portion "
+                "சரியா இருக்கா. என்ன தேவைன்னா add பண்ணி, சரி பண்ணுங்க.",
             ]
         lines += [
             "",
-            "Enna kaaranamnu ninaikkireenga? Sollunga. 🙏",
+            "என்ன காரணம்னு நினைக்கிறீங்க? சொல்லுங்க. 🙏",
         ]
         return "\n".join(lines)
     except Exception:
