@@ -156,9 +156,30 @@ class SummaryTests(unittest.TestCase):
         text = sl.format_morning_summary(threads)
         self.assertIn("BISTRO7: ✅ answered — 2/2 answered · avg 15 min", text)
         self.assertIn("SEK20: ❌ no reply — 0/1 answered", text)
-        self.assertIn("• SEK20 15:00 lunch (Syed)", text)
         self.assertIn("• BISTRO7 10:55 cook: Ayam kicap finished by 2pm", text)
         self.assertEqual(sl.format_morning_summary([]), "")
+
+    def test_summary_shows_each_send_time_and_outcome(self):
+        threads = [
+            dict(_t("answered", tid=1, slot="open"), asked_at="2026-09-24T08:00:10+08:00",
+                 answered_at="2026-09-24T08:12:10+08:00"),
+            dict(_t("no_reply", tid=2, slot="lunch"), asked_at="2026-09-24T15:00:20+08:00"),
+            dict(_t("reminded", tid=3, slot="order"), asked_at="2026-09-24T20:05:20+08:00"),
+            dict(_t("queued", tid=4, slot="bills")),            # never sent
+            dict(_t("dropped", tid=5, slot="night")),           # never sent
+            dict(_t("no_reply", tid=6, slot="order", outlet_code="SEK20", chat=-2),
+                 asked_at="2026-09-24T20:05:21+08:00"),
+        ]
+        text = sl.format_morning_summary(threads)
+        self.assertIn("   08:00 open ✅ 12m · 15:00 lunch ✗ · 20:05 order ⏳", text)
+        self.assertIn("   20:05 order ✗", text)
+        self.assertNotIn("bills", text)
+        self.assertIn("By check-in time (all outlets):", text)
+        self.assertIn("• 08:00 open: 1/1 answered", text)
+        self.assertIn("• 20:05 order: 0/2 answered", text)
+        # Schedule order, not alphabetical.
+        self.assertLess(text.index("• 08:00 open"), text.index("• 15:00 lunch"))
+        self.assertLess(text.index("• 15:00 lunch"), text.index("• 20:05 order"))
 
     def test_slow_verdict(self):
         self.assertEqual(sl.verdict({"asked": 4, "answered": 4, "no_reply": 0, "avg_minutes": 50}),
