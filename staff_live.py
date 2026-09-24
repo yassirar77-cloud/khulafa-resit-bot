@@ -318,26 +318,66 @@ def _local_hhmm(value) -> str:
     return ts.astimezone(cashier_names.MALAYSIA_TZ).strftime("%H:%M") if ts else "?"
 
 
+_SENT = (ANSWERED, NO_REPLY, OPEN, REMINDED)
+
+
+def _mark(t: dict) -> str:
+    """✅ 12m (answered, minutes to reply) · ✗ (no reply) · ⏳ (still open)."""
+    status = t.get("status")
+    if status == ANSWERED:
+        asked, answered = _ts(t.get("asked_at")), _ts(t.get("answered_at"))
+        if asked and answered:
+            return f"✅ {max(0, round((answered - asked).total_seconds() / 60))}m"
+        return "✅"
+    return "✗" if status == NO_REPLY else "⏳"
+
+
+def _timeline(items: list[dict]) -> str:
+    """Every question sent to one outlet, in order: its send time, slot and
+    outcome — so the times that get no replies stand out."""
+    sent = sorted((t for t in items if t.get("status") in _SENT and t.get("asked_at")),
+                  key=lambda t: str(t.get("asked_at")))
+    return " · ".join(f"{_local_hhmm(t['asked_at'])} {t.get('slot')} {_mark(t)}"
+                      for t in sent)
+
+
+def _by_slot(threads: list[dict]) -> list[str]:
+    """Answer rate per check-in across outlets, in schedule order."""
+    counts: dict[str, list[int]] = {}
+    for t in threads:
+        if t.get("status") in _SENT and t.get("asked_at"):
+            c = counts.setdefault(t.get("slot"), [0, 0])
+            c[1] += 1
+            c[0] += t.get("status") == ANSWERED
+    order = list(staff_chat.SLOTS)
+    rows = []
+    for slot in sorted(counts, key=lambda s: order.index(s) if s in order else 99):
+        answered, sent = counts[slot]
+        time_ = staff_chat.SLOTS[slot][1] if slot in staff_chat.SLOTS else "?"
+        rows.append(f"{time_} {slot}: {answered}/{sent} answered")
+    return rows
+
+
 def format_morning_summary(threads: list[dict], label_for=None) -> str:
-    """One director message: the daily replies line per live outlet, the
-    unanswered questions, and the problems staff reported."""
+    """One director message: per live outlet the replies line and every
+    question's send time with its outcome, the answer rate per check-in
+    time, and the problems staff reported."""
     label = label_for or (lambda c: str(c))
     stats = outlet_stats(threads)
     if not stats:
         return ""
-    lines = ["🗒️ Staff replies — last 24 hours", ""]
+    lines = ["🗒️ Staff replies — last 24 hours",
+             "✅ answered (minutes to reply) · ✗ no reply · ⏳ still open", ""]
     for code in sorted(stats):
         s = stats[code]
         avg = f" · avg {s['avg_minutes']} min" if s["avg_minutes"] is not None else ""
         lines.append(f"{label(code)}: {verdict(s)} — {s['answered']}/{s['asked']} answered{avg}")
-    missed = [t for t in threads if t.get("status") == NO_REPLY]
-    if missed:
-        lines += ["", "No reply:"]
-        for t in sorted(missed, key=lambda t: str(t.get("asked_at"))):
-            lines.append(
-                f"• {label(t.get('outlet_code'))} {_local_hhmm(t.get('asked_at'))} "
-                f"{t.get('slot')} ({t.get('cashier') or 'cashier'})"
-            )
+        timeline = _timeline([t for t in threads if t.get("outlet_code") == code])
+        if timeline:
+            lines.append(f"   {timeline}")
+    by_slot = _by_slot(threads)
+    if by_slot:
+        lines += ["", "By check-in time (all outlets):"] + [f"• {r}" for r in by_slot]
     issues = [t for t in threads if t.get("status") == ANSWERED
               and t.get("reply_status") in ("short", "finished", "problem")]
     if issues:
