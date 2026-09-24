@@ -118,6 +118,7 @@ import human_touch
 import overbuy_watch
 import supervisor
 import order_generator
+import order_sanity
 import reconciliation_service
 import sales_analytics
 import shop_price_comparison
@@ -220,6 +221,8 @@ KNOWN_SUPPLIERS = [
     'JASMINE', 'BERAS',
     # Dairy
     'MEWAH', 'F&N', 'DUTCH LADY',
+    # Cheese (Bega Super Slice, Klang)
+    'FRIZZ STATION', 'FRIZZ',
     # Meat & frozen
     'HANEE', 'BS FROZEN', 'BESTARI FARM', 'BESTARI',
     # Tea & coffee
@@ -5508,6 +5511,16 @@ def _staff_slot_facts(slot, registry_code, chat_id, today, bills_by_chat):
             # Tomorrow's drafts are only saved by the 20:00 job; earlier in
             # the day (an on-demand preview) compute them without saving.
             rows = _unsaved_order_items(today).get_codes(codes)
+        # Thin buying history -> no draft numbers at all (order_sanity): the
+        # order check-in asks what to order instead; stock has nothing to ask.
+        verdict = order_sanity.assess(
+            order_sanity.fetch_history(supabase, codes, today), rows
+        )
+        if not verdict["ok"]:
+            logger.info("staff chat %s %s: draft not used (%s)",
+                        slot, registry_code, verdict["reason"])
+            return {"ask": True} if slot == "order" else None
+        rows = verdict["lines"]
         return (staff_chat.stock_facts if slot == "stock" else staff_chat.order_facts)(rows)
     if slot == "cook":
         rows = (
@@ -6303,8 +6316,23 @@ def _gather_order_drafts(today=None) -> dict:
             mgr.get("chat_id") if mgr else None,
             ALERT_CHAT_ID,
         )
+        # Too little buying history for a trustworthy draft (order_sanity):
+        # ask the shop what it needs instead of sending made-up quantities.
+        try:
+            verdict = order_sanity.assess(
+                order_sanity.fetch_history(supabase, [code], today),
+                o.get("items") or [],
+            )
+        except Exception:
+            logger.exception("order drafts: history check failed (%s)", code)
+            verdict = {"ok": True, "reason": ""}
+        chunks = o["messages"]
+        if not verdict["ok"]:
+            chunks = [staff_chat.render_template(
+                "order", staff_chat.BM_TAMIL, {"ask": True}
+            )]
         # One per Telegram-safe chunk; the routing prefix rides on the first.
-        for i, chunk in enumerate(o["messages"]):
+        for i, chunk in enumerate(chunks):
             messages.append({
                 "target": decision.target_chat_id,
                 "text": (decision.prefix + chunk) if i == 0 else chunk,
@@ -6316,6 +6344,7 @@ def _gather_order_drafts(today=None) -> dict:
             "review": o["review_count"],
             "route_reason": decision.reason,
             "manager_name": mgr.get("manager_name") if mgr else None,
+            "thin": "" if verdict["ok"] else verdict["reason"],
         })
 
     mode = (
@@ -6336,6 +6365,12 @@ def _gather_order_drafts(today=None) -> dict:
             else:
                 who = "→ you (test)"
             flag = f"  ⚠️{r['review']} review" if r["review"] else ""
+            if r.get("thin"):
+                hq_lines.append(
+                    f"{r['display']:<12} no draft sent — asked what to order "
+                    f"(thin history: {r['thin']})  {who}"
+                )
+                continue
             hq_lines.append(f"{r['display']:<12} {r['lines']} item(s){flag}  {who}")
     else:
         hq_lines.append("No outlets had items due tomorrow.")
