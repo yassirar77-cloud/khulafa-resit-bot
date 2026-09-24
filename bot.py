@@ -931,7 +931,7 @@ def _check_new_supplier(chat_id: int, merchant: str, total: float, current_id) -
     if rows:
         return None
     return (
-        "Puthiya kadai! Yen vazhakkamaana kadaila vaangala? / "
+        "புதிய கடை! ஏன் வழக்கமான கடைல வாங்கல? / "
         f"Supplier baru ({merchant})! Kenapa tak beli dari supplier biasa?"
     )
 
@@ -977,7 +977,7 @@ def _check_suspicious_items(chat_id: int, merchant: str, items: list) -> str | N
     if not flagged:
         return None
     return (
-        "Vilai adhigam! Vera idathula cheap kidaikkumaa check panneengalaa? / "
+        "விலை அதிகம்! வேற இடத்துல cheap கிடைக்குமா check பண்ணினீங்களா? / "
         "Harga mahal dari minggu lepas! Sudah check tempat lain ke? "
         f"({'; '.join(flagged[:3])})"
     )
@@ -1004,7 +1004,7 @@ def _check_duplicate_receipt(
             continue
         if abs(prev_total - total) / max(prev_total, total) <= DUPLICATE_TOTAL_TOLERANCE:
             return (
-                "Ithe kadaiyilirundhu rendu thadavai! "
+                "இதே கடையிலிருந்து இரண்டு முறை! "
                 f"Same shop ({merchant}) 2 kali hari ni — sengaja ke?"
             )
     return None
@@ -4958,7 +4958,7 @@ async def weekly_report_now_command(update: Update, context: ContextTypes.DEFAUL
 # === Missing supplier-bill watch ============================================
 # Months of receipts define each supplier's upload rhythm per outlet chat.
 # When a regular supplier suddenly goes quiet, the nightly job asks that chat
-# in Tamil + Malay why nothing was uploaded ("BESTARI FARM bill enga?") — a
+# in Tamil + Malay why nothing was uploaded ("BESTARI FARM bill எங்க?") — a
 # forgotten photo is caught within days instead of surfacing as a hole in the
 # monthly numbers. Delivery reuses the weekly-report safety gate: while
 # MANAGER_DELIVERY_ENABLED is False every question routes to the owner with a
@@ -5552,6 +5552,31 @@ _NO_DATA = {
 }
 
 
+def _recent_staff_texts(slot, today, days: int = 3) -> dict:
+    """``{outlet_code: [recent texts]}`` this check-in produced on the last
+    few days — passed to the AI so it says it differently. Best effort."""
+    since = datetime.combine(
+        today - timedelta(days=days), datetime.min.time(), MALAYSIA_TZ
+    ).isoformat()
+    try:
+        rows = (
+            supabase.table(staff_chat.LOG_TABLE)
+            .select("outlet_code, final_text, created_at")
+            .eq("slot", slot).gte("created_at", since)
+            .order("created_at", desc=True).limit(100)
+            .execute().data or []
+        )
+    except Exception:
+        logger.exception("staff preview: recent texts lookup failed")
+        return {}
+    out: dict = {}
+    for r in rows:
+        text = r.get("final_text")
+        if text and text not in out.setdefault(r.get("outlet_code"), []):
+            out[r["outlet_code"]].append(text)
+    return out
+
+
 def _build_staff_preview(slot, today):
     """All outlets' messages for one check-in, plus the log rows."""
     cashier_names.refresh()
@@ -5564,6 +5589,7 @@ def _build_staff_preview(slot, today):
                 bills_by_chat.setdefault(entry["chat_id"], []).append(entry)
     vocabulary = staff_chat.item_vocabulary()
     names = cashier_names.all_names()
+    recent = _recent_staff_texts(slot, today)
     rows, logs = [], []
     for chat_id, code in groups:
         cashier = cashier_names.name_for(code, shift)
@@ -5585,6 +5611,7 @@ def _build_staff_preview(slot, today):
             slot, language, facts,
             seed=staff_chat.seed_for(slot, code, today),
             vocabulary=vocabulary, other_names=sorted(names - own),
+            avoid=recent.get(code, []),
         )
         row["result"] = result
         rows.append(row)

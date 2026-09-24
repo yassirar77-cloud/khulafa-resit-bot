@@ -363,7 +363,7 @@ class Reasons(unittest.TestCase):
         self.assertIn("190", line)
         self.assertIn("160", line)
         self.assertIn("Jumaat", line)
-        self.assertNotIn("sariyaa irukku", line)   # never the HOLD copy
+        self.assertNotIn("சரியா இருக்கு", line)   # never the HOLD copy
 
     def test_owner_summary_ignores_a_routine_busy_day_raise(self):
         entry = {

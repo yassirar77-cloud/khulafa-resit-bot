@@ -176,24 +176,22 @@ class Formatting(unittest.TestCase):
 
     def test_manager_message_spells_out_the_24h_day(self):
         out = format_manager_key_stock(self._entry())
-        self.assertIn("📦 Key stock adhigam — Sungai Besi • 2026-08-06", out)
-        self.assertIn("day shift + night shift, 24 mani neram serthu", out)
-        self.assertIn("Nethu FULL business day kanakku", out)
-        # No money figures may reach the outlet (staff) group.
+        self.assertIn("📦 Key stock அதிகம் — Sungai Besi • 2026-08-06", out)
+        self.assertIn("day shift + night shift, 24 மணி நேரம் சேர்த்து", out)
+        # No money figures reach the outlet group.
         self.assertNotIn("RM", out)
         self.assertNotIn("Sales:", out)
         self.assertNotIn("3,900", out)
-        self.assertIn("🐔 Ayam: 82 kg vaangiyirukkeenga", out)
-        self.assertIn("~55 kg thaan", out)
-        self.assertIn("Yen ivvalavu vaangineengannu sollunga", out)
+        self.assertIn("🐔 Ayam: 82 kg வாங்கியிருக்கீங்க", out)
+        self.assertIn("~55 kg தான்", out)
+        self.assertIn("ஏன் இவ்வளவு வாங்கினீங்கன்னு சொல்லுங்க", out)
 
     def test_owner_summary_lists_flags(self):
         out = format_owner_summary([self._entry()])
         self.assertIn("full 24h business day", out)
         self.assertIn("Sungai Besi", out)
         self.assertIn("Ayam 82kg vs ~55kg expected", out)
-        # The owner/director summary keeps the sales figure.
-        self.assertIn("RM3,900", out)
+        self.assertIn("RM3,900", out)   # the director keeps the sales figure
 
     def test_empty_or_garbage_never_raises(self):
         try:

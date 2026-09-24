@@ -181,26 +181,26 @@ class Formatting(unittest.TestCase):
 
     def test_manager_message_tamil_content(self):
         out = format_manager_overbuy(self._entry())
-        self.assertIn("📉 Sales iranguthu, order appadiye — SEK-20", out)
+        self.assertIn("📉 Sales இறங்குது, order அப்படியே — SEK-20", out)
         self.assertIn("RM10,200", out)
-        self.assertIn("22% kammi", out)
-        self.assertIn("4% thaan koranjirukku", out)
-        self.assertIn("🐔 Ayam: 208 kg (vazhakkamaa 215 kg)", out)
-        self.assertIn("Yen intha items koraikkalannu sollunga", out)
+        self.assertIn("22% கம்மி", out)
+        self.assertIn("4% தான் குறைஞ்சிருக்கு", out)
+        self.assertIn("🐔 Ayam: 208 kg (வழக்கமா 215 kg)", out)
+        self.assertIn("ஏன் இந்த items குறைக்கலன்னு சொல்லுங்க", out)
 
     def test_bought_more_reads_kuraiyave_illa(self):
         entry = self._entry()
         entry["purchase_drop_pct"] = -8.0
         entry["week_purchases"] = 5500.0
         out = format_manager_overbuy(entry)
-        self.assertIn("koraiyave illa", out)
+        self.assertIn("குறையவே இல்ல", out)
 
     def test_no_item_detail_still_sends_the_rm_comparison(self):
         entry = self._entry()
         entry["items"] = []
         out = format_manager_overbuy(entry)
         self.assertIn("RM10,200", out)
-        self.assertNotIn("Ithellaam", out)
+        self.assertNotIn("இதெல்லாம்", out)
 
     def test_owner_summary_lists_flagged_outlets(self):
         out = format_owner_summary([self._entry()])

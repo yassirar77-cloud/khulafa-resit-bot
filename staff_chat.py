@@ -52,21 +52,38 @@ _LANG_ALIASES = {
     "bm_tamil": BM_TAMIL, "mix": BM_TAMIL, "bm+tamil": BM_TAMIL,
 }
 
+_KEEP_FACTS_LATIN = (
+    " Keep every item name, supplier name, unit and number EXACTLY as given in "
+    "the facts: English letters and 0-9 digits (e.g. 'Ayam 75kg', 'Bestari "
+    "Farm') — never translate or transliterate them, so the cashier can match "
+    "them to the bill."
+)
 _LANG_PROMPT = {
-    "tamil": "simple spoken Malaysian Tamil written in ENGLISH LETTERS "
-             "(Tanglish), the way it is typed on WhatsApp, e.g. 'Innaikku "
-             "order sariyaa?'. Never use Tamil script. Everyday English or "
-             "Malay trade words (order, bill, supplier, ayam) are fine.",
-    "bm": "simple spoken Malaysian Malay (Bahasa Malaysia), kedai register.",
+    "tamil": "simple spoken Malaysian Tamil in TAMIL SCRIPT, as a boss types "
+             "to his cashier on WhatsApp. Everyday English/Malay trade words "
+             "(order, bill, draft, Lunch) are fine." + _KEEP_FACTS_LATIN,
+    "bm": "simple spoken Malaysian Malay (Bahasa Malaysia), kedai register."
+          + _KEEP_FACTS_LATIN,
     "bengali": "simple spoken Bengali written in ENGLISH LETTERS (Banglish), "
                "the way a Bangladeshi worker in Malaysia types it, e.g. 'Aaj "
-               "order thik ache?'. Never use Bengali script. English/Malay "
-               "trade words are fine.",
-    "english": "simple, plain English for a non-native speaker.",
-    "indonesian": "simple spoken Bahasa Indonesia.",
-    BM_TAMIL: "one short line of simple Malay, then the same in simple "
-              "spoken Tamil written in English letters (Tanglish, never "
-              "Tamil script) on the next line.",
+               "order thik ache?'. Never use Bengali script." + _KEEP_FACTS_LATIN,
+    "english": "simple, plain English for a non-native speaker." + _KEEP_FACTS_LATIN,
+    "indonesian": "simple spoken Bahasa Indonesia." + _KEEP_FACTS_LATIN,
+    BM_TAMIL: "one short line of simple Malay, then the same in simple spoken "
+              "Tamil in TAMIL SCRIPT on the next line." + _KEEP_FACTS_LATIN,
+}
+
+# Scripts each language may be written in (beyond English letters).
+_TAMIL_SCRIPT = re.compile(r"[\u0B80-\u0BFF]")
+_BENGALI_SCRIPT = re.compile(r"[\u0980-\u09FF]")
+_ALLOWED_SCRIPTS = {"tamil": {"tamil"}, BM_TAMIL: {"tamil"}}
+
+# Fact values that must appear verbatim (so they stay in English letters and
+# 0-9 digits, never translated): per slot, the keys that carry them.
+_REQUIRED_FACTS = {
+    "stock": ("item", "qty", "supplier"),
+    "cook": ("item", "cook"),
+    "bills": ("supplier", "days"),
 }
 
 
@@ -111,25 +128,46 @@ PRIORITY_ITEMS = ("ayam", "ikan", "kambing", "daging", "sotong", "udang", "telur
 # only: in a group the bot client prepends "<cashier>," itself.
 
 _T: dict[str, dict[str, str]] = {
+    # Two wordings each for BM and Tamil, picked by day + outlet, so the
+    # plain fallback doesn't read the same every day either. Item names,
+    # suppliers, units and numbers stay in English letters and 0-9 digits in
+    # every language — the cashier matches them to the bill, and the fact
+    # check matches them to the data.
     "bm": {
-        "open": "Pagi 👋 Kedai dah siap? Ada barang kurang hari ni?",
-        "stock": "{item} cukup sampai malam? Draft hari ni {qty} {pack} dari {supplier}.",
-        "cook_cut": "{item} hari ni masak {cook} {unit} cukup.{usual_bm} Ok?",
-        "cook_raise": "{item} hari ni masak {cook} {unit}, lebih sikit dari biasa.{usual_bm} Ok?",
-        "lunch": "Lunch tadi ramai? Ada lauk habis awal?",
-        "order": "Order esok: {list}{more_bm}. Ok atau nak tukar?",
-        "bills": "Bil {supplier} dah {days} hari tak masuk (last {last}). Ada bil? Tolong upload 🙏",
-        "night": "Malam ni ok? Ada barang rosak atau habis?",
+        "open": ["Pagi 👋 Kedai dah siap? Ada barang kurang hari ni?",
+                 "Kedai dah buka? 👋 Hari ni ada apa-apa yang kurang?"],
+        "stock": ["{item} cukup sampai malam? Draft hari ni {qty} {pack} dari {supplier}.",
+                  "Draft hari ni {item} {qty} {pack} dari {supplier}. Cukup sampai malam?"],
+        "cook_cut": ["{item} hari ni masak {cook} {unit} cukup.{usual_bm} Ok?",
+                     "{item} hari ni rasanya {cook} {unit} dah cukup.{usual_bm} Ok tak?"],
+        "cook_raise": ["{item} hari ni masak {cook} {unit}, lebih sikit dari biasa.{usual_bm} Ok?",
+                       "{item} hari ni masak lebih sikit, {cook} {unit}.{usual_bm} Ok tak?"],
+        "lunch": ["Lunch tadi ramai? Ada lauk habis awal?",
+                  "Lunch tadi macam mana? Ada lauk yang cepat habis?"],
+        "order": ["Order esok: {list}{more_bm}. Ok atau nak tukar?",
+                  "Untuk esok: {list}{more_bm}. Ok ke, ada nak ubah?"],
+        "bills": ["Bil {supplier} dah {days} hari tak masuk (last {last}). Ada bil? Tolong upload 🙏",
+                  "{supplier} punya bil belum masuk, dah {days} hari (last {last}). Kalau ada, tolong upload 🙏"],
+        "night": ["Malam ni ok? Ada barang rosak atau habis?",
+                  "Malam ni semua ok? Ada yang rosak atau dah habis?"],
     },
     "tamil": {
-        "open": "Kaalai vanakkam 👋 Kadai ready-aa? Innaikku edhaavathu saamaan korayvaa?",
-        "stock": "{item} raathiri varaikkum pothumaa? Innaikku draft-la {supplier} {qty} {pack}.",
-        "cook_cut": "Innaikku {item} {cook} {unit} samaichaa pothum.{usual_ta} Sariyaa?",
-        "cook_raise": "Innaikku {item} {cook} {unit} samainga, vazhakkatha vida konjam adhigam.{usual_ta} Sariyaa?",
-        "lunch": "Madhiyam koottam eppadi? Edhaavathu curry seekiram theernduchaa?",
-        "order": "Naalaikku order: {list}{more_ta}. Sariyaa, maathanumaa?",
-        "bills": "{supplier} bill {days} naalaa varala (kadaisi {last}). Irukkaa? Upload pannunga 🙏",
-        "night": "Innaikku raathiri ellaam sariyaa? Edhaavathu odanjiruchaa, theernduchaa?",
+        "open": ["காலை வணக்கம் 👋 கடை ரெடியா? இன்னைக்கு ஏதாவது சாமான் குறைவா?",
+                 "கடை திறந்தாச்சா? 👋 இன்னைக்கு ஏதாவது குறைவா இருக்கா?"],
+        "stock": ["{item} இரவு வரைக்கும் போதுமா? இன்னைக்கு draft-ல {supplier} {qty} {pack}.",
+                  "இன்னைக்கு draft-ல {supplier} {item} {qty} {pack}. இரவு வரைக்கும் போதுமா?"],
+        "cook_cut": ["இன்னைக்கு {item} {cook} {unit} சமைச்சா போதும்.{usual_ta} சரியா?",
+                     "{item} இன்னைக்கு {cook} {unit} போதும்னு தோணுது.{usual_ta} ஓகேவா?"],
+        "cook_raise": ["இன்னைக்கு {item} {cook} {unit} சமைங்க, வழக்கத்தை விட கொஞ்சம் அதிகம்.{usual_ta} சரியா?",
+                       "{item} இன்னைக்கு கொஞ்சம் கூட, {cook} {unit} சமைங்க.{usual_ta} ஓகேவா?"],
+        "lunch": ["மதியம் கூட்டம் எப்படி? ஏதாவது கறி சீக்கிரம் தீர்ந்துச்சா?",
+                  "Lunch எப்படி போச்சு? ஏதாவது சீக்கிரம் முடிஞ்சுதா?"],
+        "order": ["நாளைக்கு order: {list}{more_ta}. சரியா, மாத்தணுமா?",
+                  "நாளைக்கான order: {list}{more_ta}. இது ஓகேவா, ஏதாவது மாத்தணுமா?"],
+        "bills": ["{supplier} bill {days} நாளா வரல (கடைசி {last}). இருக்கா? Upload பண்ணுங்க 🙏",
+                  "{supplier} bill இன்னும் வரல, {days} நாள் ஆச்சு (கடைசி {last}). இருந்தா photo போடுங்க 🙏"],
+        "night": ["இன்னைக்கு ராத்திரி எல்லாம் சரியா? ஏதாவது உடைஞ்சதா, தீர்ந்ததா?",
+                  "ராத்திரி எப்படி போகுது? ஏதாவது பிரச்சனை, தீர்ந்த சாமான் இருக்கா?"],
     },
     "english": {
         "open": "Morning 👋 Shop ready? Anything short today?",
@@ -165,7 +203,7 @@ _T: dict[str, dict[str, str]] = {
 
 _USUAL = {
     "usual_bm": " Biasa masak {usual}.",
-    "usual_ta": " Vazhakkamaa {usual} samaippeenga.",
+    "usual_ta": " வழக்கமா {usual} சமைப்பீங்க.",
     "usual_en": " Usually you cook {usual}.",
     "usual_id": " Biasanya masak {usual}.",
     "usual_bn": " Shadharonto {usual} ranna hoy.",
@@ -188,8 +226,9 @@ def _template_key(slot: str, facts: dict) -> str:
     return slot
 
 
-def render_template(slot: str, language: str, facts: dict) -> str:
-    """The plain message for a slot, in ``language``. ``""`` if facts are
+def render_template(slot: str, language: str, facts: dict, variant: int = 0) -> str:
+    """The plain message for a slot, in ``language``; ``variant`` picks one
+    of the wordings where a language has several. ``""`` if facts are
     missing for a data slot. Never raises."""
     try:
         facts = facts or {}
@@ -207,7 +246,10 @@ def render_template(slot: str, language: str, facts: dict) -> str:
         key = _template_key(slot, facts)
 
         def one(lang):
-            return _T[lang][key].format(**values)
+            options = _T[lang][key]
+            if isinstance(options, str):
+                options = [options]
+            return options[variant % len(options)].format(**values)
 
         if language == BM_TAMIL:
             return f"{one('bm')}\n{one('tamil')}"
@@ -352,9 +394,6 @@ def _short_supplier(name) -> str:
 # --- fact check --------------------------------------------------------------
 
 _NUM = re.compile(r"\d+(?:[.,]\d+)?")
-# Tamil and Bengali go out in English letters (the cashiers read that more
-# easily than the script), so any script at all means the wording is wrong.
-_SCRIPT = re.compile(r"[\u0980-\u09FF\u0B80-\u0BFF]")
 _NON_ASCII_DIGITS = re.compile(r"[०-९০-৯௦-௯٠-٩]")
 _MONEY = re.compile(r"\bRM\s?\d|\bRM\b|%|\$|ringgit|\bsen\b", re.IGNORECASE)
 _LABELS = re.compile(r"ALERT|\[TEST|\[PREVIEW|WARNING", re.IGNORECASE)
@@ -402,7 +441,24 @@ def item_vocabulary() -> set[str]:
     return {v for v in vocab if v}
 
 
-def fact_check(text, facts, *, vocabulary=None, other_names=()) -> list[str]:
+def _missing_facts(text, facts, slot) -> list[str]:
+    """Fact values the wording dropped or translated — each must appear
+    as given (English letters, 0-9 digits)."""
+    facts = facts or {}
+    needed = [facts.get(k) for k in _REQUIRED_FACTS.get(slot, ())]
+    if slot == "order":
+        for item in facts.get("items") or []:
+            needed += [item.get("item"), item.get("qty")]
+    lower = text.lower()
+    return [
+        f"'{v}' not written as in the data"
+        for v in needed
+        if v not in (None, "") and str(v).lower() not in lower
+    ]
+
+
+def fact_check(text, facts, *, vocabulary=None, other_names=(), language=None,
+               slot=None) -> list[str]:
     """Reasons ``text`` can't be sent; ``[]`` means it only says what the
     facts say."""
     problems: list[str] = []
@@ -416,8 +472,12 @@ def fact_check(text, facts, *, vocabulary=None, other_names=()) -> list[str]:
         problems.append("money figure")
     if _NON_ASCII_DIGITS.search(text):
         problems.append("non-0-9 digits")
-    elif _SCRIPT.search(text):
-        problems.append("Tamil/Bengali script, not English letters")
+    allowed = _ALLOWED_SCRIPTS.get(language, set())
+    if _TAMIL_SCRIPT.search(text) and "tamil" not in allowed:
+        problems.append("Tamil script for a non-Tamil cashier")
+    if _BENGALI_SCRIPT.search(text) and "bengali" not in allowed:
+        problems.append("Bengali script (Bengali goes in English letters)")
+    problems += _missing_facts(text, facts, slot)
 
     fact_text = " ".join(_fact_strings(facts))
     allowed_nums = {_norm_num(n) for n in _NUM.findall(fact_text)}
@@ -458,15 +518,16 @@ SYSTEM_PROMPT = (
     "write must appear in the facts, written exactly as given with 0-9 "
     "digits. Never add prices, money, percentages, totals, other items, "
     "other suppliers or other people.\n"
-    "- Say the same thing as the reference message, in your own words; vary "
-    "the wording from day to day (use the variation seed).\n"
+    "- Say the same thing as the reference message, in your own words. Vary "
+    "it: different opening, different phrasing from the recent messages "
+    "listed (never repeat them), so it never feels automatic.\n"
     "- Write in the language asked for.\n"
     'Reply with JSON only: {"text": "<the message>", "english": "<the same '
     'message in plain English, for the director to read>"}'
 )
 
 
-def build_user_prompt(slot, language, facts, reference, seed) -> str:
+def build_user_prompt(slot, language, facts, reference, seed, avoid=()) -> str:
     return json.dumps(
         {
             "purpose": SLOTS[slot][2],
@@ -474,19 +535,27 @@ def build_user_prompt(slot, language, facts, reference, seed) -> str:
             "facts": facts or {},
             "reference_message": reference,
             "variation_seed": seed,
+            # What this outlet got for this check-in on recent days: say it
+            # differently so it never reads copy-pasted.
+            "recent_messages_do_not_repeat": [a for a in avoid if a][:3],
         },
         ensure_ascii=False,
     )
 
 
+def variant_for(seed: str) -> int:
+    """Stable per seed (day + outlet + slot), different day to day."""
+    return sum(seed.encode("utf-8")) if seed else 0
+
+
 def build_message(slot, language, facts, *, seed="", complete=None,
-                  vocabulary=None, other_names=()) -> dict:
+                  vocabulary=None, other_names=(), avoid=()) -> dict:
     """Word one check-in. Returns ``{text, english, source, problems,
     template, ai_text, provider, model, tokens_in, tokens_out}`` where
     ``source`` is "ai" when the AI wording passed the fact check, otherwise
     "template". Never raises."""
     language = language if language in LANGUAGES else DEFAULT_LANGUAGE
-    template = render_template(slot, language, facts or {})
+    template = render_template(slot, language, facts or {}, variant_for(seed))
     out = {
         "text": template, "english": "", "source": "template", "problems": [],
         "template": template, "ai_text": None, "provider": staff_ai.provider(),
@@ -498,7 +567,8 @@ def build_message(slot, language, facts, *, seed="", complete=None,
     complete = complete or staff_ai.complete_json
     try:
         result = complete(
-            SYSTEM_PROMPT, build_user_prompt(slot, language, facts, template, seed)
+            SYSTEM_PROMPT,
+            build_user_prompt(slot, language, facts, template, seed, avoid),
         )
     except Exception:
         logger.exception("staff chat: provider call failed")
@@ -517,7 +587,8 @@ def build_message(slot, language, facts, *, seed="", complete=None,
         tokens_out=result.get("tokens_out"),
     )
     problems = fact_check(
-        ai_text, facts, vocabulary=vocabulary, other_names=other_names
+        ai_text, facts, vocabulary=vocabulary, other_names=other_names,
+        language=language, slot=slot,
     )
     if problems:
         out["problems"] = problems

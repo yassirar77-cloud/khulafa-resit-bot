@@ -234,26 +234,28 @@ def format_manager_key_stock(entry: dict) -> str:
         if not outlet or not flags:
             return ""
         day = str(entry.get("business_date") or "")
+
+        # No money figures in outlet groups: the day's sales stay in the
+        # director's summary (format_owner_summary).
         lines = [
-            f"📦 Key stock adhigam — {outlet} • {day}",
+            f"📦 Key stock அதிகம் — {outlet} • {day}",
             "",
-            "Nethu FULL business day kanakku "
-            "(day shift + night shift, 24 mani neram serthu):",
-            "",
+            "நேத்து FULL business day கணக்கு "
+            "(day shift + night shift, 24 மணி நேரம் சேர்த்து):",
         ]
         for f in flags:
             emoji = f"{f['emoji']} " if f.get("emoji") else ""
             lines.append(
                 f"• {emoji}{f['label']}: {_fmt_qty(f['day_qty'])} {f['unit']} "
-                f"vaangiyirukkeenga — intha sales-ku vazhakkamaa "
-                f"~{_fmt_qty(f['expected_qty'])} {f['unit']} thaan."
+                f"வாங்கியிருக்கீங்க — இந்த sales-க்கு வழக்கமா "
+                f"~{_fmt_qty(f['expected_qty'])} {f['unit']} தான்."
             )
         lines += [
             "",
-            "Sales-ku mela stock vaanginaa freshness pogum, "
-            "wastage aagum, cash-um lock aagum.",
-            "Yen ivvalavu vaangineengannu sollunga. "
-            "Innaikku order-a sales paathu alavaa podunga. 🙏",
+            "Sales-க்கு மேல stock வாங்கினா freshness போகும், "
+            "wastage ஆகும், cash-um lock ஆகும்.",
+            "ஏன் இவ்வளவு வாங்கினீங்கன்னு சொல்லுங்க. "
+            "இன்னைக்கு order-அ sales பாத்து அளவா போடுங்க. 🙏",
         ]
         return "\n".join(lines)
     except Exception:

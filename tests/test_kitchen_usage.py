@@ -881,7 +881,7 @@ def test_form_text_says_tap_to_keyin_not_typing():
     t = ku.form_text("cooked", "2026-06-24", "SEK-20", {}, "SEK20")
     assert "Tap untuk key-in" in t
     assert "Balas SATU mesej" not in t   # bulk-typing instruction removed
-    assert "Tamil:" in t                   # Tamil line present
+    assert "தமிழ்" in t                   # Tamil line present
 
 
 def test_build_item_keyboard_has_one_button_per_item_plus_hantar():
@@ -2262,7 +2262,7 @@ def test_stage2_job_posts_comparison_when_pos_complete(monkeypatch):
     assert "Ringkasan Guna vs POS" in text and "🔴" in text  # real comparison
     pandari_chat, pandari_text = bot.sent[1]
     assert pandari_chat == -100
-    assert "Pandari" in pandari_text and "wastage" in pandari_text
+    assert "பண்டாரி" in pandari_text and "wastage" in pandari_text
     # persisted
     assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is True
 
@@ -2293,7 +2293,7 @@ def test_stage2_defers_when_only_day_shift_in_then_posts_after_overnight(monkeyp
     assert len(bot2.sent) == 2
     _, text2 = bot2.sent[0]
     assert "Ringkasan Guna vs POS" in text2
-    assert "Pandari" in bot2.sent[1][1]
+    assert "பண்டாரி" in bot2.sent[1][1]
     assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is True
 
 
@@ -2844,9 +2844,9 @@ def test_leak_items_keeps_only_leak_flags():
 def test_render_pandari_wastage_tamil_content():
     leaks = [_leak_ev(used=100, pos=80)]
     out = ku.render_pandari_wastage("SEK-20", "2026-08-06", leaks)
-    assert "👨‍🍳 Pandari kavanikkanum — SEK-20 • 2026-08-06" in out
-    assert "Ayam Goreng: guna 100 pcs, POS jual 80 pcs mattum — 20 pcs adhigam" in out
-    assert "wastage" in out and "alavaa masak pannunga" in out
+    assert "👨‍🍳 பண்டாரி கவனிக்கணும் — SEK-20 • 2026-08-06" in out
+    assert "Ayam Goreng: guna 100 pcs, POS jual 80 pcs மட்டும் — 20 pcs அதிகம்" in out
+    assert "wastage" in out and "அளவா masak பண்ணுங்க" in out
     # empty input -> no message at all
     assert ku.render_pandari_wastage("SEK-20", "2026-08-06", []) == ""
 
@@ -2855,14 +2855,14 @@ def test_render_wastage_kg_and_purchase_wording():
     leaks = [_leak_ev(label="Telur Ikan", used=1.5, pos=0.4, unit="kg",
                       source="purchase")]
     out = ku.render_pandari_wastage("SEK-20", "2026-08-06", leaks)
-    assert "guna 1.5 kg, beli 0.4 kg mattum — 1.1 kg adhigam" in out
+    assert "guna 1.5 kg, beli 0.4 kg மட்டும் — 1.1 kg அதிகம்" in out
     assert "POS jual" not in out
 
 
 def test_render_manager_wastage_points_at_the_pandari():
     out = ku.render_manager_wastage("SEK-20", "2026-08-06", [_leak_ev()])
     assert "🔴 Wastage alert — SEK-20 • 2026-08-06" in out
-    assert "Pandari-kitta nerla kelunga" in out
+    assert "பண்டாரிகிட்ட நேர்ல கேளுங்க" in out
     assert "follow up" in out
     assert ku.render_manager_wastage("SEK-20", "2026-08-06", []) == ""
 
@@ -2920,7 +2920,7 @@ def test_stage2_manager_wastage_alert_routes_through_delivery_gate(monkeypatch):
     bot2 = _run(fake2, enabled=True)
     mgr_msgs = [t for c, t in bot2.sent if c == 555]
     assert len(mgr_msgs) == 1
-    assert "Wastage alert" in mgr_msgs[0] and "Pandari" in mgr_msgs[0]
+    assert "Wastage alert" in mgr_msgs[0] and "பண்டாரி" in mgr_msgs[0]
     assert not any(c == 999 for c, _ in bot2.sent)
 
 
@@ -2940,7 +2940,7 @@ def test_stage2_no_followups_when_nothing_over_used(monkeypatch):
     assert len(bot.sent) == 1
     _, text = bot.sent[0]
     assert "Semua padan" in text
-    assert "Pandari" not in text
+    assert "பண்டாரி" not in text
 
 
 # --- unfilled-form chaser -----------------------------------------------------
@@ -3003,7 +3003,7 @@ def test_filled_but_unsent_form_gets_the_hantar_nudge():
     forms = ku.find_unsubmitted_forms(fake, now=now)
     assert forms[0]["all_filled"] is True
     text = ku.render_form_reminder("SEK-20", forms[0])
-    assert "'Hantar' thattunga" in text
+    assert "'Hantar' தட்டுங்க" in text
     assert "belum Hantar" in text
 
 
@@ -3011,10 +3011,10 @@ def test_reminder_text_is_simple_and_bilingual():
     form = {"phase": ku.PHASE_LEFT, "business_date": "2026-08-06",
             "filled": 0, "total": 11, "all_filled": False, "age_hours": 12.0}
     text = ku.render_form_reminder("Bistro", form)
-    assert "⏰ Form innum fill aagala!" in text
+    assert "⏰ Form இன்னும் fill ஆகல!" in text
     assert "Rekod Baki" in text and "Bistro" in text
-    assert "11 item-la 11 innum kaali" in text
-    assert "reminder ninnudum" in text
+    assert "11 item-ல 11 இன்னும் காலி" in text
+    assert "reminder நின்னுடும்" in text
     assert "Form belum isi lagi" in text
 
 
@@ -3061,7 +3061,7 @@ def test_form_chase_job_reminds_group_and_escalates_once(monkeypatch):
     bot = _run(datetime(2026, 8, 7, 6, 45, tzinfo=MY))
     chats = [c for c, _ in bot.sent]
     assert chats == [-100]
-    assert "Form innum fill aagala" in bot.sent[0][1]
+    assert "Form இன்னும் fill ஆகல" in bot.sent[0][1]
 
     # 10:45 (age ~8.75h, inside the [8,10) bucket): group nagged AND owner told.
     bot2 = _run(datetime(2026, 8, 7, 10, 45, tzinfo=MY))
@@ -3186,9 +3186,9 @@ def test_group_reminder_combines_open_forms_in_one_message():
     ]
     text = ku.render_group_reminder("SEK-20", forms)
     assert text.count("⏰") == 1
-    assert "2 form innum mudiyala — SEK-20" in text
-    assert "11 item-la 8 innum kaali" in text
-    assert "'Hantar' mattum" in text
+    assert "2 form இன்னும் முடியல — SEK-20" in text
+    assert "11 item-ல 8 இன்னும் காலி" in text
+    assert "'Hantar' மட்டும்" in text
     assert "tekan Hantar" in text
     # One form keeps the detailed single-form wording.
     assert ku.render_group_reminder("SEK-20", forms[:1]) == ku.render_form_reminder("SEK-20", forms[0])
@@ -3219,4 +3219,4 @@ def test_form_chase_job_sends_one_message_per_group(monkeypatch):
     asyncio.run(ku.post_form_reminders(types.SimpleNamespace(bot=bot)))
     group_msgs = [t for c, t in bot.sent if c == -100]
     assert len(group_msgs) == 1
-    assert "2 form innum mudiyala" in group_msgs[0]
+    assert "2 form இன்னும் முடியல" in group_msgs[0]

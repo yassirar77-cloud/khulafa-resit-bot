@@ -34,11 +34,11 @@ NOW = datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc)
 class WithReplyFooter(unittest.TestCase):
 
     def test_appends_the_mechanical_tamil_instruction(self):
-        out = with_reply_footer("Vilai eriduchu!")
+        out = with_reply_footer("விலை ஏறிடுச்சு!")
         self.assertTrue(out.endswith(REPLY_FOOTER))
         # The gesture is spelled out, not just named.
-        self.assertIn("azhuthi pidinga", out)
-        self.assertIn("'Reply' thattunga", out)
+        self.assertIn("அழுத்தி பிடிங்க", out)
+        self.assertIn("'Reply' தட்டுங்க", out)
 
     def test_idempotent_and_safe_on_empty(self):
         once = with_reply_footer("hello")
@@ -132,7 +132,7 @@ def _question(chat=-100, asked_hours_ago=24, replied=False, qtype="price_spike")
         "id": 1,
         "chat_id": chat,
         "question_type": qtype,
-        "question_text": "Vilai eriduchu!\nDetail line",
+        "question_text": "விலை ஏறிடுச்சு!\nDetail line",
         "question_message_id": 555,
         "asked_at": (NOW - timedelta(hours=asked_hours_ago)).isoformat(),
         "replied_at": NOW.isoformat() if replied else None,
@@ -143,7 +143,7 @@ class LogQuestion(unittest.TestCase):
 
     def test_logs_the_ledger_row(self):
         fake = FakeSupabase()
-        ok = log_question(fake, -100, 555, "price_spike", "Vilai eriduchu!", 42)
+        ok = log_question(fake, -100, 555, "price_spike", "விலை ஏறிடுச்சு!", 42)
         self.assertTrue(ok)
         row = fake.rows[0]
         self.assertEqual(row["chat_id"], -100)
@@ -259,18 +259,18 @@ class HumanTouches(unittest.TestCase):
 
     def test_ack_is_tamil_first_then_malay(self):
         ack = format_reply_ack()
-        self.assertIn("bathil note panniten", ack)
+        self.assertIn("பதில் note பண்ணிட்டேன்", ack)
         self.assertIn("Terima kasih", ack)
 
     def test_reminder_is_simple_and_replyable_itself(self):
-        self.assertIn("innum bathil varala", REMINDER_TEXT)
+        self.assertIn("இன்னும் பதில் வரல", REMINDER_TEXT)
         # It invites a reply to ITSELF (the natural tap target).
-        self.assertIn("Intha message-a azhuthi pidinga", REMINDER_TEXT)
+        self.assertIn("இந்த message-அ அழுத்தி பிடிங்க", REMINDER_TEXT)
 
     def test_owner_reply_note_reports_q_and_a(self):
         note = format_owner_reply_note(_question(), "Supplier said flood in Kedah")
         self.assertIn("💬 Reply received (price_spike, chat -100)", note)
-        self.assertIn("Q: Vilai eriduchu!", note)
+        self.assertIn("Q: விலை ஏறிடுச்சு!", note)
         self.assertIn("A: Supplier said flood in Kedah", note)
         self.assertNotIn("Detail line", note)  # first line only
 
