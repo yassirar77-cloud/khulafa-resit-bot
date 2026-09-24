@@ -102,6 +102,12 @@ class StaffLiveWiring(unittest.TestCase):
                       _block(self.src, "async def post_cook_plans("))
         self.assertIn("_staff_live_now(cashier_names.outlet_for_chat(",
                       _block(self.src, "async def post_missing_bill_checks("))
+        # The 20:00 order draft and 10:30 key-stock check would duplicate
+        # the 20:05 order and 10:35 stock check-ins.
+        self.assertIn("_staff_live_now(cashier_names.outlet_for_chat(msg[\"target\"]))",
+                      _block(self.src, "async def post_order_drafts("))
+        self.assertIn("_staff_live_now(cashier_names.outlet_for_chat(decision.target_chat_id))",
+                      _block(self.src, "async def post_key_stock_checks("))
 
     def test_samples_command_director_only(self):
         self.assertIn('CommandHandler("staff_samples", staff_samples_command)', self.src)

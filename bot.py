@@ -6135,6 +6135,9 @@ async def post_key_stock_checks(application: Application, *,
             mgr.get("chat_id") if mgr else None,
             ALERT_CHAT_ID,
         )
+        # A live outlet gets the natural 10:35 stock check-in instead.
+        if _staff_live_now(cashier_names.outlet_for_chat(decision.target_chat_id)):
+            continue
         text = human_touch.personalise(
             supervisor.with_reply_footer(text),
             mgr.get("manager_name") if mgr else None,
@@ -6712,6 +6715,10 @@ async def post_order_drafts(application: Application, *, notify_chat_id=None) ->
     total = len(bundle["messages"])
     failed = 0
     for msg in bundle["messages"]:
+        # A live outlet gets the natural 20:05 order check-in instead.
+        if _staff_live_now(cashier_names.outlet_for_chat(msg["target"])):
+            total -= 1
+            continue
         try:
             await application.bot.send_message(chat_id=msg["target"], text=msg["text"])
         except Exception:
