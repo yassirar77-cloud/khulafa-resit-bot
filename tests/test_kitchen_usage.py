@@ -4,7 +4,7 @@ Covers the numpad state machine, Used = Cooked − Left, the dual-gate mismatch
 flag, the Bistro-only Ayam Rempah rule, the 18:00→02:00 business_date span,
 POS→kg conversion and the mini-summary / digest rendering.
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import kitchen_usage as ku
@@ -3031,7 +3031,7 @@ def test_owner_escalation_lists_state_and_age():
     assert "🚨 Kitchen forms still not keyed in:" in out
     assert "0/11 filled" in out
     assert "Hantar not tapped" in out
-    assert "every 2 hours" in out
+    assert "at most twice per shift" in out
     assert ku.render_form_escalation([]) == ""
 
 
@@ -3069,9 +3069,10 @@ def test_form_chase_job_reminds_group_and_escalates_once(monkeypatch):
     assert chats2 == [-100, 999]
     assert "still not keyed in" in bot2.sent[1][1]
 
-    # 12:45 (age ~10.75h): group still nagged, owner left alone.
+    # 12:45 (age ~10.75h): third morning run — reminded twice this shift
+    # already (08:45, 10:45), so the group is left alone, and so is the owner.
     bot3 = _run(datetime(2026, 8, 7, 12, 45, tzinfo=MY))
-    assert [c for c, _ in bot3.sent] == [-100]
+    assert bot3.sent == []
 
     # Form submitted -> the chase stops by itself.
     fake._store[ku.SESSION_TABLE][0]["status"] = "submitted"
@@ -3150,3 +3151,72 @@ def test_coverage_falls_back_when_summaries_have_no_breakdown():
     cov = ku.pos_shift_coverage(fake, "SEK20", "2026-06-24")
     assert cov["summaries_cover_shifts"] is True
     assert cov["complete"] is True
+
+
+def _form(phase, bd, **kw):
+    base = {"chat_id": -100, "outlet_code": "SEK20", "phase": phase,
+            "business_date": bd, "message_id": 5, "filled": 0, "total": 11,
+            "all_filled": False, "age_hours": 5.0}
+    base.update(kw)
+    return base
+
+
+def test_cooked_form_reminded_twice_per_shift_and_quiet_after_midnight():
+    cooked = _form(ku.PHASE_COOKED, "2026-08-06")   # posted 18:00, eligible 20:00
+    runs = [datetime(2026, 8, 6, 18, 45, tzinfo=MY) + timedelta(hours=2 * i)
+            for i in range(12)]                       # 18:45 .. 16:45 next day
+    sent = [t.strftime("%H:%M") for t in runs if ku.should_remind(cooked, t)]
+    # night: 20:45 + 22:45; quiet 00:00-06:00; 06:45 is the night's 3rd -> no;
+    # morning: 08:45 + 10:45; then nothing more this shift.
+    assert sent == ["20:45", "22:45", "08:45", "10:45"]
+
+
+def test_left_form_due_at_0200_may_be_reminded_in_quiet_hours():
+    left = _form(ku.PHASE_LEFT, "2026-08-06")        # posted 02:00 on 08-07
+    runs = [datetime(2026, 8, 7, 0, 45, tzinfo=MY) + timedelta(hours=2 * i)
+            for i in range(9)]                        # 00:45 .. 16:45
+    sent = [t.strftime("%H:%M") for t in runs if ku.should_remind(left, t)]
+    assert sent == ["04:45", "06:45", "08:45", "10:45"]
+
+
+def test_group_reminder_combines_open_forms_in_one_message():
+    forms = [
+        _form(ku.PHASE_COOKED, "2026-08-06", filled=3),
+        _form(ku.PHASE_LEFT, "2026-08-06", filled=11, all_filled=True),
+    ]
+    text = ku.render_group_reminder("SEK-20", forms)
+    assert text.count("⏰") == 1
+    assert "2 form innum mudiyala — SEK-20" in text
+    assert "11 item-la 8 innum kaali" in text
+    assert "'Hantar' mattum" in text
+    assert "tekan Hantar" in text
+    # One form keeps the detailed single-form wording.
+    assert ku.render_group_reminder("SEK-20", forms[:1]) == ku.render_form_reminder("SEK-20", forms[0])
+    assert ku.render_group_reminder("SEK-20", []) == ""
+
+
+def test_form_chase_job_sends_one_message_per_group(monkeypatch):
+    import asyncio
+    import types
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store[ku.SESSION_TABLE] = [
+        _session(),                                          # LEFT 08-06, chat -100
+        _session(bd="2026-08-06", phase=ku.PHASE_COOKED),    # COOKED 08-06, chat -100
+    ]
+    monkeypatch.setenv("KITCHEN_LOG_ENABLED", "1")
+    monkeypatch.setenv("ALERT_CHAT_ID", "999")
+    monkeypatch.setattr(ku, "_supabase", fake)
+    now = datetime(2026, 8, 7, 8, 45, tzinfo=MY)
+
+    class _DT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+    monkeypatch.setattr(ku, "datetime", _DT)
+    bot = _CaptureBot()
+    asyncio.run(ku.post_form_reminders(types.SimpleNamespace(bot=bot)))
+    group_msgs = [t for c, t in bot.sent if c == -100]
+    assert len(group_msgs) == 1
+    assert "2 form innum mudiyala" in group_msgs[0]

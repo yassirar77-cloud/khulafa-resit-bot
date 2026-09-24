@@ -2139,10 +2139,12 @@ async def _send_wastage_followups(application, kitchen_chat_id, outlet_code,
 # The 18:00 COOKED and 02:00 LEFT forms get posted to every kitchen group —
 # and some groups leave them sitting at "—" all day (live: a LEFT form still
 # untouched at 14:08). An unfilled form means that outlet's day can NEVER
-# reconcile, silently. So the bot now chases: every two hours, any posted,
-# unsubmitted form gets a simple bilingual reminder in its group — and keeps
-# getting one until the crew keys in and taps Hantar. Once the form is
-# submitted the session status flips and the chase stops by itself.
+# reconcile, silently. So the bot chases, but politely: the job runs every two
+# hours, yet each open form is reminded at most twice per shift (morning
+# 07-19, night 19-07), all of a group's open forms go in ONE message, and
+# nothing is sent 00:00-06:00 unless the form was due in that window (the
+# 02:00 LEFT form). The old every-2-hours-per-form nag was ~130 messages a day
+# across the groups. Once the form is submitted the chase stops by itself.
 
 # Don't chase a form in its first two hours — the crew may simply not have
 # closed the shift yet.
@@ -2151,6 +2153,55 @@ _CHASE_GRACE_HOURS = 2.0
 # job sees each form in the [8, 10) age bucket exactly once — no owner spam).
 _ESCALATE_AGE_HOURS = 8.0
 _ESCALATE_BUCKET_HOURS = 2.0
+# The scheduled chase runs at every even hour, :45 (bot.py).
+_CHASE_MINUTE = 45
+_MAX_REMINDERS_PER_SHIFT = 2
+_QUIET_START_HOUR, _QUIET_END_HOUR = 0, 6
+
+
+def _in_quiet_hours(moment: datetime) -> bool:
+    return _QUIET_START_HOUR <= moment.hour < _QUIET_END_HOUR
+
+
+def _chase_runs(start: datetime, end: datetime) -> list[datetime]:
+    """Scheduled chase times (even hour, :45) in ``[start, end)``."""
+    t = start.replace(minute=_CHASE_MINUTE, second=0, microsecond=0)
+    if t.hour % 2:
+        t += timedelta(hours=1)
+    while t < start:
+        t += timedelta(hours=2)
+    runs = []
+    while t < end:
+        runs.append(t)
+        t += timedelta(hours=2)
+    return runs
+
+
+def should_remind(form: dict, now: datetime) -> bool:
+    """True when this form gets a reminder at ``now``.
+
+    Stateless — derived from the fixed schedule, so it survives restarts:
+    counts the earlier scheduled runs in the same shift at which this form
+    was already eligible, and allows the reminder only while that count is
+    under two. Quiet 00:00-06:00 unless the form itself was due then."""
+    import cashier_names
+
+    posted = form_posted_at(form.get("phase"), form.get("business_date"))
+    if posted is None:
+        return False
+    eligible_from = posted + timedelta(hours=_CHASE_GRACE_HOURS)
+    if now < eligible_from:
+        return False
+    due_in_quiet = _in_quiet_hours(posted)
+    if _in_quiet_hours(now) and not due_in_quiet:
+        return False
+    shift_now = cashier_names.shift_at(now)
+    earlier = [
+        t for t in _chase_runs(eligible_from, now - timedelta(minutes=5))
+        if cashier_names.shift_at(t) == shift_now
+        and (due_in_quiet or not _in_quiet_hours(t))
+    ]
+    return len(earlier) < _MAX_REMINDERS_PER_SHIFT
 
 
 def form_posted_at(phase: str, business_date) -> datetime | None:
@@ -2257,6 +2308,36 @@ def render_form_reminder(outlet_label, form: dict) -> str:
         return ""
 
 
+def render_group_reminder(outlet_label, forms: list[dict]) -> str:
+    """ONE reminder for all of a group's open forms. A single form keeps the
+    detailed per-form wording; several are listed one line each. Never
+    raises; ``""`` on malformed input."""
+    try:
+        forms = [f for f in forms or [] if isinstance(f, dict)]
+        if not forms:
+            return ""
+        if len(forms) == 1:
+            return render_form_reminder(outlet_label, forms[0])
+        lines = [f"⏰ {len(forms)} form innum mudiyala — {outlet_label}", ""]
+        for f in forms:
+            title = form_title(f.get("phase") or PHASE_COOKED)
+            if f.get("all_filled"):
+                state = "ellaam pottachu, 'Hantar' mattum thattunga"
+            else:
+                missing = int(f["total"]) - int(f["filled"])
+                state = f"{f['total']} item-la {missing} innum kaali"
+            lines.append(f"• {title} {f.get('business_date')}: {state}")
+        lines += [
+            "",
+            "Form-la item-a thatti number podunga, appuram 'Hantar' 🙏",
+            "Sila isi semua form & tekan Hantar.",
+        ]
+        return "\n".join(lines)
+    except Exception:
+        logger.exception("kitchen: group form reminder render failed")
+        return ""
+
+
 def render_form_escalation(stale: list[dict], label_for=None) -> str:
     """English owner note for forms ignored past the escalation age.
     ``""`` when nothing qualifies. Never raises."""
@@ -2281,7 +2362,10 @@ def render_form_escalation(stale: list[dict], label_for=None) -> str:
             )
         if len(lines) == 1:
             return ""
-        lines.append("The group is being reminded every 2 hours until they key in.")
+        lines.append(
+            "The group is reminded at most twice per shift (one message for "
+            "all its open forms, none 00:00-06:00 unless the form was due then)."
+        )
         return "\n".join(lines)
     except Exception:
         logger.exception("kitchen: form escalation render failed")
@@ -2289,17 +2373,19 @@ def render_form_escalation(stale: list[dict], label_for=None) -> str:
 
 
 async def post_form_reminders(application) -> None:
-    """Every-2-hours chaser: nag each group with a posted, unsubmitted form
-    (reply-quoting the form so it is one tap away), and tell the owner once
-    when a form has been ignored ~8 hours. Stops by itself the moment the
-    form is submitted. Never raises."""
+    """Every-2-hours chaser: one message per group listing its open forms
+    that are due a reminder (max two per form per shift, quiet 00:00-06:00
+    unless due then), reply-quoting the newest form so it is one tap away;
+    tell the owner once when a form has been ignored ~8 hours. Stops by
+    itself the moment the form is submitted. Never raises."""
     try:
         if not kitchen_log_enabled():
             return
         if _supabase is None:
             logger.warning("kitchen: supabase not initialised — form chase skipped")
             return
-        forms = await asyncio.to_thread(find_unsubmitted_forms, _supabase)
+        now = datetime.now(MY_TZ)
+        forms = await asyncio.to_thread(find_unsubmitted_forms, _supabase, now=now)
         if not forms:
             return
         try:
@@ -2307,27 +2393,32 @@ async def post_form_reminders(application) -> None:
         except Exception:
             outlet_display_name = lambda c: str(c or "?")  # noqa: E731
 
-        sent = 0
+        by_chat: dict = {}
         for form in forms:
-            if form.get("chat_id") is None:
+            if form.get("chat_id") is None or not should_remind(form, now):
                 continue
-            text = render_form_reminder(
-                outlet_display_name(form.get("outlet_code")), form
+            by_chat.setdefault(form["chat_id"], []).append(form)
+
+        sent = reminded = 0
+        for chat_id, group_forms in by_chat.items():
+            text = render_group_reminder(
+                outlet_display_name(group_forms[0].get("outlet_code")), group_forms
             )
             if not text:
                 continue
+            newest = max(group_forms, key=lambda f: -f["age_hours"])
             try:
                 await application.bot.send_message(
-                    chat_id=form["chat_id"],
+                    chat_id=chat_id,
                     text=text,
-                    reply_to_message_id=form.get("message_id"),
+                    reply_to_message_id=newest.get("message_id"),
                     allow_sending_without_reply=True,
                 )
                 sent += 1
+                reminded += len(group_forms)
             except Exception:
                 logger.exception(
-                    "kitchen: form reminder send failed (chat=%s)",
-                    form.get("chat_id"),
+                    "kitchen: form reminder send failed (chat=%s)", chat_id
                 )
 
         stale = [
@@ -2348,8 +2439,9 @@ async def post_form_reminders(application) -> None:
                         chat_id=owner_chat_id, text=note
                     )
         logger.info(
-            "kitchen form chase: %d unsubmitted, %d reminded, %d escalated",
-            len(forms), sent, len(stale),
+            "kitchen form chase: %d unsubmitted, %d reminded in %d message(s), "
+            "%d escalated",
+            len(forms), reminded, sent, len(stale),
         )
     except Exception:
         logger.exception("kitchen: form chase failed")
