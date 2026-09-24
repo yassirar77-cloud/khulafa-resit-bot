@@ -137,5 +137,38 @@ class PraiseAndScoreboard(unittest.TestCase):
         )
 
 
+class OutletGroups(unittest.TestCase):
+    """A registered outlet group already opens with the cashier's name (the
+    bot client adds it), so the human-touch layer must not add a second."""
+
+    GROUP = -5043287182
+
+    def setUp(self):
+        import cashier_names
+        from tests.fake_supabase import FakeSupabase
+        sb = FakeSupabase()
+        sb.table(cashier_names.MANAGERS_TABLE).insert(
+            [{"outlet_code": "SEK20", "manager_name": "Syed / Ismath", "chat_id": self.GROUP}]
+        ).execute()
+        cashier_names.refresh(sb)
+        self.cn = cashier_names
+
+    def tearDown(self):
+        self.cn.reset_cache()
+
+    def test_no_greeting_in_group(self):
+        self.assertEqual(greeting("Syed / Ismath", self.GROUP), "")
+        self.assertEqual(personalise("Soalan", "Syed / Ismath", self.GROUP), "Soalan")
+
+    def test_group_ack_has_no_name_but_still_mentions_boss(self):
+        for day in range(1, 8):
+            text = ack("Syed / Ismath", self.GROUP, date(2026, 9, day))
+            self.assertNotIn("Syed", text)
+            self.assertIn("Boss", text)
+
+    def test_dm_manager_still_greeted_by_name(self):
+        self.assertIn("Ravi boss", greeting("Ravi", 4242, date(2026, 9, 1)))
+
+
 if __name__ == "__main__":
     unittest.main()

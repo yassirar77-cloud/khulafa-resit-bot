@@ -39,30 +39,39 @@ Everything else goes to the shop manager, or is already in a scheduled report.
 
 Set `DIRECTOR_FEED=full` on Render to bring both back.
 
-## Shop manager — what each one should get
+## Outlet group — what each shop gets
+
+At Khulafa the cashier is the manager, so each outlet's Telegram group is
+registered as its manager (`outlet_managers.chat_id` = the group id). Every
+message to a group opens with the cashier on shift — `Rahim,` — see
+`cashier_names.py` (morning 07:00–18:59, night 19:00–06:59 MY; `Cashier,` when
+no name is set). Change a name with `/cashier SEK20 night Ismath`; list them
+with `/cashier`; test every group with `/ping_managers`.
+
+Groups get **tasks**:
 
 | When | Message |
 |---|---|
 | Live | Receipt confirmation, anomaly note, audit question (big purchase / new supplier / odd item price) |
-| Live | Tamil price-spike question with cheaper shops |
+| Live | Tamil price-spike question with cheaper shops — in the group the bill came from |
 | 10:30 | Key stock check |
 | 10:45 | Slow items to push today |
 | 11:00 | Cook-to-demand plan (how much to cook) |
+| 17:00 | Reminder for unanswered questions |
 | 18:00 / 00:00 / 02:00 | COOKED / night / LEFT kitchen forms (+ reminders) |
 | 20:00 | Tomorrow's order draft |
 | 21:00 | Missing supplier bills |
-| 21:30 | Their own bill analysis (what went up, which branch buys cheaper) |
-| Mon 09:00 / 09:30 | Weekly food cost, overbuying question |
-| Mon 11:00 | Praise for full responders |
 
-## The other big source of noise: `MANAGER_DELIVERY_ENABLED`
+**Money reports stay with the director** (who already gets each in full):
+weekly food cost %, weekly overbuying, weekly praise, nightly bill-analysis
+note. `GROUP_MONEY_REPORTS` on Render lets some back into groups, e.g.
+`GROUP_MONEY_REPORTS=praise` or `all` (keys: `food_cost`, `overbuy`, `praise`,
+`bill_analysis`). A manager registered by DM still gets them.
 
-While this flag is **off** (the default), every manager message in the table
-above is sent to the director instead, prefixed `[TEST — would go to … manager]`.
-With 5+ shops that is dozens of messages a day meant for someone else.
+## Delivery gate: `MANAGER_DELIVERY_ENABLED`
 
-Once each outlet has a registered manager (`/register`), set
-`MANAGER_DELIVERY_ENABLED=true` on Render. Those messages then go to the
-managers, and the director only keeps the HQ summaries above. Any outlet
-without a manager still falls back to the director with a
-`[NO MANAGER REGISTERED]` prefix, so nothing is silently dropped.
+While this flag is **off**, every group message above is sent to the
+director instead, prefixed `[TEST — would go to … manager]`. It is **on** in
+production. An outlet with no `outlet_managers` row falls back to the
+director with a `[NO MANAGER REGISTERED]` prefix, so nothing is silently
+dropped.
