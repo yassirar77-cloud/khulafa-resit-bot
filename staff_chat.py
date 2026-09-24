@@ -1,0 +1,578 @@
+"""Natural staff chat — the bot checking on each shop like an owner doing rounds.
+
+The division of labour is strict:
+
+* this code decides WHICH question to ask and WHICH facts go in, straight
+  from the database (order drafts, cook-plan forecast, missing bills);
+* the AI provider (``staff_ai``) only phrases it in the cashier's language;
+* ``fact_check`` then rejects any wording that carries a number, item,
+  supplier, money figure or name that isn't in the facts — and the plain
+  template is sent instead. No invented numbers, ever.
+
+``STAFF_CHAT_STYLE`` (Render env):
+  classic  (default)  nothing changes; the check-in jobs do nothing
+  preview             every check-in is written for every outlet and sent to
+                      the DIRECTOR chat only, one digest per check-in, so the
+                      wording can be read before any shop sees it
+
+Every generated message is logged to ``staff_chat_log`` with the facts it
+was given (see migrations/0044_staff_chat.sql).
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+from datetime import date, datetime
+
+import cashier_names
+import staff_ai
+
+logger = logging.getLogger(__name__)
+
+LOG_TABLE = "staff_chat_log"
+
+CLASSIC = "classic"
+PREVIEW = "preview"
+STYLES = (CLASSIC, PREVIEW)
+
+# --- languages ---------------------------------------------------------------
+
+BM_TAMIL = "bm_tamil"
+LANGUAGES = ("tamil", "bm", "bengali", "english", "indonesian", BM_TAMIL)
+DEFAULT_LANGUAGE = BM_TAMIL
+
+_LANG_ALIASES = {
+    "tamil": "tamil", "ta": "tamil",
+    "bm": "bm", "malay": "bm", "melayu": "bm", "bahasa": "bm",
+    "bengali": "bengali", "bangla": "bengali", "bn": "bengali",
+    "english": "english", "en": "english", "eng": "english",
+    "indonesian": "indonesian", "indo": "indonesian", "id": "indonesian",
+    "bm_tamil": BM_TAMIL, "mix": BM_TAMIL, "bm+tamil": BM_TAMIL,
+}
+
+_LANG_PROMPT = {
+    "tamil": "simple spoken Malaysian Tamil in Tamil script. Everyday English "
+             "or Malay trade words (order, bill, supplier, ayam) are fine.",
+    "bm": "simple spoken Malaysian Malay (Bahasa Malaysia), kedai register.",
+    "bengali": "simple spoken Bengali in Bengali script, as a Bangladeshi "
+               "worker in Malaysia speaks. English/Malay trade words are fine. "
+               "Keep numbers as 0-9 digits.",
+    "english": "simple, plain English for a non-native speaker.",
+    "indonesian": "simple spoken Bahasa Indonesia.",
+    BM_TAMIL: "one short line of simple Malay, then the same in simple spoken "
+              "Tamil (Tamil script) on the next line.",
+}
+
+
+def normalize_language(word) -> str | None:
+    return _LANG_ALIASES.get(str(word or "").strip().lower())
+
+
+def style() -> str:
+    raw = (os.environ.get("STAFF_CHAT_STYLE") or "").strip().lower()
+    return raw if raw in STYLES else CLASSIC
+
+
+# --- check-in slots ----------------------------------------------------------
+
+MORNING, NIGHT = cashier_names.MORNING, cashier_names.NIGHT
+
+# slot -> (shift, scheduled time "HH:MM", what the question is for)
+SLOTS: dict[str, tuple[str, str, str]] = {
+    "open": (MORNING, "08:00", "start of the morning shift: is the shop "
+             "ready, is anything short today"),
+    "stock": (MORNING, "10:35", "stock check on ONE key item from today's "
+              "order draft: will it last until tonight"),
+    "cook": (MORNING, "11:05", "today's cook plan for ONE dish: how much to "
+             "cook versus what they usually cook"),
+    "lunch": (MORNING, "15:00", "after lunch: how was the crowd, did any "
+              "dish finish early"),
+    "order": (NIGHT, "20:05", "tomorrow's order draft: confirm or change "
+              "(the main items are listed)"),
+    "bills": (NIGHT, "21:05", "a regular supplier's bill hasn't been "
+              "uploaded: is there a bill, please upload it"),
+    "night": (NIGHT, "23:00", "late-night check: is everything OK, "
+              "anything broken or finished"),
+}
+DATA_SLOTS = ("stock", "cook", "order", "bills")
+
+# Key items asked about first, in order.
+PRIORITY_ITEMS = ("ayam", "ikan", "kambing", "daging", "sotong", "udang", "telur")
+
+
+# --- templates ---------------------------------------------------------------
+# The plain fallback, and the reference the AI is asked to rephrase. Bodies
+# only: in a group the bot client prepends "<cashier>," itself.
+
+_T: dict[str, dict[str, str]] = {
+    "bm": {
+        "open": "Pagi 👋 Kedai dah siap? Ada barang kurang hari ni?",
+        "stock": "{item} cukup sampai malam? Draft hari ni {qty} {pack} dari {supplier}.",
+        "cook_cut": "{item} hari ni masak {cook} {unit} cukup.{usual_bm} Ok?",
+        "cook_raise": "{item} hari ni masak {cook} {unit}, lebih sikit dari biasa.{usual_bm} Ok?",
+        "lunch": "Lunch tadi ramai? Ada lauk habis awal?",
+        "order": "Order esok: {list}{more_bm}. Ok atau nak tukar?",
+        "bills": "Bil {supplier} dah {days} hari tak masuk (last {last}). Ada bil? Tolong upload 🙏",
+        "night": "Malam ni ok? Ada barang rosak atau habis?",
+    },
+    "tamil": {
+        "open": "காலை வணக்கம் 👋 கடை ரெடியா? இன்னைக்கு ஏதாவது சாமான் குறைவா?",
+        "stock": "{item} இரவு வரைக்கும் போதுமா? இன்னைக்கு draft-ல {supplier} {qty} {pack}.",
+        "cook_cut": "இன்னைக்கு {item} {cook} {unit} சமைச்சா போதும்.{usual_ta} சரியா?",
+        "cook_raise": "இன்னைக்கு {item} {cook} {unit} சமைங்க, வழக்கத்தை விட கொஞ்சம் அதிகம்.{usual_ta} சரியா?",
+        "lunch": "மதியம் கூட்டம் எப்படி? ஏதாவது கறி சீக்கிரம் தீர்ந்துச்சா?",
+        "order": "நாளைக்கு order: {list}{more_ta}. சரியா, மாத்தணுமா?",
+        "bills": "{supplier} bill {days} நாளா வரல (கடைசி {last}). இருக்கா? Upload பண்ணுங்க 🙏",
+        "night": "இன்னைக்கு ராத்திரி எல்லாம் சரியா? ஏதாவது உடைஞ்சதா, தீர்ந்ததா?",
+    },
+    "english": {
+        "open": "Morning 👋 Shop ready? Anything short today?",
+        "stock": "{item} enough till tonight? Today's draft: {qty} {pack} from {supplier}.",
+        "cook_cut": "Today {item}: cooking {cook} {unit} is enough.{usual_en} OK?",
+        "cook_raise": "Today {item}: cook {cook} {unit}, a bit more than usual.{usual_en} OK?",
+        "lunch": "How was the lunch crowd? Anything finished early?",
+        "order": "Tomorrow's order: {list}{more_en}. OK or change?",
+        "bills": "{supplier} bill not in for {days} days (last {last}). Got it? Please upload 🙏",
+        "night": "All OK tonight? Anything broken or finished?",
+    },
+    "indonesian": {
+        "open": "Pagi 👋 Toko sudah siap? Ada barang yang kurang hari ini?",
+        "stock": "{item} cukup sampai malam? Draft hari ini {qty} {pack} dari {supplier}.",
+        "cook_cut": "{item} hari ini masak {cook} {unit} cukup.{usual_id} Oke?",
+        "cook_raise": "{item} hari ini masak {cook} {unit}, sedikit lebih dari biasa.{usual_id} Oke?",
+        "lunch": "Makan siang tadi ramai? Ada lauk yang cepat habis?",
+        "order": "Order besok: {list}{more_id}. Oke atau mau ganti?",
+        "bills": "Nota {supplier} sudah {days} hari belum masuk (terakhir {last}). Ada notanya? Tolong upload 🙏",
+        "night": "Malam ini aman? Ada barang rusak atau habis?",
+    },
+    "bengali": {
+        "open": "সুপ্রভাত 👋 দোকান রেডি? আজ কিছু কম আছে?",
+        "stock": "{item} রাত পর্যন্ত চলবে? আজকের draft: {supplier} থেকে {qty} {pack}।",
+        "cook_cut": "আজ {item} {cook} {unit} রান্না করলেই হবে।{usual_bn} ঠিক আছে?",
+        "cook_raise": "আজ {item} {cook} {unit} রান্না করুন, সাধারণের চেয়ে একটু বেশি।{usual_bn} ঠিক আছে?",
+        "lunch": "দুপুরে ভিড় কেমন ছিল? কোনো তরকারি তাড়াতাড়ি শেষ হয়েছে?",
+        "order": "কালকের order: {list}{more_bn}। ঠিক আছে, নাকি বদলাবেন?",
+        "bills": "{supplier} এর bill {days} দিন আসেনি (শেষ {last})। bill আছে? upload করুন 🙏",
+        "night": "আজ রাতে সব ঠিক? কিছু ভেঙেছে বা শেষ হয়েছে?",
+    },
+}
+
+_USUAL = {
+    "usual_bm": " Biasa masak {usual}.",
+    "usual_ta": " வழக்கமா {usual} சமைப்பீங்க.",
+    "usual_en": " Usually you cook {usual}.",
+    "usual_id": " Biasanya masak {usual}.",
+    "usual_bn": " সাধারণত {usual} রান্না হয়।",
+}
+_MORE = {
+    "more_bm": " (+{n} lagi)", "more_ta": " (+{n})", "more_en": " (+{n} more)",
+    "more_id": " (+{n} lagi)", "more_bn": " (+{n} আরও)",
+}
+
+
+def _qty_pack(qty, pack) -> str:
+    """'75kg' but '50 biji', '6 kotak'."""
+    pack = str(pack or "")
+    return f"{qty}{pack}" if pack.lower() in ("kg", "g", "l", "ml") else f"{qty} {pack}".strip()
+
+
+def _template_key(slot: str, facts: dict) -> str:
+    if slot == "cook":
+        return "cook_raise" if facts.get("action") == "RAISE" else "cook_cut"
+    return slot
+
+
+def render_template(slot: str, language: str, facts: dict) -> str:
+    """The plain message for a slot, in ``language``. ``""`` if facts are
+    missing for a data slot. Never raises."""
+    try:
+        facts = facts or {}
+        values = dict(facts)
+        items = facts.get("items") or []
+        values["list"] = ", ".join(
+            f"{i['item']} {_qty_pack(i['qty'], i['pack'])}" for i in items
+        )
+        more = int(facts.get("more") or 0)
+        for key, fmt in _MORE.items():
+            values[key] = fmt.format(n=more) if more else ""
+        usual = facts.get("usual")
+        for key, fmt in _USUAL.items():
+            values[key] = fmt.format(usual=usual) if usual not in (None, "") else ""
+        key = _template_key(slot, facts)
+
+        def one(lang):
+            return _T[lang][key].format(**values)
+
+        if language == BM_TAMIL:
+            return f"{one('bm')}\n{one('tamil')}"
+        return one(language if language in _T else "bm")
+    except (KeyError, ValueError, IndexError, TypeError):
+        logger.exception("staff chat: template failed (slot=%s)", slot)
+        return ""
+
+
+# --- facts from the data -----------------------------------------------------
+
+def fmt_qty(value, unit=None) -> str:
+    """Numbers as the cashier should read them: whole pieces, kg to 0.5."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if unit in ("kg",):
+        v = round(v * 2) / 2
+    else:
+        v = round(v)
+    return f"{v:g}"
+
+
+def item_label(canonical) -> str:
+    code = str(canonical or "").strip()
+    try:
+        import kitchen_usage
+        meta = kitchen_usage.ITEM_BY_CODE.get(code)
+        if meta:
+            return meta["label"]
+    except Exception:
+        pass
+    try:
+        import order_items
+        name = order_items.display_name(code)
+        if name:
+            return name
+    except Exception:
+        pass
+    return code.replace("_", " ").title()
+
+
+def _priority(item: str) -> int:
+    key = str(item or "").lower()
+    for i, p in enumerate(PRIORITY_ITEMS):
+        if key == p or key.startswith(p + "_"):
+            return i
+    return len(PRIORITY_ITEMS)
+
+
+def stock_facts(draft_rows) -> dict | None:
+    """ONE key item from today's order draft to ask about."""
+    rows = [r for r in draft_rows or [] if r.get("item") and r.get("qty")]
+    if not rows:
+        return None
+    rows.sort(key=lambda r: (_priority(r["item"]), -float(r["qty"] or 0)))
+    r = rows[0]
+    return {
+        "item": item_label(r["item"]),
+        "qty": fmt_qty(r["qty"], r.get("pack")),
+        "pack": str(r.get("pack") or ""),
+        "supplier": _short_supplier(r.get("supplier")),
+    }
+
+
+def order_facts(draft_rows, top: int = 3) -> dict | None:
+    """Tomorrow's draft: the main items, and how many more."""
+    rows = [r for r in draft_rows or [] if r.get("item") and r.get("qty")]
+    if not rows:
+        return None
+    rows.sort(key=lambda r: (_priority(r["item"]), -float(r["qty"] or 0)))
+    return {
+        "items": [
+            {"item": item_label(r["item"]), "qty": fmt_qty(r["qty"], r.get("pack")),
+             "pack": str(r.get("pack") or "")}
+            for r in rows[:top]
+        ],
+        "more": max(0, len(rows) - top),
+    }
+
+
+def cook_facts(forecast_rows) -> dict | None:
+    """The one dish whose plan differs most from what they usually cook."""
+    best, best_gap = None, 0.0
+    for r in forecast_rows or []:
+        if r.get("action") not in ("CUT", "RAISE"):
+            continue
+        try:
+            rec = float(r["recommend_qty"])
+            usual = float(r["usual_cooked"]) if r.get("usual_cooked") is not None else None
+        except (KeyError, TypeError, ValueError):
+            continue
+        gap = abs(rec - usual) / usual if usual else 0.0
+        if best is None or gap > best_gap:
+            best, best_gap = r, gap
+    if best is None:
+        return None
+    unit = best.get("unit") or "pcs"
+    cook = fmt_qty(best["recommend_qty"], unit)
+    usual = fmt_qty(best.get("usual_cooked"), unit) if best.get("usual_cooked") is not None else None
+    if usual == cook:
+        return None
+    return {
+        "item": item_label(best.get("item_code")),
+        "cook": cook,
+        "unit": unit,
+        "usual": usual,
+        "action": best["action"],
+    }
+
+
+def bills_facts(entries) -> dict | None:
+    """The most overdue regular supplier for one outlet chat."""
+    rows = [e for e in entries or [] if e.get("supplier") and e.get("last_date")]
+    if not rows:
+        return None
+    rows.sort(key=lambda e: -int(e.get("days_overdue") or 0))
+    e = rows[0]
+    last = e["last_date"]
+    return {
+        "supplier": _short_supplier(e["supplier"]),
+        "days": str(int(e["days_missing"])),
+        "last": f"{last.day:02d}/{last.month:02d}",
+    }
+
+
+_COMPANY_SUFFIX = re.compile(
+    r"\s*(\(M\)|\bSDN\.?\s*BHD\b\.?|\bBHD\b\.?)", re.IGNORECASE
+)
+
+
+def _short_supplier(name) -> str:
+    """'BESTARI FARM (M) SDN BHD' -> 'Bestari Farm' — how a cashier says it.
+    Short acronyms stay upper case ('JY Resources')."""
+    s = _COMPANY_SUFFIX.sub("", str(name or "")).strip(" .,-")
+    if not s.isupper():
+        return s
+    return " ".join(w if len(w) <= 2 else w.capitalize() for w in s.split())
+
+
+# --- fact check --------------------------------------------------------------
+
+_NUM = re.compile(r"\d+(?:[.,]\d+)?")
+_NON_ASCII_DIGITS = re.compile(r"[०-९০-৯௦-௯٠-٩]")
+_MONEY = re.compile(r"\bRM\s?\d|\bRM\b|%|\$|ringgit|\bsen\b", re.IGNORECASE)
+_LABELS = re.compile(r"ALERT|\[TEST|\[PREVIEW|WARNING", re.IGNORECASE)
+_WORD = re.compile(r"[a-z]+")
+
+
+def _norm_num(s: str) -> str:
+    s = s.replace(",", ".")
+    try:
+        return f"{float(s):g}"
+    except ValueError:
+        return s
+
+
+def _fact_strings(facts) -> list[str]:
+    out = []
+    if isinstance(facts, dict):
+        for v in facts.values():
+            out += _fact_strings(v)
+    elif isinstance(facts, (list, tuple)):
+        for v in facts:
+            out += _fact_strings(v)
+    elif facts is not None:
+        out.append(str(facts))
+    return out
+
+
+def item_vocabulary() -> set[str]:
+    """Every item name the bot knows, lowercased — used to spot an item the
+    wording mentions that the facts don't."""
+    vocab: set[str] = set(PRIORITY_ITEMS)
+    try:
+        import kitchen_usage
+        for meta in kitchen_usage.ITEM_BY_CODE.values():
+            vocab.add(meta["label"].lower())
+    except Exception:
+        pass
+    try:
+        import order_items
+        for code, (label, _unit) in order_items._DISPLAY.items():
+            vocab.add(label.lower())
+            vocab.add(code.replace("_", " ").lower())
+    except Exception:
+        pass
+    return {v for v in vocab if v}
+
+
+def fact_check(text, facts, *, vocabulary=None, other_names=()) -> list[str]:
+    """Reasons ``text`` can't be sent; ``[]`` means it only says what the
+    facts say."""
+    problems: list[str] = []
+    if not isinstance(text, str) or not text.strip():
+        return ["empty"]
+    if len(text) > 400 or text.count("\n") > 3:
+        problems.append("too long")
+    if _LABELS.search(text):
+        problems.append("system label")
+    if _MONEY.search(text):
+        problems.append("money figure")
+    if _NON_ASCII_DIGITS.search(text):
+        problems.append("non-0-9 digits")
+
+    fact_text = " ".join(_fact_strings(facts))
+    allowed_nums = {_norm_num(n) for n in _NUM.findall(fact_text)}
+    for n in _NUM.findall(text):
+        if _norm_num(n) not in allowed_nums:
+            problems.append(f"number {n} not in data")
+
+    lower = text.lower()
+    fact_words = set(_WORD.findall(fact_text.lower()))
+    for term in sorted(vocabulary if vocabulary is not None else item_vocabulary()):
+        if re.search(rf"(?<![a-z]){re.escape(term)}(?![a-z])", lower):
+            if not set(_WORD.findall(term)) <= fact_words:
+                problems.append(f"item '{term}' not in data")
+
+    if re.search(r"sdn\.?\s*bhd", lower) and "sdn" not in fact_text.lower():
+        problems.append("supplier not in data")
+    for name in other_names:
+        name = str(name or "").strip()
+        if name and re.search(rf"(?<![A-Za-z]){re.escape(name)}(?![A-Za-z])", text):
+            problems.append(f"name {name} not the cashier on shift")
+    return problems
+
+
+# --- wording -----------------------------------------------------------------
+
+SYSTEM_PROMPT = (
+    "You write short Telegram messages from Khulafa HQ, the office of a "
+    "Malaysian restaurant group, to the cashier on shift at one outlet. The "
+    "cashier also runs the shop. Sound like a boss who knows the shop "
+    "messaging his staff on WhatsApp: friendly but firm, casual, human.\n"
+    "Rules:\n"
+    "- 1 to 3 short lines. No headers, no bullet points, no labels.\n"
+    "- Do NOT start with or include the cashier's name; it is added before "
+    "your text.\n"
+    "- Never pretend to be a specific person and never sign the message.\n"
+    "- Ask exactly ONE question.\n"
+    "- Use ONLY the facts given. Every number, item, supplier and date you "
+    "write must appear in the facts, written exactly as given with 0-9 "
+    "digits. Never add prices, money, percentages, totals, other items, "
+    "other suppliers or other people.\n"
+    "- Say the same thing as the reference message, in your own words; vary "
+    "the wording from day to day (use the variation seed).\n"
+    "- Write in the language asked for.\n"
+    'Reply with JSON only: {"text": "<the message>", "english": "<the same '
+    'message in plain English, for the director to read>"}'
+)
+
+
+def build_user_prompt(slot, language, facts, reference, seed) -> str:
+    return json.dumps(
+        {
+            "purpose": SLOTS[slot][2],
+            "language": _LANG_PROMPT.get(language, _LANG_PROMPT[DEFAULT_LANGUAGE]),
+            "facts": facts or {},
+            "reference_message": reference,
+            "variation_seed": seed,
+        },
+        ensure_ascii=False,
+    )
+
+
+def build_message(slot, language, facts, *, seed="", complete=None,
+                  vocabulary=None, other_names=()) -> dict:
+    """Word one check-in. Returns ``{text, english, source, problems,
+    template, ai_text, provider, model, tokens_in, tokens_out}`` where
+    ``source`` is "ai" when the AI wording passed the fact check, otherwise
+    "template". Never raises."""
+    language = language if language in LANGUAGES else DEFAULT_LANGUAGE
+    template = render_template(slot, language, facts or {})
+    out = {
+        "text": template, "english": "", "source": "template", "problems": [],
+        "template": template, "ai_text": None, "provider": staff_ai.provider(),
+        "model": staff_ai.model(), "tokens_in": None, "tokens_out": None,
+    }
+    if not template:
+        out["problems"] = ["no template"]
+        return out
+    complete = complete or staff_ai.complete_json
+    try:
+        result = complete(
+            SYSTEM_PROMPT, build_user_prompt(slot, language, facts, template, seed)
+        )
+    except Exception:
+        logger.exception("staff chat: provider call failed")
+        result = None
+    if not result:
+        out["problems"] = ["ai unavailable"]
+        return out
+    data = result.get("data") or {}
+    ai_text = str(data.get("text") or "").strip()
+    out.update(
+        ai_text=ai_text,
+        english=str(data.get("english") or "").strip(),
+        provider=result.get("provider") or out["provider"],
+        model=result.get("model") or out["model"],
+        tokens_in=result.get("tokens_in"),
+        tokens_out=result.get("tokens_out"),
+    )
+    problems = fact_check(
+        ai_text, facts, vocabulary=vocabulary, other_names=other_names
+    )
+    if problems:
+        out["problems"] = problems
+        out["english"] = ""
+        return out
+    out.update(text=ai_text, source="ai")
+    return out
+
+
+# --- preview digest ----------------------------------------------------------
+
+def format_preview(slot: str, rows: list[dict], *, now: datetime | None = None) -> str:
+    """One director message per check-in: every outlet's message as the
+    cashier would read it. ``rows``: dicts with outlet_code, cashier,
+    language and either ``result`` (from build_message) or ``skip``."""
+    shift, time_, _purpose = SLOTS[slot]
+    lines = [
+        f"👀 Preview · {time_} {slot} check · {shift} shift",
+        "Not sent to any group. ✏️ = AI wording failed the fact check, "
+        "plain template shown.",
+    ]
+    for row in rows:
+        head = f"{row['outlet_code']} · {row['cashier']} · {row['language']}"
+        if row.get("skip"):
+            lines += ["", f"{head} — {row['skip']}"]
+            continue
+        res = row["result"]
+        if res["source"] != "ai":
+            head += " ✏️ " + "; ".join(res["problems"][:3])
+        lines += ["", head, f"{row['cashier']},", res["text"]]
+        if res.get("english"):
+            lines.append(f"↳ EN: {res['english']}")
+    return "\n".join(lines)
+
+
+def log_row(slot, outlet_code, chat_id, cashier, language, facts, result, mode) -> dict:
+    return {
+        "slot": slot,
+        "outlet_code": outlet_code,
+        "chat_id": chat_id,
+        "cashier": cashier,
+        "language": language,
+        "facts": facts or {},
+        "template_text": result.get("template"),
+        "ai_text": result.get("ai_text"),
+        "final_text": result.get("text"),
+        "source": result.get("source"),
+        "problems": result.get("problems") or [],
+        "provider": result.get("provider"),
+        "model": result.get("model"),
+        "tokens_in": result.get("tokens_in"),
+        "tokens_out": result.get("tokens_out"),
+        "mode": mode,
+    }
+
+
+def data_codes(registry_code: str) -> list[str]:
+    """Codes the data tables use for an outlet registered under
+    ``registry_code`` (order drafts say "D" for DAMANSARA, the kitchen log
+    "KLRAZAK" for SBESI)."""
+    import manager_registration
+    code = str(registry_code or "").upper()
+    return [code] + [a for a, t in manager_registration.CODE_ALIASES.items() if t == code]
+
+
+def seed_for(slot: str, outlet_code: str, day: date) -> str:
+    return f"{day.isoformat()}-{outlet_code}-{slot}"

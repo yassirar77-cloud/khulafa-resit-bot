@@ -52,6 +52,7 @@ _lock = threading.Lock()
 _client = None
 _groups: dict[int, str] = {}           # group chat_id -> outlet_code
 _names: dict[tuple[str, str], str] = {}  # (outlet_code, shift) -> name
+_langs: dict[tuple[str, str], str] = {}  # (outlet_code, shift) -> language
 _loaded_at: float | None = None
 
 
@@ -87,7 +88,7 @@ def configure(supabase_client) -> None:
 
 def refresh(supabase_client=None) -> bool:
     """Reload groups and names. Keeps the old cache on failure."""
-    global _groups, _names, _loaded_at
+    global _groups, _names, _langs, _loaded_at
     client = supabase_client or _client
     if client is None:
         return False
@@ -104,12 +105,16 @@ def refresh(supabase_client=None) -> bool:
                 groups[chat_id] = code
         name_rows = client.table(TABLE).select("*").execute().data or []
         names: dict[tuple[str, str], str] = {}
+        langs: dict[tuple[str, str], str] = {}
         for row in name_rows:
             code = str(row.get("outlet_code") or "").strip().upper()
             shift = normalize_shift(row.get("shift"))
             name = str(row.get("name") or "").strip()
             if code and shift and name:
                 names[(code, shift)] = name
+            lang = str(row.get("language") or "").strip().lower()
+            if code and shift and lang:
+                langs[(code, shift)] = lang
     except Exception:
         logger.exception("cashier names: refresh failed (keeping last cache)")
         with _lock:
@@ -117,15 +122,15 @@ def refresh(supabase_client=None) -> bool:
             _loaded_at = time.monotonic()
         return False
     with _lock:
-        _groups, _names, _loaded_at = groups, names, time.monotonic()
+        _groups, _names, _langs, _loaded_at = groups, names, langs, time.monotonic()
     return True
 
 
 def reset_cache() -> None:
     """Forget every group and name (tests; never needed in production)."""
-    global _groups, _names, _loaded_at
+    global _groups, _names, _langs, _loaded_at
     with _lock:
-        _groups, _names, _loaded_at = {}, {}, None
+        _groups, _names, _langs, _loaded_at = {}, {}, {}, None
 
 
 def is_stale() -> bool:
@@ -158,6 +163,20 @@ def name_for(outlet_code, shift) -> str:
     """Cashier name for an outlet and shift; "Cashier" when unknown."""
     code = str(outlet_code or "").strip().upper()
     return _names.get((code, normalize_shift(shift) or ""), DEFAULT_NAME)
+
+
+def language_for(outlet_code, shift, default="bm_tamil") -> str:
+    """Language the cashier on this outlet/shift reads (``/lang``)."""
+    code = str(outlet_code or "").strip().upper()
+    return _langs.get((code, normalize_shift(shift) or ""), default)
+
+
+def all_names() -> set[str]:
+    """Every cashier name, split on "/" ("Mahadir / Pandi" -> both)."""
+    out = set()
+    for name in _names.values():
+        out.update(p.strip() for p in name.split("/") if p.strip())
+    return out
 
 
 def name_on_shift(chat_id, now: datetime | None = None) -> str | None:
@@ -229,6 +248,40 @@ def set_name(supabase_client, outlet_code, shift, name, updated_by=None) -> dict
     return {"ok": True, "outlet_code": code, "shift": shift_norm, "name": clean}
 
 
+def set_language(supabase_client, outlet_code, shift, language, updated_by=None) -> dict:
+    """Save the language for an outlet/shift. ``language`` must already be
+    normalised by the caller (staff_chat.normalize_language). Never raises."""
+    code = str(outlet_code or "").strip().upper()
+    shift_norm = normalize_shift(shift)
+    lang = str(language or "").strip().lower()
+    if not code or shift_norm is None or not lang:
+        return {"ok": False, "error": "Usage: /lang <CODE> <morning|night> <language>"}
+    try:
+        table = supabase_client.table(TABLE)
+        rows = (
+            table.select("*").eq("outlet_code", code).eq("shift", shift_norm)
+            .execute().data or []
+        )
+        stamp = datetime.now(MALAYSIA_TZ).isoformat()
+        if rows:
+            (
+                supabase_client.table(TABLE)
+                .update({"language": lang, "updated_at": stamp, "updated_by": updated_by})
+                .eq("outlet_code", code).eq("shift", shift_norm).execute()
+            )
+        else:
+            supabase_client.table(TABLE).insert({
+                "outlet_code": code, "shift": shift_norm, "name": DEFAULT_NAME,
+                "language": lang, "updated_at": stamp, "updated_by": updated_by,
+            }).execute()
+    except Exception:
+        logger.exception("cashier names: language save failed")
+        return {"ok": False, "error": "Could not save — see logs."}
+    with _lock:
+        _langs[(code, shift_norm)] = lang
+    return {"ok": True, "outlet_code": code, "shift": shift_norm, "language": lang}
+
+
 # --- director-facing text ----------------------------------------------------
 
 def _shift_label(shift: str, start: date) -> str:
@@ -259,10 +312,14 @@ def format_roster(now: datetime | None = None) -> str:
     for code in codes:
         morning = _names.get((code, MORNING), f"({DEFAULT_NAME})")
         night = _names.get((code, NIGHT), f"({DEFAULT_NAME})")
+        morning += f" [{language_for(code, MORNING)}]"
+        night += f" [{language_for(code, NIGHT)}]"
         lines.append(f"{code}: morning {morning} · night {night}")
     lines += [
         "",
         "Change: /cashier <CODE> <morning|night> <name>",
         "e.g. /cashier SEK20 night Ismath",
+        "Language: /lang <CODE> <morning|night> "
+        "<tamil|bm|bengali|english|indonesian|bm_tamil>",
     ]
     return "\n".join(lines)

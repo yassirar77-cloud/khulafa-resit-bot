@@ -1,0 +1,272 @@
+"""Natural staff chat: templates, facts from data, the fact check, preview."""
+
+import json
+import os
+import sys
+import unittest
+from datetime import date
+from unittest import mock
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import staff_chat as sc
+
+DRAFT = [
+    {"item": "roti", "qty": 6, "pack": "kotak", "supplier": "DIAMOND BALL"},
+    {"item": "sotong", "qty": 19, "pack": "kg", "supplier": "FOOK LEONG SEA PRODUCTS SDN BHD"},
+    {"item": "ayam", "qty": 75, "pack": "kg", "supplier": "BESTARI FARM (M) SDN BHD"},
+    {"item": "kelapa", "qty": 50, "pack": "biji", "supplier": "BESTARI KHAFA"},
+]
+FORECAST = [
+    {"item_code": "ikan_kari", "unit": "pcs", "recommend_qty": 11.5,
+     "usual_cooked": 15.5, "action": "CUT"},
+    {"item_code": "ayam_kicap", "unit": "pcs", "recommend_qty": 9.72,
+     "usual_cooked": 13.5, "action": "CUT"},
+    {"item_code": "kambing", "unit": "kg", "recommend_qty": 3.1,
+     "usual_cooked": 4.0, "action": "HOLD"},
+]
+VOCAB = {"ayam", "ikan", "sotong", "kambing", "roti", "kelapa", "ayam kicap", "telur"}
+
+
+def _ai(text, english="EN"):
+    return lambda system, user: {
+        "data": {"text": text, "english": english},
+        "provider": "deepseek", "model": "deepseek-flash",
+        "tokens_in": 500, "tokens_out": 60,
+    }
+
+
+class SettingsTests(unittest.TestCase):
+    def test_style_defaults_to_classic(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(sc.style(), sc.CLASSIC)
+        with mock.patch.dict("os.environ", {"STAFF_CHAT_STYLE": "Preview"}):
+            self.assertEqual(sc.style(), sc.PREVIEW)
+        # "natural" isn't live yet: anything unknown stays classic.
+        with mock.patch.dict("os.environ", {"STAFF_CHAT_STYLE": "natural"}):
+            self.assertEqual(sc.style(), sc.CLASSIC)
+
+    def test_language_aliases(self):
+        self.assertEqual(sc.normalize_language("Bangla"), "bengali")
+        self.assertEqual(sc.normalize_language("malay"), "bm")
+        self.assertEqual(sc.normalize_language("indo"), "indonesian")
+        self.assertIsNone(sc.normalize_language("hindi"))
+
+
+class FactsTests(unittest.TestCase):
+    def test_stock_picks_key_item_first(self):
+        self.assertEqual(sc.stock_facts(DRAFT), {
+            "item": "Ayam", "qty": "75", "pack": "kg", "supplier": "Bestari Farm",
+        })
+
+    def test_order_lists_top_three_and_counts_rest(self):
+        facts = sc.order_facts(DRAFT)
+        self.assertEqual([i["item"] for i in facts["items"]], ["Ayam", "Sotong", "Kelapa"])
+        self.assertEqual(facts["more"], 1)
+
+    def test_cook_picks_biggest_change_and_rounds(self):
+        facts = sc.cook_facts(FORECAST)
+        self.assertEqual(facts, {"item": "Ayam Kicap", "cook": "10", "unit": "pcs",
+                                 "usual": "14", "action": "CUT"})
+
+    def test_cook_skips_hold_and_equal_after_rounding(self):
+        self.assertIsNone(sc.cook_facts([FORECAST[2]]))
+        same = [{"item_code": "daging", "unit": "kg", "recommend_qty": 3.1,
+                 "usual_cooked": 3.2, "action": "CUT"}]
+        self.assertIsNone(sc.cook_facts(same))
+
+    def test_bills_most_overdue(self):
+        entries = [
+            {"supplier": "JAYA GROCER", "last_date": date(2026, 9, 10),
+             "days_missing": 14, "days_overdue": 3},
+            {"supplier": "FOOK LEONG SEA PRODUCTS SDN BHD", "last_date": date(2026, 9, 5),
+             "days_missing": 19, "days_overdue": 9},
+        ]
+        self.assertEqual(sc.bills_facts(entries),
+                         {"supplier": "Fook Leong Sea Products", "days": "19", "last": "05/09"})
+
+    def test_no_data_is_none(self):
+        for fn in (sc.stock_facts, sc.order_facts, sc.cook_facts, sc.bills_facts):
+            self.assertIsNone(fn([]))
+
+
+class TemplateTests(unittest.TestCase):
+    def test_every_language_and_slot_renders(self):
+        facts = {
+            "stock": sc.stock_facts(DRAFT), "order": sc.order_facts(DRAFT),
+            "cook": sc.cook_facts(FORECAST),
+            "bills": {"supplier": "Fook Leong", "days": "19", "last": "05/09"},
+        }
+        for lang in sc.LANGUAGES:
+            for slot in sc.SLOTS:
+                text = sc.render_template(slot, lang, facts.get(slot, {}))
+                self.assertTrue(text, (lang, slot))
+                self.assertNotIn("{", text, (lang, slot))
+                # The plain template always passes its own fact check.
+                self.assertEqual(
+                    sc.fact_check(text, facts.get(slot, {}), vocabulary=VOCAB), [],
+                    (lang, slot, text),
+                )
+
+    def test_bm_tamil_is_two_lines(self):
+        text = sc.render_template("open", sc.BM_TAMIL, {})
+        self.assertEqual(len(text.split("\n")), 2)
+
+    def test_order_template_content(self):
+        text = sc.render_template("order", "bm", sc.order_facts(DRAFT))
+        self.assertEqual(text, "Order esok: Ayam 75kg, Sotong 19kg, Kelapa 50 biji (+1 lagi). Ok atau nak tukar?")
+
+
+class FactCheckTests(unittest.TestCase):
+    facts = {"item": "Ayam", "qty": "75", "pack": "kg", "supplier": "Bestari Farm"}
+
+    def check(self, text, **kw):
+        return sc.fact_check(text, self.facts, vocabulary=VOCAB, **kw)
+
+    def test_clean_wording_passes(self):
+        self.assertEqual(self.check("Ayam cukup ke sampai malam? Pagi ni Bestari Farm 75kg."), [])
+
+    def test_invented_number_rejected(self):
+        self.assertIn("number 80 not in data", self.check("Ayam 80kg cukup?"))
+
+    def test_invented_item_rejected(self):
+        self.assertIn("item 'sotong' not in data", self.check("Ayam dan sotong cukup?"))
+
+    def test_money_rejected(self):
+        self.assertIn("money figure", self.check("Ayam RM 300 cukup?"))
+        self.assertIn("money figure", self.check("Ayam naik 10%?"))
+
+    def test_other_script_digits_rejected(self):
+        self.assertIn("non-0-9 digits", self.check("আজ ৭৫ kg ayam"))
+
+    def test_other_cashier_name_rejected(self):
+        self.assertTrue(self.check("Saddam, ayam cukup?", other_names=["Saddam"]))
+
+    def test_labels_and_length_rejected(self):
+        self.assertIn("system label", self.check("ALERT: ayam cukup?"))
+        self.assertIn("too long", self.check("\n".join(["Ayam?"] * 5)))
+
+    def test_item_word_inside_fact_label_allowed(self):
+        facts = {"item": "Ayam Kicap", "cook": "10", "unit": "pcs", "usual": "14"}
+        self.assertEqual(sc.fact_check("Ayam hari ni 10 cukup, biasa 14?", facts, vocabulary=VOCAB), [])
+
+
+class BuildMessageTests(unittest.TestCase):
+    facts = {"item": "Ayam", "qty": "75", "pack": "kg", "supplier": "Bestari Farm"}
+
+    def test_ai_wording_used_when_it_passes(self):
+        res = sc.build_message("stock", "bm", self.facts, vocabulary=VOCAB,
+                               complete=_ai("Ayam 75kg tu cukup sampai malam?"))
+        self.assertEqual(res["source"], "ai")
+        self.assertEqual(res["text"], "Ayam 75kg tu cukup sampai malam?")
+        self.assertEqual(res["english"], "EN")
+        self.assertEqual(res["tokens_in"], 500)
+
+    def test_template_used_when_fact_check_fails(self):
+        res = sc.build_message("stock", "bm", self.facts, vocabulary=VOCAB,
+                               complete=_ai("Ayam 90kg cukup?"))
+        self.assertEqual(res["source"], "template")
+        self.assertEqual(res["text"], res["template"])
+        self.assertEqual(res["ai_text"], "Ayam 90kg cukup?")
+        self.assertIn("number 90 not in data", res["problems"])
+        self.assertEqual(res["english"], "")
+
+    def test_template_used_when_ai_unavailable(self):
+        res = sc.build_message("open", "tamil", {}, complete=lambda s, u: None)
+        self.assertEqual(res["source"], "template")
+        self.assertEqual(res["problems"], ["ai unavailable"])
+        self.assertTrue(res["text"])
+
+    def test_provider_exception_falls_back(self):
+        def boom(s, u):
+            raise RuntimeError("x")
+        res = sc.build_message("night", "bm", {}, complete=boom)
+        self.assertEqual(res["source"], "template")
+
+    def test_prompt_carries_facts_language_and_reference(self):
+        seen = {}
+
+        def capture(system, user):
+            seen["system"], seen["user"] = system, json.loads(user)
+            return None
+        sc.build_message("stock", "bengali", self.facts, seed="s1", complete=capture)
+        self.assertIn("ONLY the facts", seen["system"])
+        self.assertEqual(seen["user"]["facts"], self.facts)
+        self.assertIn("Bengali", seen["user"]["language"])
+        self.assertEqual(seen["user"]["variation_seed"], "s1")
+        self.assertTrue(seen["user"]["reference_message"])
+
+
+class PreviewTests(unittest.TestCase):
+    def test_digest_shows_each_outlet_and_fallback_reason(self):
+        ok = sc.build_message("open", "bm", {}, complete=_ai("Kedai dah buka? Ada kurang apa-apa?"))
+        bad = sc.build_message("open", "bm", {}, complete=_ai("Ayam 5kg?"))
+        text = sc.format_preview("open", [
+            {"outlet_code": "BISTRO7", "cashier": "Rahim", "language": "bm", "result": ok},
+            {"outlet_code": "SEK20", "cashier": "Syed", "language": "bm", "result": bad},
+            {"outlet_code": "KLANG", "cashier": "Vasiullah", "language": "tamil",
+             "skip": "no order draft for today — nothing to ask"},
+        ])
+        self.assertIn("Not sent to any group", text)
+        self.assertIn("BISTRO7 · Rahim · bm\nRahim,\nKedai dah buka?", text)
+        self.assertIn("↳ EN: EN", text)
+        self.assertIn("SEK20 · Syed · bm ✏️ number 5 not in data", text)
+        self.assertIn("KLANG · Vasiullah · tamil — no order draft", text)
+
+    def test_log_row_keeps_facts_and_both_texts(self):
+        res = sc.build_message("stock", "bm", {"item": "Ayam", "qty": "75", "pack": "kg",
+                                               "supplier": "Bestari Farm"},
+                               vocabulary=VOCAB, complete=_ai("Ayam 99kg?"))
+        row = sc.log_row("stock", "BISTRO7", -1, "Rahim", "bm", {"item": "Ayam"}, res, "preview")
+        self.assertEqual(row["facts"], {"item": "Ayam"})
+        self.assertEqual(row["ai_text"], "Ayam 99kg?")
+        self.assertEqual(row["final_text"], res["template"])
+        self.assertEqual(row["source"], "template")
+        self.assertEqual(row["mode"], "preview")
+
+    def test_data_codes_include_aliases(self):
+        self.assertEqual(sc.data_codes("DAMANSARA"), ["DAMANSARA", "D"])
+        self.assertEqual(sc.data_codes("SBESI"), ["SBESI", "KLRAZAK"])
+        self.assertEqual(sc.data_codes("SEK20"), ["SEK20"])
+
+
+class StaffAiTests(unittest.TestCase):
+    def test_no_key_returns_none(self):
+        import staff_ai
+        with mock.patch.dict("os.environ", {"STAFF_CHAT_AI": "deepseek"}, clear=True):
+            self.assertIsNone(staff_ai.complete_json("s", "u"))
+
+    def test_unknown_provider_returns_none(self):
+        import staff_ai
+        with mock.patch.dict("os.environ", {"STAFF_CHAT_AI": "other", "DEEPSEEK_API_KEY": "k"}):
+            self.assertIsNone(staff_ai.complete_json("s", "u"))
+
+    def test_deepseek_call_shape_and_parse(self):
+        import staff_ai
+        fake = mock.MagicMock()
+        fake.chat.completions.create.return_value = mock.MagicMock(
+            choices=[mock.MagicMock(message=mock.MagicMock(content='{"text": "Hi"}'))],
+            usage=mock.MagicMock(prompt_tokens=10, completion_tokens=3),
+        )
+        with mock.patch.dict("os.environ", {"DEEPSEEK_API_KEY": "k"}, clear=True), \
+                mock.patch.object(staff_ai, "_deepseek_client", return_value=fake):
+            out = staff_ai.complete_json("sys", "usr")
+        kwargs = fake.chat.completions.create.call_args.kwargs
+        self.assertEqual(kwargs["model"], "deepseek-flash")
+        self.assertEqual(kwargs["response_format"], {"type": "json_object"})
+        self.assertEqual(out["data"], {"text": "Hi"})
+        self.assertEqual((out["tokens_in"], out["tokens_out"]), (10, 3))
+
+    def test_bad_json_returns_none(self):
+        import staff_ai
+        fake = mock.MagicMock()
+        fake.chat.completions.create.return_value = mock.MagicMock(
+            choices=[mock.MagicMock(message=mock.MagicMock(content="not json"))]
+        )
+        with mock.patch.dict("os.environ", {"DEEPSEEK_API_KEY": "k"}, clear=True), \
+                mock.patch.object(staff_ai, "_deepseek_client", return_value=fake):
+            self.assertIsNone(staff_ai.complete_json("s", "u"))
+
+
+if __name__ == "__main__":
+    unittest.main()
