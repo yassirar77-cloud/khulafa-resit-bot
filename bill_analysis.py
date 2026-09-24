@@ -713,7 +713,7 @@ def format_manager_note(outlet_code: str, slice_: dict) -> str:
         lines = [f"🧾 Bill analysis — {outlet}"]
 
         if increases:
-            lines += ["", "📈 உங்க bill-ல இந்த items விலை ஏறியிருக்கு:"]
+            lines += ["", "📈 Unga bill-la intha items vilai eriyirukku:"]
             for e in increases[:MAX_MANAGER_ITEMS]:
                 when = _fmt_date(e["new_date"])
                 when_part = f" · {when}" if when else ""
@@ -722,44 +722,44 @@ def format_manager_note(outlet_code: str, slice_: dict) -> str:
                     f"{_rm(e['new_price'])} (+{e['change_pct']:.0f}%){when_part}"
                 )
                 if e.get("cheaper_shops"):
-                    lines.append("   வேற கடையில cheap: " + ", ".join(
+                    lines.append("   Vera kadaiyila cheap: " + ", ".join(
                         f"{s['shop']} {_rm(s['latest_price'])}" for s in e["cheaper_shops"]
                     ))
                 if e.get("cheaper_outlets"):
-                    lines.append("   வேற branch: " + ", ".join(
+                    lines.append("   Vera branch: " + ", ".join(
                         f"{o['outlet']} {_rm(o['latest_price'])}"
                         + (f" ({o['shop']})" if o.get("shop") else "")
                         for o in e["cheaper_outlets"]
                     ))
             if len(increases) > MAX_MANAGER_ITEMS:
-                lines.append(f"… இன்னும் {len(increases) - MAX_MANAGER_ITEMS} items")
-            lines.append("👉 சப்ளையர்கிட்ட ஏன் விலை ஏறுச்சு-னு கேளுங்க.")
+                lines.append(f"… innum {len(increases) - MAX_MANAGER_ITEMS} items")
+            lines.append("👉 Supplier-kitta yen vilai eruchu-nu kelunga.")
 
         if pays_more:
-            lines += ["", "🏪 இதே item வேற branch cheap-ஆ வாங்குது:"]
+            lines += ["", "🏪 Ithe item vera branch cheap-aa vaanguthu:"]
             for p in pays_more[:MAX_MANAGER_ITEMS]:
                 mine = p["mine"]
                 best = p["cheapest"]
                 my_shop = f" ({mine['shop']})" if mine.get("shop") else ""
                 best_shop = f" ({best['shop']})" if best.get("shop") else ""
                 lines.append(
-                    f"• {p['label']}: நீங்க {_rm(mine['latest_price'])}{my_shop} · "
+                    f"• {p['label']}: Neenga {_rm(mine['latest_price'])}{my_shop} · "
                     f"{best['outlet']} {_rm(best['latest_price'])}{best_shop} — "
                     f"{mine['gap_pct']:.0f}% cheap"
                 )
             if len(pays_more) > MAX_MANAGER_ITEMS:
-                lines.append(f"… இன்னும் {len(pays_more) - MAX_MANAGER_ITEMS} items")
+                lines.append(f"… innum {len(pays_more) - MAX_MANAGER_ITEMS} items")
             lines.append(
-                "👉 உங்க supplier-கிட்ட அந்த rate கேளுங்க, இல்லன்னா அந்த "
-                "branch-ஓட supplier-ஐ try பண்ணுங்க."
+                "👉 Unga supplier-kitta antha rate kelunga, illanna antha "
+                "branch-oda supplier-ai try pannunga."
             )
 
         if cheapest:
             names = ", ".join(cheapest[:MAX_PRAISE_ITEMS])
             more = f" +{len(cheapest) - MAX_PRAISE_ITEMS}" if len(cheapest) > MAX_PRAISE_ITEMS else ""
-            lines += ["", f"✅ நீங்க cheapest-ஆ வாங்குறது: {names}{more} — super! 👍"]
+            lines += ["", f"✅ Neenga cheapest-aa vaangurathu: {names}{more} — super! 👍"]
 
-        lines += ["", "Rate compare பண்ணி, என்ன ஆச்சுன்னு சொல்லுங்க. 🙏"]
+        lines += ["", "Rate compare panni, enna aachunnu sollunga. 🙏"]
         return "\n".join(lines)
     except Exception:
         logger.exception("bill analysis: manager note failed")

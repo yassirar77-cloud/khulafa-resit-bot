@@ -13,20 +13,30 @@ from typing import Any
 
 # Ordered list of (substring, outlet_code). Matching is case-insensitive
 # substring against the chat title. Order matters: more specific patterns
-# come first so they win over shorter/looser ones (e.g. "sharfuddin" is
-# checked before any sek-number pattern, "sbesi" before "s besi").
+# come first so they win over shorter/looser ones:
+#   * "klang" before "sharfuddin": the Klang group is titled "Hj Sharfuddin
+#     Klang Bayumas" — it used to fall to SEK6 and its bills were counted as
+#     SEK-6's;
+#   * "one bistro" / "sek 15" before "bistro": SEK-15 is One Bistro;
+#   * "signature" is SEK-14's group title; "sg besi" is Sungai Besi's.
 _RULES: list[tuple[str, str]] = [
+    ("klang", "KLANG"),
     ("sharfuddin", "SEK6"),
+    ("one bistro", "SEK15"),
+    ("sek 15", "SEK15"),
+    ("sek15", "SEK15"),
     ("bistro", "BISTRO7"),
+    ("signature", "SEK14"),
     ("sek 14", "SEK14"),
     ("sek 20", "SEK20"),
     ("sek 6", "SEK6"),
-    ("klang", "KLANG"),
     ("vista", "VISTA"),
     ("jakel", "JAKEL"),
     ("damansara", "D"),
     ("sbesi", "SBESI"),
     ("s besi", "SBESI"),
+    ("sg besi", "SBESI"),
+    ("sungai besi", "SBESI"),
 ]
 
 
@@ -43,6 +53,7 @@ _DISPLAY_NAMES: dict[str, str] = {
     "JAKEL": "Jakel",
     "D": "D.U",
     "SBESI": "Sungai Besi",
+    "SEK15": "One Bistro",
 }
 
 

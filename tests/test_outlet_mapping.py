@@ -60,8 +60,26 @@ class OutletFromChatTitleCaseInsensitive(unittest.TestCase):
 
 
 class OutletFromChatTitleUnmapped(unittest.TestCase):
-    def test_sek_15_intentionally_unmapped(self):
-        self.assertIsNone(outlet_from_chat_title("Khulafa sek 15 receipt"))
+    def test_sek_15_maps_to_one_bistro(self):
+        self.assertEqual(outlet_from_chat_title("Khulafa sek 15 receipt"), "SEK15")
+        self.assertEqual(outlet_from_chat_title("SEK 15"), "SEK15")
+
+    def test_live_group_titles(self):
+        # The real outlet group titles, as stored on receipts.
+        cases = {
+            "Hj Sharfuddin Klang Bayumas": "KLANG",
+            "HJ SHARFUDDIN SEK 6": "SEK6",
+            "Signature": "SEK14",
+            "SEK 15": "SEK15",
+            "Kl Sg Besi": "SBESI",
+            "Bistro": "BISTRO7",
+            "SEK 20": "SEK20",
+            "Vista": "VISTA",
+            "Jakel": "JAKEL",
+            "Damansara": "D",
+        }
+        for title, code in cases.items():
+            self.assertEqual(outlet_from_chat_title(title), code, title)
 
     def test_random_group_unmapped(self):
         self.assertIsNone(outlet_from_chat_title("Random Group"))

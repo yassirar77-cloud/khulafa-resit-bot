@@ -390,6 +390,13 @@ def gather_order_drafts(supabase, *, today: date | None = None,
             "line_count": len(lines),
             "review_count": sum(1 for ln in lines
                                 if ln["cadence_info"].get("needs_review")),
+            # Plain item rows (same shape as order_drafts) for the staff
+            # chat's order check-in.
+            "items": [
+                {"item": ln.get("canonical_item"), "qty": ln.get("qty"),
+                 "pack": ln.get("pack"), "supplier": ln.get("supplier")}
+                for ln in lines
+            ],
         })
 
     return {

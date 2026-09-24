@@ -58,17 +58,17 @@ _MAX_OVERVIEW_LINES = 25
 # not guess that "reply" means long-press → Reply, and a plain typed
 # message in the group is NOT captured.
 REPLY_FOOTER = (
-    "\n\n👉 பதில் சொல்ல: இந்த message-அ அழுத்தி பிடிங்க (long press), "
-    "'Reply' தட்டுங்க, அப்புறம் பதில் type பண்ணுங்க 🙏"
+    "\n\n👉 Bathil solla: intha message-a azhuthi pidinga (long press), "
+    "'Reply' thattunga, appuram bathil type pannunga 🙏"
 )
 
 # The nudge invites a reply TO ITSELF (the newest message — the natural
 # tap target), and the nudge's own message_id is logged linked to the
 # original question, so either reply closes the loop.
 REMINDER_TEXT = (
-    "👋 Boss, நேத்து ஒரு கேள்வி கேட்டேன் — இன்னும் பதில் வரல.\n"
-    "இந்த message-அ அழுத்தி பிடிங்க (long press), 'Reply' தட்டுங்க, "
-    "பதில் சொல்லுங்க 🙏"
+    "👋 Boss, nethu oru kelvi ketten — innum bathil varala.\n"
+    "Intha message-a azhuthi pidinga (long press), 'Reply' thattunga, "
+    "bathil sollunga 🙏"
 )
 
 
@@ -243,7 +243,7 @@ def format_reply_ack() -> str:
     """The thank-you a manager sees the moment his answer is captured —
     the loop must FEEL closed or they stop answering."""
     return (
-        "சரி boss, பதில் note பண்ணிட்டேன் ✅ நன்றி!\n"
+        "Sari boss, bathil note panniten ✅ Nandri!\n"
         "Terima kasih, jawapan disimpan ✅"
     )
 

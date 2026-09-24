@@ -102,6 +102,7 @@ import cashier_names
 import digest
 import director_ask
 import director_feed
+import log_redact
 import group_reports
 import food_cost_analytics
 import kitchen_usage
@@ -130,6 +131,9 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
+# The Bot API puts the token in every request URL and httpx logged each URL:
+# mask secrets in every log line and quiet the per-request loggers.
+log_redact.install()
 logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -927,7 +931,7 @@ def _check_new_supplier(chat_id: int, merchant: str, total: float, current_id) -
     if rows:
         return None
     return (
-        "புதிய கடை! ஏன் வழக்கமான கடைல வாங்கல? / "
+        "Puthiya kadai! Yen vazhakkamaana kadaila vaangala? / "
         f"Supplier baru ({merchant})! Kenapa tak beli dari supplier biasa?"
     )
 
@@ -973,7 +977,7 @@ def _check_suspicious_items(chat_id: int, merchant: str, items: list) -> str | N
     if not flagged:
         return None
     return (
-        "விலை அதிகம்! வேற இடத்துல cheap கிடைக்குமா check பண்ணினீங்களா? / "
+        "Vilai adhigam! Vera idathula cheap kidaikkumaa check panneengalaa? / "
         "Harga mahal dari minggu lepas! Sudah check tempat lain ke? "
         f"({'; '.join(flagged[:3])})"
     )
@@ -1000,7 +1004,7 @@ def _check_duplicate_receipt(
             continue
         if abs(prev_total - total) / max(prev_total, total) <= DUPLICATE_TOTAL_TOLERANCE:
             return (
-                "இதே கடையிலிருந்து இரண்டு முறை! "
+                "Ithe kadaiyilirundhu rendu thadavai! "
                 f"Same shop ({merchant}) 2 kali hari ni — sengaja ke?"
             )
     return None
@@ -4954,7 +4958,7 @@ async def weekly_report_now_command(update: Update, context: ContextTypes.DEFAUL
 # === Missing supplier-bill watch ============================================
 # Months of receipts define each supplier's upload rhythm per outlet chat.
 # When a regular supplier suddenly goes quiet, the nightly job asks that chat
-# in Tamil + Malay why nothing was uploaded ("BESTARI FARM bill எங்க?") — a
+# in Tamil + Malay why nothing was uploaded ("BESTARI FARM bill enga?") — a
 # forgotten photo is caught within days instead of surfacing as a hole in the
 # monthly numbers. Delivery reuses the weekly-report safety gate: while
 # MANAGER_DELIVERY_ENABLED is False every question routes to the owner with a
@@ -5500,6 +5504,10 @@ def _staff_slot_facts(slot, registry_code, chat_id, today, bills_by_chat):
             .in_("outlet", codes).eq("due_date", due.isoformat())
             .execute().data or []
         )
+        if not rows and slot == "order":
+            # Tomorrow's drafts are only saved by the 20:00 job; earlier in
+            # the day (an on-demand preview) compute them without saving.
+            rows = _unsaved_order_items(today).get_codes(codes)
         return (staff_chat.stock_facts if slot == "stock" else staff_chat.order_facts)(rows)
     if slot == "cook":
         rows = (
@@ -5512,6 +5520,28 @@ def _staff_slot_facts(slot, registry_code, chat_id, today, bills_by_chat):
     if slot == "bills":
         return staff_chat.bills_facts(bills_by_chat.get(chat_id) or [])
     return None
+
+
+class _DraftItems(dict):
+    def get_codes(self, codes):
+        return [row for code in codes for row in self.get(code, [])]
+
+
+_unsaved_drafts_cache: dict = {}
+
+
+def _unsaved_order_items(today) -> _DraftItems:
+    """Tomorrow's order draft per outlet code, computed but NOT persisted.
+    Cached per day so one preview computes it once for all outlets."""
+    if today not in _unsaved_drafts_cache:
+        bundle = order_generator.gather_order_drafts(
+            supabase, today=today, persist=False
+        )
+        _unsaved_drafts_cache.clear()
+        _unsaved_drafts_cache[today] = _DraftItems(
+            {o["outlet_code"]: o.get("items") or [] for o in bundle["outlets"]}
+        )
+    return _unsaved_drafts_cache[today]
 
 
 _NO_DATA = {

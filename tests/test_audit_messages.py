@@ -87,7 +87,7 @@ class FormattingTests(unittest.TestCase):
         self.assertNotIn("221.4700", msg)
 
     def test_tamil_prefix_present_on_all_tiers(self):
-        prefix = "வாங்கினது அதிகம்"
+        prefix = "Vaanginathu adhigam"
         self.assertIn(prefix, build_big_purchase_message(300.0, 0.0, 1))
         self.assertIn(prefix, build_big_purchase_message(500.0, 200.0, 3))
         self.assertIn(prefix, build_big_purchase_message(600.0, 220.0, 5))

@@ -53,16 +53,20 @@ _LANG_ALIASES = {
 }
 
 _LANG_PROMPT = {
-    "tamil": "simple spoken Malaysian Tamil in Tamil script. Everyday English "
-             "or Malay trade words (order, bill, supplier, ayam) are fine.",
+    "tamil": "simple spoken Malaysian Tamil written in ENGLISH LETTERS "
+             "(Tanglish), the way it is typed on WhatsApp, e.g. 'Innaikku "
+             "order sariyaa?'. Never use Tamil script. Everyday English or "
+             "Malay trade words (order, bill, supplier, ayam) are fine.",
     "bm": "simple spoken Malaysian Malay (Bahasa Malaysia), kedai register.",
-    "bengali": "simple spoken Bengali in Bengali script, as a Bangladeshi "
-               "worker in Malaysia speaks. English/Malay trade words are fine. "
-               "Keep numbers as 0-9 digits.",
+    "bengali": "simple spoken Bengali written in ENGLISH LETTERS (Banglish), "
+               "the way a Bangladeshi worker in Malaysia types it, e.g. 'Aaj "
+               "order thik ache?'. Never use Bengali script. English/Malay "
+               "trade words are fine.",
     "english": "simple, plain English for a non-native speaker.",
     "indonesian": "simple spoken Bahasa Indonesia.",
-    BM_TAMIL: "one short line of simple Malay, then the same in simple spoken "
-              "Tamil (Tamil script) on the next line.",
+    BM_TAMIL: "one short line of simple Malay, then the same in simple "
+              "spoken Tamil written in English letters (Tanglish, never "
+              "Tamil script) on the next line.",
 }
 
 
@@ -118,14 +122,14 @@ _T: dict[str, dict[str, str]] = {
         "night": "Malam ni ok? Ada barang rosak atau habis?",
     },
     "tamil": {
-        "open": "காலை வணக்கம் 👋 கடை ரெடியா? இன்னைக்கு ஏதாவது சாமான் குறைவா?",
-        "stock": "{item} இரவு வரைக்கும் போதுமா? இன்னைக்கு draft-ல {supplier} {qty} {pack}.",
-        "cook_cut": "இன்னைக்கு {item} {cook} {unit} சமைச்சா போதும்.{usual_ta} சரியா?",
-        "cook_raise": "இன்னைக்கு {item} {cook} {unit} சமைங்க, வழக்கத்தை விட கொஞ்சம் அதிகம்.{usual_ta} சரியா?",
-        "lunch": "மதியம் கூட்டம் எப்படி? ஏதாவது கறி சீக்கிரம் தீர்ந்துச்சா?",
-        "order": "நாளைக்கு order: {list}{more_ta}. சரியா, மாத்தணுமா?",
-        "bills": "{supplier} bill {days} நாளா வரல (கடைசி {last}). இருக்கா? Upload பண்ணுங்க 🙏",
-        "night": "இன்னைக்கு ராத்திரி எல்லாம் சரியா? ஏதாவது உடைஞ்சதா, தீர்ந்ததா?",
+        "open": "Kaalai vanakkam 👋 Kadai ready-aa? Innaikku edhaavathu saamaan korayvaa?",
+        "stock": "{item} raathiri varaikkum pothumaa? Innaikku draft-la {supplier} {qty} {pack}.",
+        "cook_cut": "Innaikku {item} {cook} {unit} samaichaa pothum.{usual_ta} Sariyaa?",
+        "cook_raise": "Innaikku {item} {cook} {unit} samainga, vazhakkatha vida konjam adhigam.{usual_ta} Sariyaa?",
+        "lunch": "Madhiyam koottam eppadi? Edhaavathu curry seekiram theernduchaa?",
+        "order": "Naalaikku order: {list}{more_ta}. Sariyaa, maathanumaa?",
+        "bills": "{supplier} bill {days} naalaa varala (kadaisi {last}). Irukkaa? Upload pannunga 🙏",
+        "night": "Innaikku raathiri ellaam sariyaa? Edhaavathu odanjiruchaa, theernduchaa?",
     },
     "english": {
         "open": "Morning 👋 Shop ready? Anything short today?",
@@ -148,27 +152,27 @@ _T: dict[str, dict[str, str]] = {
         "night": "Malam ini aman? Ada barang rusak atau habis?",
     },
     "bengali": {
-        "open": "সুপ্রভাত 👋 দোকান রেডি? আজ কিছু কম আছে?",
-        "stock": "{item} রাত পর্যন্ত চলবে? আজকের draft: {supplier} থেকে {qty} {pack}।",
-        "cook_cut": "আজ {item} {cook} {unit} রান্না করলেই হবে।{usual_bn} ঠিক আছে?",
-        "cook_raise": "আজ {item} {cook} {unit} রান্না করুন, সাধারণের চেয়ে একটু বেশি।{usual_bn} ঠিক আছে?",
-        "lunch": "দুপুরে ভিড় কেমন ছিল? কোনো তরকারি তাড়াতাড়ি শেষ হয়েছে?",
-        "order": "কালকের order: {list}{more_bn}। ঠিক আছে, নাকি বদলাবেন?",
-        "bills": "{supplier} এর bill {days} দিন আসেনি (শেষ {last})। bill আছে? upload করুন 🙏",
-        "night": "আজ রাতে সব ঠিক? কিছু ভেঙেছে বা শেষ হয়েছে?",
+        "open": "Suprobhat 👋 Dokan ready? Aaj kichu kom ache?",
+        "stock": "{item} raat porjonto cholbe? Aajker draft: {supplier} theke {qty} {pack}.",
+        "cook_cut": "Aaj {item} {cook} {unit} ranna korlei hobe.{usual_bn} Thik ache?",
+        "cook_raise": "Aaj {item} {cook} {unit} ranna korun, shadharon er cheye ektu beshi.{usual_bn} Thik ache?",
+        "lunch": "Dupure bhir kemon chilo? Kono torkari taratari shesh hoyeche?",
+        "order": "Kalker order: {list}{more_bn}. Thik ache, na bodlaben?",
+        "bills": "{supplier} er bill {days} din ashe nai (shesh {last}). Bill ache? Upload korun 🙏",
+        "night": "Aaj raate shob thik? Kichu bhengeche ba shesh hoyeche?",
     },
 }
 
 _USUAL = {
     "usual_bm": " Biasa masak {usual}.",
-    "usual_ta": " வழக்கமா {usual} சமைப்பீங்க.",
+    "usual_ta": " Vazhakkamaa {usual} samaippeenga.",
     "usual_en": " Usually you cook {usual}.",
     "usual_id": " Biasanya masak {usual}.",
-    "usual_bn": " সাধারণত {usual} রান্না হয়।",
+    "usual_bn": " Shadharonto {usual} ranna hoy.",
 }
 _MORE = {
     "more_bm": " (+{n} lagi)", "more_ta": " (+{n})", "more_en": " (+{n} more)",
-    "more_id": " (+{n} lagi)", "more_bn": " (+{n} আরও)",
+    "more_id": " (+{n} lagi)", "more_bn": " (+{n} aro)",
 }
 
 
@@ -348,6 +352,9 @@ def _short_supplier(name) -> str:
 # --- fact check --------------------------------------------------------------
 
 _NUM = re.compile(r"\d+(?:[.,]\d+)?")
+# Tamil and Bengali go out in English letters (the cashiers read that more
+# easily than the script), so any script at all means the wording is wrong.
+_SCRIPT = re.compile(r"[\u0980-\u09FF\u0B80-\u0BFF]")
 _NON_ASCII_DIGITS = re.compile(r"[०-९০-৯௦-௯٠-٩]")
 _MONEY = re.compile(r"\bRM\s?\d|\bRM\b|%|\$|ringgit|\bsen\b", re.IGNORECASE)
 _LABELS = re.compile(r"ALERT|\[TEST|\[PREVIEW|WARNING", re.IGNORECASE)
@@ -409,6 +416,8 @@ def fact_check(text, facts, *, vocabulary=None, other_names=()) -> list[str]:
         problems.append("money figure")
     if _NON_ASCII_DIGITS.search(text):
         problems.append("non-0-9 digits")
+    elif _SCRIPT.search(text):
+        problems.append("Tamil/Bengali script, not English letters")
 
     fact_text = " ".join(_fact_strings(facts))
     allowed_nums = {_norm_num(n) for n in _NUM.findall(fact_text)}

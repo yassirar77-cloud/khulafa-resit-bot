@@ -443,26 +443,26 @@ class Formatting(unittest.TestCase):
         bundle = self._bundle()
         text = ba.format_manager_note("VISTA", ba.entries_for_outlet(bundle, "VISTA"))
         self.assertTrue(text.startswith("🧾 Bill analysis — Vista"))
-        self.assertIn("📈 உங்க bill-ல இந்த items விலை ஏறியிருக்கு:", text)
+        self.assertIn("📈 Unga bill-la intha items vilai eriyirukku:", text)
         self.assertIn("• Telur Gred A (SAIDA): RM0.41 → RM0.46 (+12%) · 05 Sep", text)
-        self.assertIn("வேற கடையில cheap: HANEE RM0.38", text)
-        self.assertIn("வேற branch: Bistro RM0.38 (HANEE)", text)
-        self.assertIn("👉 சப்ளையர்கிட்ட ஏன் விலை ஏறுச்சு-னு கேளுங்க.", text)
-        self.assertIn("🏪 இதே item வேற branch cheap-ஆ வாங்குது:", text)
+        self.assertIn("Vera kadaiyila cheap: HANEE RM0.38", text)
+        self.assertIn("Vera branch: Bistro RM0.38 (HANEE)", text)
+        self.assertIn("👉 Supplier-kitta yen vilai eruchu-nu kelunga.", text)
+        self.assertIn("🏪 Ithe item vera branch cheap-aa vaanguthu:", text)
         self.assertIn(
-            "• Telur Gred A: நீங்க RM0.46 (SAIDA) · Bistro RM0.38 (HANEE) — 21% cheap",
+            "• Telur Gred A: Neenga RM0.46 (SAIDA) · Bistro RM0.38 (HANEE) — 21% cheap",
             text,
         )
-        self.assertIn("✅ நீங்க cheapest-ஆ வாங்குறது: Bawang — super! 👍", text)
+        self.assertIn("✅ Neenga cheapest-aa vaangurathu: Bawang — super! 👍", text)
         self.assertFalse(contains_accusatory(text))
 
     def test_manager_note_pays_more_only(self):
         bundle = self._bundle()
         text = ba.format_manager_note("BISTRO7", ba.entries_for_outlet(bundle, "BISTRO7"))
         self.assertIn("🧾 Bill analysis — Bistro", text)
-        self.assertNotIn("விலை ஏறியிருக்கு", text)
-        self.assertIn("• Bawang: நீங்க RM3.60 (PASAR) · Vista RM3.00 (SAIDA) — 20% cheap", text)
-        self.assertIn("cheapest-ஆ வாங்குறது: Telur Gred A", text)
+        self.assertNotIn("vilai eriyirukku", text)
+        self.assertIn("• Bawang: Neenga RM3.60 (PASAR) · Vista RM3.00 (SAIDA) — 20% cheap", text)
+        self.assertIn("cheapest-aa vaangurathu: Telur Gred A", text)
         self.assertFalse(contains_accusatory(text))
 
     def test_manager_note_empty_when_nothing_to_say(self):
@@ -479,7 +479,7 @@ class Formatting(unittest.TestCase):
         ]
         text = ba.format_manager_note("VISTA", {"increases": increases, "pays_more": [],
                                                 "cheapest": []})
-        self.assertIn("… இன்னும் 3 items", text)
+        self.assertIn("… innum 3 items", text)
 
     def test_delivery_summary(self):
         text = ba.format_owner_delivery_summary([
