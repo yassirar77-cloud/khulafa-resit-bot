@@ -110,6 +110,7 @@ import manager_registration
 import staff_chat
 import staff_ai
 import staff_live
+import staff_orders
 from outlet_group_bot import OutletGroupBot
 import key_stock_daily
 import item_sales_watch
@@ -5848,6 +5849,11 @@ async def handle_staff_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     code = cashier_names.outlet_for_chat(message.chat_id)
     if not code or not staff_live.is_live(code):
         return
+    # Honesty: "am I talking to a person?" always gets the true answer —
+    # with or without an open question, and it is never taken as an answer.
+    if staff_live.asks_if_bot(message.text):
+        await _answer_honestly(message, code)
+        return
     thread = await asyncio.to_thread(_active_thread, message.chat_id)
     if not thread:
         return
@@ -5857,6 +5863,9 @@ async def handle_staff_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         staff_live.parse_reply, thread.get("question_en"), thread.get("question_text"),
         message.text, staff_ai.complete_json,
     )
+    if parsed and parsed.get("asks_if_bot"):
+        await _answer_honestly(message, code)
+        return
     action = staff_live.decide_reply(thread, parsed, is_reply_to_question=is_reply)
     now = datetime.now(MALAYSIA_TZ)
     if action == "clarify":
@@ -5874,8 +5883,21 @@ async def handle_staff_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     })
     logger.info("staff live: answered %s %s (%s)", code, thread.get("slot"),
                 (parsed or {}).get("status"))
+    # Order answers with items + quantities become order history, so the
+    # drafts learn what this outlet really buys (staff_orders).
+    if thread.get("slot") == "order" and (parsed or {}).get("items"):
+        rows = staff_orders.rows_for_reply(thread, parsed["items"], message.text)
+        saved = await asyncio.to_thread(staff_orders.save, supabase, rows)
+        logger.info("staff live: saved %d order items for %s", saved, code)
     # One question at a time: the group's next queued check-in goes now.
     await staff_live_tick(context.application)
+
+
+async def _answer_honestly(message, code) -> None:
+    shift, _day = cashier_names.shift_at(datetime.now(MALAYSIA_TZ))
+    language = cashier_names.language_for(code, shift)
+    await message.reply_text(staff_live.honest_reply(language))
+    logger.info("staff live: answered 'are you a bot?' honestly in %s", code)
 
 
 async def post_staff_morning_summary(application: Application) -> None:
@@ -6936,13 +6958,28 @@ async def _notify_migration_0038(application, summary) -> None:
         )
 
 
+_sales_client = None
+
+
+def _sales_supabase() -> Client:
+    """The scheduled sales poll's own Supabase client. The shared ``supabase``
+    client is not safe to use from two worker threads at once: at 20:00 the
+    poll (every :00/:15/:30/:45) and the order-draft job collided on its
+    HTTP/2 connection ("[Errno 11] Resource temporarily unavailable"), which
+    failed persist_cadence for the first outlet every evening."""
+    global _sales_client
+    if _sales_client is None:
+        _sales_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    return _sales_client
+
+
 async def poll_sales_emails(application: Application | None = None) -> None:
     """APScheduler job: ingest unread shift-close emails (every 30 min, 24/7)."""
     if not os.environ.get("GMAIL_INBOX") or not os.environ.get("GMAIL_APP_PASSWORD"):
         logger.info("Sales ingest poll skipped: GMAIL_INBOX/GMAIL_APP_PASSWORD not set")
         return
     try:
-        summary = await asyncio.to_thread(run_ingest_once, supabase)
+        summary = await asyncio.to_thread(run_ingest_once, _sales_supabase())
         logger.info("Sales ingest poll: %s", summary)
         await _notify_new_outlets(application, summary)
         await _notify_migration_0038(application, summary)

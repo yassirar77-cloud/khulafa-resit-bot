@@ -71,10 +71,15 @@ class AssessTests(unittest.TestCase):
         v = osy.assess(osy.history_from_rows(
             _rows(18, items=("ais_batu", "ayam", "ikan", "gula", "garam")), TODAY), LINES)
         self.assertFalse(v["ok"])
-        # Enough days but too few reliable lines.
-        v = osy.assess(osy.history_from_rows(_rows(25), TODAY), LINES[:3])
+        # Enough days but too few reliable lines (fewer than 3).
+        v = osy.assess(osy.history_from_rows(_rows(25), TODAY), LINES[:2])
         self.assertFalse(v["ok"])
         self.assertIn("reliable draft lines", v["reason"])
+
+    def test_three_reliable_lines_are_enough(self):
+        v = osy.assess(osy.history_from_rows(_rows(25), TODAY), LINES[:3])
+        self.assertTrue(v["ok"], v["reason"])
+        self.assertEqual(len(v["lines"]), 3)
 
 
 if __name__ == "__main__":

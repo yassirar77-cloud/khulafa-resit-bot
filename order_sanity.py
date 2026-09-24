@@ -12,7 +12,9 @@ asked "Esok nak order apa?"):
   * bills uploaded on at least ``MIN_DAYS_60`` separate days in the last
     60 days, and ``MIN_DAYS_28`` in the last 28 (history is recent);
   * at least ``MIN_ITEMS_60`` different items bought in the last 60 days;
-  * at least ``MIN_LINES`` draft lines survive the item rule below.
+  * at least ``MIN_LINES`` draft lines survive the item rule below (a
+    draft with fewer than 5 is worded as "the main items; tell me anything
+    else you need", so staff don't take it for the full order).
 
 And per item, for a line to be mentioned at all: bought on at least
 ``MIN_ITEM_DAYS`` separate days in the last 60, and not flagged
@@ -25,7 +27,7 @@ from datetime import date, timedelta
 MIN_DAYS_60 = 20
 MIN_DAYS_28 = 8
 MIN_ITEMS_60 = 8
-MIN_LINES = 5
+MIN_LINES = 3   # 3-4 lines go out as "the main items; tell me anything else"
 MIN_ITEM_DAYS = 4
 
 
@@ -58,16 +60,21 @@ def history_from_rows(rows, today: date) -> dict:
 
 
 def fetch_history(supabase, codes, today: date) -> dict:
+    """Receipts plus what cashiers told us they ordered (staff_orders)."""
+    import staff_orders
     rows = (
         supabase.table("item_prices")
-        .select("receipt_date, canonical_item")
+        .select("receipt_date, canonical_item, outlet_code")
         .in_("outlet_code", list(codes))
         .gte("receipt_date", (today - timedelta(days=60)).isoformat())
         .lte("receipt_date", today.isoformat())
         .limit(10000)
         .execute().data or []
     )
-    return history_from_rows(rows, today)
+    staff = [r for r in staff_orders.fetch_history_rows(
+        supabase, today=today, lookback=60, codes=codes)
+        if str(r.get("receipt_date") or "")[:10] <= today.isoformat()]
+    return history_from_rows(staff_orders.merge(rows, staff), today)
 
 
 def _needs_review(line) -> bool:

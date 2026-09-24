@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta
 
 import cashier_names
@@ -186,8 +187,17 @@ REPLY_PROMPT = (
     "- status: ok (all fine / confirmed), short (something running low), "
     "finished (something sold out / finished), problem (broken, issue), "
     "order (they gave order items/quantities), other.\n"
+    "- items: ONLY when they list things to order with quantities, each "
+    "{item, qty, unit}: item = the usual Malay name in English letters "
+    "(ayam, ikan, sotong, udang, kambing, daging, telur, bawang, santan, "
+    "roti, gas ...), qty = a number exactly as they wrote it, unit = kg, "
+    "pcs, ekor, kotak, biji, tin, pack, guni or liter (empty if none). Never "
+    "invent an item or quantity they did not write. Otherwise [].\n"
+    "- asks_if_bot: true if they ask whether they are talking to a person, "
+    "a bot, a robot or a machine.\n"
     'Reply with JSON only: {"is_answer": true|false, "clear": true|false, '
-    '"summary_en": "...", "status": "ok|short|finished|problem|order|other"}'
+    '"summary_en": "...", "status": "ok|short|finished|problem|order|other", '
+    '"items": [], "asks_if_bot": false}'
 )
 
 
@@ -206,12 +216,53 @@ def parse_reply(question_en, question_text, reply_text, complete) -> dict | None
     if not isinstance(data, dict) or "is_answer" not in data:
         return None
     status = str(data.get("status") or "other").lower()
+    items = data.get("items")
     return {
         "is_answer": data.get("is_answer") is True,
         "clear": data.get("clear") is not False,
         "summary_en": str(data.get("summary_en") or "").strip(),
         "status": status if status in REPLY_STATUSES else "other",
+        "items": items if isinstance(items, list) else [],
+        "asks_if_bot": data.get("asks_if_bot") is True,
     }
+
+
+# --- honesty: never pretend to be a person ---------------------------------------
+
+_HONEST = {
+    "english": "This is the Khulafa office system; the boss reads every reply every morning.",
+    "bm": "Ini sistem pejabat Khulafa; bos baca setiap jawapan setiap pagi.",
+    "tamil": "இது Khulafa office system; ஒவ்வொரு பதிலையும் boss தினமும் காலையில படிப்பாங்க.",
+    "indonesian": "Ini sistem kantor Khulafa; bos membaca setiap balasan setiap pagi.",
+    "bengali": "Eta Khulafa office er system; boss protidin shokale shob uttor poren.",
+}
+
+# "Are you a bot / a person?" in the languages staff write. Matched on the
+# raw text so it works with no open question and no AI call.
+_BOT_Q = re.compile(
+    r"(?:\b(?:bot|robot|chatbot|machine|mesin|ai)\b[^\n]{0,20}\?"
+    r"|\b(?:are|r)\s+(?:you|u)\s+(?:a\s+)?(?:bot|robot|human|real|person|machine)\b"
+    r"|\b(?:is\s+this|this\s+is)\s+(?:a\s+)?(?:bot|robot|real person|human)\b"
+    r"|\b(?:ni|ini|awak|kamu|anda|you)\s+(?:ni\s+)?(?:bot|robot)\b"
+    r"|\b(?:bot|robot)\s*(?:ke|kah|ka|ah|aa?|na)\b"
+    r"|\b(?:manusia|orang|human|manush)\s+(?:ke|kah|atau|or|na)\b"
+    r"|\bapni\s+ki\s+(?:bot|manush|robot)\b"
+    r"|(?:bot|robot)[-\s]?(?:ஆ|ஆ\?)"
+    r"|மனுஷ(?:ன|ர)?(?:ா|ஆ)"
+    r"|ஆளா\?)",
+    re.IGNORECASE,
+)
+
+
+def asks_if_bot(text) -> bool:
+    return bool(_BOT_Q.search(str(text or "")))
+
+
+def honest_reply(language: str) -> str:
+    """The one honest answer to "am I talking to a person?"."""
+    if language == staff_chat.BM_TAMIL:
+        return f"{_HONEST['bm']}\n{_HONEST['tamil']}"
+    return _HONEST.get(language) or _HONEST["bm"]
 
 
 def decide_reply(thread: dict, parsed: dict | None, *, is_reply_to_question: bool) -> str:

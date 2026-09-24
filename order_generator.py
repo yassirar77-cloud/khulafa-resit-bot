@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import statistics
+import time
 from datetime import date, datetime, timedelta
 
 import date_utils
@@ -30,6 +31,7 @@ import order_cadence as oc
 import order_draft
 from db_pagination import fetch_all_pages
 import order_items
+import staff_orders
 import standing_orders
 
 logger = logging.getLogger(__name__)
@@ -319,15 +321,32 @@ def persist_cadence(supabase, outlet_code: str, items: dict[str, list[dict]],
             "needs_review": ci.get("needs_review", False),
             "updated_at": _now_iso(),
         }
-        try:
-            supabase.table("item_cadence").delete().eq("outlet", outlet_code).eq(
-                "item", canonical).execute()
-            supabase.table("item_cadence").insert(row).execute()
-            written += 1
-        except Exception:
-            logger.exception("order_generator: persist_cadence failed (%s/%s)",
-                             outlet_code, canonical)
+        for attempt in (1, 2):
+            try:
+                supabase.table("item_cadence").delete().eq("outlet", outlet_code).eq(
+                    "item", canonical).execute()
+                supabase.table("item_cadence").insert(row).execute()
+                written += 1
+                break
+            except Exception as exc:
+                # A brief network blip ("Resource temporarily unavailable")
+                # gets one retry; anything else is logged once.
+                if attempt == 1 and _transient(exc):
+                    time.sleep(0.5)
+                    continue
+                logger.exception("order_generator: persist_cadence failed (%s/%s)",
+                                 outlet_code, canonical)
+                break
     return written
+
+
+def _transient(exc) -> bool:
+    """Network hiccups worth one retry (httpx read/connect errors)."""
+    name = type(exc).__name__
+    text = str(exc)
+    return (name in ("ReadError", "ConnectError", "RemoteProtocolError",
+                     "ReadTimeout", "ConnectTimeout", "WriteError")
+            or "Resource temporarily unavailable" in text)
 
 
 def gather_order_drafts(supabase, *, today: date | None = None,
@@ -344,6 +363,10 @@ def gather_order_drafts(supabase, *, today: date | None = None,
     display_for = display_for or (lambda code: code)
 
     rows = fetch_item_price_rows(supabase, today=today, lookback=lookback_days())
+    # What cashiers told us they need (20:05 order check-in replies) counts
+    # as buying history too, unless a receipt already covers that day.
+    rows = staff_orders.merge(rows, staff_orders.fetch_history_rows(
+        supabase, today=today, lookback=lookback_days()))
     grouped = group_rows(rows)
 
     # Re-shape to outlet -> {canonical -> records}.

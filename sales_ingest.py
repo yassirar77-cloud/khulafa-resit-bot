@@ -956,10 +956,13 @@ def run_ingest_once(client=None, *, now_my=None, since=None, unseen_only=True,
     try:
         summary["itemwise_backfill"] = backfill_recent_shift_itemwise(
             client, now_my=now_my)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        # Migration 0040 is applied in production; name the real error rather
+        # than guessing (it was a transient network read error, not a missing
+        # table).
         logger.warning(
-            "Recent shift-itemwise backfill failed — is migration 0040 applied?",
-            exc_info=True,
+            "Recent shift-itemwise backfill failed (%s: %s)",
+            type(exc).__name__, exc, exc_info=True,
         )
     logger.info("Sales ingest: %s", summary)
     return summary

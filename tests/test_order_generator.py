@@ -169,3 +169,69 @@ class FailureAlertTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PersistCadenceRetryTests(unittest.TestCase):
+    """20:00 collision on the shared HTTP/2 connection: a transient read error
+    on the first outlet's first item must be retried, not logged as failed."""
+
+    class _ReadError(Exception):
+        pass
+
+    def _client(self, fail_times):
+        test = self
+        state = {"fails": fail_times, "inserts": 0}
+
+        class _Q:
+            def __init__(self, op):
+                self.op = op
+
+            def delete(self):
+                return _Q("delete")
+
+            def insert(self, row):
+                return _Q("insert")
+
+            def eq(self, *a):
+                return self
+
+            def execute(self):
+                if self.op == "delete" and state["fails"] > 0:
+                    state["fails"] -= 1
+                    raise test._ReadError("[Errno 11] Resource temporarily unavailable")
+                if self.op == "insert":
+                    state["inserts"] += 1
+                return None
+
+        class _C:
+            def table(self, name):
+                return _Q(None)
+        _ReadError = self._ReadError
+        _ReadError.__name__ = "ReadError"
+        return _C(), state
+
+    def _items(self):
+        today = date(2026, 9, 24)
+        return {"ayam": [{"date": (today - timedelta(days=d)).isoformat(), "qty": 70}
+                         for d in (1, 3, 5, 7)]}, today
+
+    def test_transient_error_is_retried(self):
+        client, state = self._client(fail_times=1)
+        items, today = self._items()
+        with self.assertNoLogs("order_generator", level="ERROR"):
+            written = order_generator.persist_cadence(client, "BISTRO7", items, today=today)
+        self.assertEqual(written, 1)
+        self.assertEqual(state["inserts"], 1)
+
+    def test_persistent_error_is_logged_once(self):
+        client, state = self._client(fail_times=5)
+        items, today = self._items()
+        with self.assertLogs("order_generator", level="ERROR") as logs:
+            written = order_generator.persist_cadence(client, "BISTRO7", items, today=today)
+        self.assertEqual(written, 0)
+        self.assertEqual(len(logs.records), 1)
+
+    def test_transient_detection(self):
+        self.assertTrue(order_generator._transient(
+            RuntimeError("[Errno 11] Resource temporarily unavailable")))
+        self.assertFalse(order_generator._transient(ValueError("bad row")))

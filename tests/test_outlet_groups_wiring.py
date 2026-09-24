@@ -109,6 +109,20 @@ class StaffLiveWiring(unittest.TestCase):
         self.assertIn("_staff_live_now(cashier_names.outlet_for_chat(decision.target_chat_id))",
                       _block(self.src, "async def post_key_stock_checks("))
 
+    def test_honest_answer_and_order_learning_wired(self):
+        body = _block(self.src, "async def handle_staff_reply(")
+        self.assertIn("staff_live.asks_if_bot(message.text)", body)
+        self.assertIn('parsed.get("asks_if_bot")', body)
+        self.assertIn("staff_orders.rows_for_reply(thread, parsed[\"items\"]", body)
+        # The honesty check comes before the open-question lookup, so it
+        # works when nothing was asked.
+        self.assertLess(body.index("asks_if_bot(message.text)"),
+                        body.index("_active_thread"))
+
+    def test_sales_poll_has_its_own_client(self):
+        self.assertIn("run_ingest_once, _sales_supabase()",
+                      _block(self.src, "async def poll_sales_emails("))
+
     def test_samples_command_director_only(self):
         self.assertIn('CommandHandler("staff_samples", staff_samples_command)', self.src)
         self.assertIn("is_reviewer(_command_owner_id(update))",
