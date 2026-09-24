@@ -394,7 +394,8 @@ def gather_order_drafts(supabase, *, today: date | None = None,
             # chat's order check-in.
             "items": [
                 {"item": ln.get("canonical_item"), "qty": ln.get("qty"),
-                 "pack": ln.get("pack"), "supplier": ln.get("supplier")}
+                 "pack": ln.get("pack"), "supplier": ln.get("supplier"),
+                 "needs_review": bool(ln["cadence_info"].get("needs_review"))}
                 for ln in lines
             ],
         })

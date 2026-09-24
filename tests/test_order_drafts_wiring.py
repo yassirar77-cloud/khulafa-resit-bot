@@ -21,7 +21,10 @@ class OrderDraftsWiring(unittest.TestCase):
 
     def test_sends_per_chunk_not_single_message(self):
         # Each outlet is sent as a list of Telegram-safe chunks, prefix on #0.
-        self.assertIn('for i, chunk in enumerate(o["messages"]):', self.src)
+        self.assertIn('chunks = o["messages"]', self.src)
+        self.assertIn('for i, chunk in enumerate(chunks):', self.src)
+        # Thin buying history -> a plain "what to order?" question, no draft.
+        self.assertIn("order_sanity.assess(", self.src)
         self.assertIn('(decision.prefix + chunk) if i == 0 else chunk', self.src)
         # The old single unbounded send must be gone.
         self.assertNotIn('"text": decision.prefix + o["message"],', self.src)

@@ -144,6 +144,8 @@ _T: dict[str, dict[str, str]] = {
                        "{item} hari ni masak lebih sikit, {cook} {unit}.{usual_bm} Ok tak?"],
         "lunch": ["Lunch tadi ramai? Ada lauk habis awal?",
                   "Lunch tadi macam mana? Ada lauk yang cepat habis?"],
+        "order_ask": ["Esok nak order apa? Bagitau barang & berapa ya.",
+                      "Untuk esok, nak order apa? Senaraikan barang & kuantiti ya."],
         "order": ["Order esok: {list}{more_bm}. Ok atau nak tukar?",
                   "Untuk esok: {list}{more_bm}. Ok ke, ada nak ubah?"],
         "bills": ["Bil {supplier} dah {days} hari tak masuk (last {last}). Ada bil? Tolong upload 🙏",
@@ -162,6 +164,8 @@ _T: dict[str, dict[str, str]] = {
                        "{item} இன்னைக்கு கொஞ்சம் கூட, {cook} {unit} சமைங்க.{usual_ta} ஓகேவா?"],
         "lunch": ["மதியம் கூட்டம் எப்படி? ஏதாவது கறி சீக்கிரம் தீர்ந்துச்சா?",
                   "Lunch எப்படி போச்சு? ஏதாவது சீக்கிரம் முடிஞ்சுதா?"],
+        "order_ask": ["நாளைக்கு என்ன order பண்ணணும்? சாமானும் அளவும் சொல்லுங்க.",
+                      "நாளைக்கு order-க்கு என்ன வேணும்? சாமான், அளவு சொல்லுங்க."],
         "order": ["நாளைக்கு order: {list}{more_ta}. சரியா, மாத்தணுமா?",
                   "நாளைக்கான order: {list}{more_ta}. இது ஓகேவா, ஏதாவது மாத்தணுமா?"],
         "bills": ["{supplier} bill {days} நாளா வரல (கடைசி {last}). இருக்கா? Upload பண்ணுங்க 🙏",
@@ -175,6 +179,7 @@ _T: dict[str, dict[str, str]] = {
         "cook_cut": "Today {item}: cooking {cook} {unit} is enough.{usual_en} OK?",
         "cook_raise": "Today {item}: cook {cook} {unit}, a bit more than usual.{usual_en} OK?",
         "lunch": "How was the lunch crowd? Anything finished early?",
+        "order_ask": "What do we need to order for tomorrow? Tell me the items and quantities.",
         "order": "Tomorrow's order: {list}{more_en}. OK or change?",
         "bills": "{supplier} bill not in for {days} days (last {last}). Got it? Please upload 🙏",
         "night": "All OK tonight? Anything broken or finished?",
@@ -185,6 +190,7 @@ _T: dict[str, dict[str, str]] = {
         "cook_cut": "{item} hari ini masak {cook} {unit} cukup.{usual_id} Oke?",
         "cook_raise": "{item} hari ini masak {cook} {unit}, sedikit lebih dari biasa.{usual_id} Oke?",
         "lunch": "Makan siang tadi ramai? Ada lauk yang cepat habis?",
+        "order_ask": "Besok mau order apa? Kasih tahu barang dan jumlahnya ya.",
         "order": "Order besok: {list}{more_id}. Oke atau mau ganti?",
         "bills": "Nota {supplier} sudah {days} hari belum masuk (terakhir {last}). Ada notanya? Tolong upload 🙏",
         "night": "Malam ini aman? Ada barang rusak atau habis?",
@@ -195,6 +201,7 @@ _T: dict[str, dict[str, str]] = {
         "cook_cut": "Aaj {item} {cook} {unit} ranna korlei hobe.{usual_bn} Thik ache?",
         "cook_raise": "Aaj {item} {cook} {unit} ranna korun, shadharon er cheye ektu beshi.{usual_bn} Thik ache?",
         "lunch": "Dupure bhir kemon chilo? Kono torkari taratari shesh hoyeche?",
+        "order_ask": "Kal ki order korte hobe? Jinish ar koto lagbe bolen.",
         "order": "Kalker order: {list}{more_bn}. Thik ache, na bodlaben?",
         "bills": "{supplier} er bill {days} din ashe nai (shesh {last}). Bill ache? Upload korun 🙏",
         "night": "Aaj raate shob thik? Kichu bhengeche ba shesh hoyeche?",
@@ -223,6 +230,8 @@ def _qty_pack(qty, pack) -> str:
 def _template_key(slot: str, facts: dict) -> str:
     if slot == "cook":
         return "cook_raise" if facts.get("action") == "RAISE" else "cook_cut"
+    if slot == "order" and facts.get("ask"):
+        return "order_ask"
     return slot
 
 
@@ -530,7 +539,11 @@ SYSTEM_PROMPT = (
 def build_user_prompt(slot, language, facts, reference, seed, avoid=()) -> str:
     return json.dumps(
         {
-            "purpose": SLOTS[slot][2],
+            "purpose": (
+                "ask what they need to order for tomorrow (there is no draft "
+                "to show; ask them to list items and quantities)"
+                if slot == "order" and (facts or {}).get("ask") else SLOTS[slot][2]
+            ),
             "language": _LANG_PROMPT.get(language, _LANG_PROMPT[DEFAULT_LANGUAGE]),
             "facts": facts or {},
             "reference_message": reference,
