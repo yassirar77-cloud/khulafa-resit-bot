@@ -38,6 +38,8 @@ from digest_data import (  # noqa: E402
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+import log_redact  # noqa: E402
+log_redact.install()
 logger = logging.getLogger("send_daily_digest")
 
 

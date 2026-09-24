@@ -752,10 +752,10 @@ def form_text(phase: str, business_date, outlet_label, entries: dict, outlet_cod
     ]
     if phase == PHASE_COOKED_NIGHT:
         lines.append(f"Tap item untuk key-in tambahan masak malam ({done} item). Skip jika tiada.")
-        lines.append("தமிழ்: item-ஐ தட்டி இரவு கூடுதலை மட்டும் போடுங்க.")
+        lines.append("Tamil: item-a thatti raathiri extra-va mattum podunga.")
     else:
         lines.append(f"Tap untuk key-in ({done}/{total}). Yang tak isi = 0.")
-        lines.append("தமிழ்: item-ஐ தட்டி எண் போடுங்க. போடாதது = 0.")
+        lines.append("Tamil: item-a thatti number podunga. podaathathu = 0.")
     # Mistake-fixing before Hantar: re-tap an item to change it, 🗑 to clear.
     lines.append("Tekan balik barang untuk betulkan sebelum Hantar.")
     return "\n".join(lines)
@@ -1925,9 +1925,9 @@ def render_pos_only_summary(outlet_label, business_date, evaluations: list) -> s
         lines.append(f"• {ev['label']}: POS jual {pos} {ev['unit']}")
     lines += [
         "",
-        "👨‍🍳 நேத்து Masak/Baki form fill பண்ணல — அதனால comparison "
-        "பண்ண முடியல. இனிமேல் தினமும் form fill பண்ணுங்க, அப்போ தான் "
-        "Guna vs POS சரியா வரும் 🙏",
+        "👨‍🍳 nethu Masak/Baki form fill pannala — adhanaala comparison "
+        "panna mudiyala. inimel dhinamum form fill pannunga, appo thaan "
+        "Guna vs POS sariyaa varum 🙏",
     ]
     return "\n".join(lines)
 
@@ -1999,11 +1999,11 @@ def _leak_line(ev: dict) -> str:
     if ev.get("source") == "purchase":
         return (
             f"• {ev.get('label', '?')}: guna {used} {unit}, "
-            f"beli {compared} {unit} மட்டும் — {over} {unit} அதிகம்"
+            f"beli {compared} {unit} mattum — {over} {unit} adhigam"
         )
     return (
         f"• {ev.get('label', '?')}: guna {used} {unit}, "
-        f"POS jual {compared} {unit} மட்டும் — {over} {unit} அதிகம்"
+        f"POS jual {compared} {unit} mattum — {over} {unit} adhigam"
     )
 
 
@@ -2013,17 +2013,17 @@ def render_pandari_wastage(outlet_label, business_date, leaks: list) -> str:
     if not leaks:
         return ""
     lines = [
-        f"👨‍🍳 பண்டாரி கவனிக்கணும் — {outlet_label} • {business_date}",
+        f"👨‍🍳 Pandari kavanikkanum — {outlet_label} • {business_date}",
         "",
-        "POS-ல வித்ததை விட kitchen-ல guna பண்ணது அதிகம்:",
+        "POS-la vithathai vida kitchen-la guna pannathu adhigam:",
     ]
     lines += [_leak_line(ev) for ev in leaks]
     lines += [
         "",
-        "தேவைக்கு மேல masak ஆயிடுச்சு. மிச்சம் = wastage = கடைக்கு loss.",
-        "Sales பாத்து அளவா masak பண்ணுங்க — wastage-அ குறைங்க. 🙏",
+        "thevaikku mela masak aayiduchu. micham = wastage = kadaikku loss.",
+        "Sales paathu alavaa masak pannunga — wastage-a koraynga. 🙏",
         "",
-        "ஏன் இவ்வளவு அதிகம் ஆச்சு? சொல்லுங்க.",
+        "yen ivvalavu adhigam aachu? sollunga.",
     ]
     return "\n".join(lines)
 
@@ -2036,13 +2036,13 @@ def render_manager_wastage(outlet_label, business_date, leaks: list) -> str:
     lines = [
         f"🔴 Wastage alert — {outlet_label} • {business_date}",
         "",
-        "POS sales-அ விட kitchen guna அதிகம்:",
+        "POS sales-a vida kitchen guna adhigam:",
     ]
     lines += [_leak_line(ev) for ev in leaks]
     lines += [
         "",
-        "பண்டாரிகிட்ட நேர்ல கேளுங்க — ஏன் இவ்வளவு அதிகம்?",
-        "அளவா masak பண்ண சொல்லி, wastage குறையுதா-னு follow up பண்ணுங்க. 🙏",
+        "Pandari-kitta nerla kelunga — yen ivvalavu adhigam?",
+        "alavaa masak panna solli, wastage koraiyuthaa-nu follow up pannunga. 🙏",
     ]
     return "\n".join(lines)
 
@@ -2233,21 +2233,21 @@ def render_form_reminder(outlet_label, form: dict) -> str:
         title = form_title(form.get("phase") or PHASE_COOKED)
         missing = int(form["total"]) - int(form["filled"])
         head = (
-            "⏰ Form இன்னும் fill ஆகல!\n"
+            "⏰ Form innum fill aagala!\n"
             f"{title} — {outlet_label} • {form.get('business_date')}\n\n"
         )
         if form.get("all_filled"):
             body = (
-                "எல்லா item-um போட்டீங்க 👍 ஆனா அனுப்பல!\n"
-                "மேல form-ல 'Hantar' தட்டுங்க. அப்பதான் முடியும் 🙏\n\n"
+                "ella item-um potteenga 👍 aanaa anuppala!\n"
+                "mela form-la 'Hantar' thattunga. appathaan mudiyum 🙏\n\n"
                 "Semua dah isi tapi belum Hantar — sila tekan Hantar."
             )
         else:
             body = (
-                f"{form['total']} item-ல {missing} இன்னும் காலி.\n"
-                "மேல இருக்கற form-ல item-அ தட்டி எண் போடுங்க.\n"
-                "எல்லாம் போட்டு 'Hantar' தட்டுங்க. "
-                "Key in பண்ணிட்டா இந்த reminder நின்னுடும் 🙏\n\n"
+                f"{form['total']} item-la {missing} innum kaali.\n"
+                "mela irukkara form-la item-a thatti number podunga.\n"
+                "ellaam pottu 'Hantar' thattunga. "
+                "Key in pannitta intha reminder ninnudum 🙏\n\n"
                 "Form belum isi lagi — sila tekan item kat atas & key in, "
                 "lepas tu Hantar."
             )

@@ -1,4 +1,4 @@
-"""Missing supplier-bill detection — "BESTARI FARM bill எங்க?"
+"""Missing supplier-bill detection — "BESTARI FARM bill enga?"
 
 The bot holds months of supplier purchase history per upload chat. When a
 supplier that reliably showed up every ~N days suddenly stops appearing,
@@ -246,8 +246,8 @@ def find_missing_bills(rows: list[dict], *, today: date | None = None) -> list[d
 
 def _rhythm_tamil(median_gap: float) -> str:
     if median_gap < 2.0:
-        return "தினமும்"
-    return f"~{median_gap:.0f} நாளுக்கு ஒரு தடவை"
+        return "dhinamum"
+    return f"~{median_gap:.0f} naalukku oru thadavai"
 
 
 def format_missing_bill_message(entry: dict) -> str:
@@ -267,14 +267,14 @@ def format_missing_bill_message(entry: dict) -> str:
         n = int(entry["sample_count"])
 
         return (
-            f"🧾 {supplier} bill எங்க?\n"
+            f"🧾 {supplier} bill enga?\n"
             "\n"
-            f"வழக்கமா {rhythm} {supplier} bill upload ஆகும் ({n} bills history).\n"
-            f"கடைசி bill: {last_txt} — அதுக்கப்புறம் {days} நாளா ஒன்னும் இல்ல.\n"
+            f"Vazhakkamaa {rhythm} {supplier} bill upload aagum ({n} bills history).\n"
+            f"Kadaisi bill: {last_txt} — athukkappuram {days} naalaa onnum illa.\n"
             "\n"
-            "ஏன் upload பண்ணல? Bill இருந்தா இப்பவே photo எடுத்து போடுங்க 📸\n"
-            "Supplier மாத்திட்டீங்களா / வாங்கறது நிறுத்திட்டீங்களா-ன்னா "
-            "reply-ல சொல்லுங்க.\n"
+            "Yen upload pannala? Bill irundhaa ippave photo eduthu podunga 📸\n"
+            "Supplier maathitteengalaa / vaangurathu niruthitteengalaa-nnaa "
+            "reply-la sollunga.\n"
             "\n"
             f"Resit {supplier} dah {days} hari tak upload (last {last_txt}). "
             "Kalau ada bill, upload sekarang. Kalau dah tukar supplier, "

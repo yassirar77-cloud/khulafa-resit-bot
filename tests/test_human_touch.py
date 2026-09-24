@@ -40,8 +40,8 @@ class Greetings(unittest.TestCase):
         self.assertIn("boss", greeting("   ", -100, D1))
 
     def test_personalise_prepends_and_keeps_empty_empty(self):
-        out = personalise("விலை ஏறிடுச்சு!", "Ravi", -100, D1)
-        self.assertTrue(out.endswith("விலை ஏறிடுச்சு!"))
+        out = personalise("Vilai eriduchu!", "Ravi", -100, D1)
+        self.assertTrue(out.endswith("Vilai eriduchu!"))
         self.assertIn("Ravi boss", out.split("\n")[0])
         self.assertEqual(personalise("", "Ravi", -100, D1), "")
         self.assertEqual(personalise(None, "Ravi", -100, D1), "")
@@ -111,9 +111,9 @@ class PraiseAndScoreboard(unittest.TestCase):
         none_asked = {"chat_id": -300, "asked": 0, "answered": 0,
                       "avg_response_minutes": None}
         out = praise_message(full)
-        self.assertIn("🌟 இந்த வாரம் சூப்பர்!", out)
-        self.assertIn("4 கேள்விக்கும் பதில்", out)
-        self.assertIn("Boss-க்கும் தெரியும்", out)
+        self.assertIn("🌟 Intha vaaram super!", out)
+        self.assertIn("4 kelvikkum bathil", out)
+        self.assertIn("Boss-kkum theriyum", out)
         self.assertEqual(praise_message(partial), "")
         self.assertEqual(praise_message(none_asked), "")
 

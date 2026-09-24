@@ -25,7 +25,7 @@ def build_big_purchase_message(
       disclaimer so the reader knows the comparison is weak.
     - ``sample_size >= 5``: confident 14-day average (original format).
     """
-    prefix = "வாங்கினது அதிகம்! ஏன் இவ்வளவு வாங்கினீங்க? / "
+    prefix = "Vaanginathu adhigam! Yen ivlo vaangineenga? / "
     if sample_size < LOW_CONFIDENCE_FLOOR:
         return (
             f"{prefix}Belian besar hari ni RM{today_amount:.2f}. "

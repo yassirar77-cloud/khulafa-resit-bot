@@ -268,5 +268,63 @@ class StaffAiTests(unittest.TestCase):
             self.assertIsNone(staff_ai.complete_json("s", "u"))
 
 
+class ScriptAndRetryTests(unittest.TestCase):
+    def test_tamil_or_bengali_script_rejected(self):
+        self.assertIn("Tamil/Bengali script, not English letters",
+                      sc.fact_check("கடை ரெடியா?", {}, vocabulary=VOCAB))
+        self.assertIn("Tamil/Bengali script, not English letters",
+                      sc.fact_check("দোকান রেডি?", {}, vocabulary=VOCAB))
+
+    def test_templates_are_english_letters_and_pass_real_vocabulary(self):
+        import re
+        vocab = sc.item_vocabulary()
+        facts = {
+            "stock": sc.stock_facts(DRAFT), "order": sc.order_facts(DRAFT),
+            "cook": sc.cook_facts(FORECAST),
+            "bills": {"supplier": "Fook Leong", "days": "19", "last": "05/09"},
+        }
+        for lang in sc.LANGUAGES:
+            for slot in sc.SLOTS:
+                text = sc.render_template(slot, lang, facts.get(slot, {}))
+                self.assertIsNone(re.search("[\u0980-\u09FF\u0B80-\u0BFF]", text), text)
+                self.assertEqual(sc.fact_check(text, facts.get(slot, {}), vocabulary=vocab),
+                                 [], (lang, slot, text))
+
+    def _fake(self, *contents):
+        fake = mock.MagicMock()
+        fake.chat.completions.create.side_effect = [
+            mock.MagicMock(choices=[mock.MagicMock(
+                message=mock.MagicMock(content=c), finish_reason="stop")],
+                usage=mock.MagicMock(prompt_tokens=1, completion_tokens=1))
+            for c in contents
+        ]
+        return fake
+
+    def test_empty_reply_retried_once_then_succeeds(self):
+        import staff_ai
+        fake = self._fake("", '```json\n{"text": "Ok?"}\n```')
+        with mock.patch.dict("os.environ", {"DEEPSEEK_API_KEY": "k"}, clear=True), \
+                mock.patch.object(staff_ai, "_deepseek_client", return_value=fake):
+            out = staff_ai.complete_json("s", "u")
+        self.assertEqual(out["data"], {"text": "Ok?"})
+        self.assertEqual(fake.chat.completions.create.call_count, 2)
+        kwargs = fake.chat.completions.create.call_args.kwargs
+        self.assertEqual(kwargs["extra_body"], {"thinking": {"type": "disabled"}})
+        self.assertGreaterEqual(kwargs["max_tokens"], 800)
+
+    def test_two_empty_replies_give_none(self):
+        import staff_ai
+        fake = self._fake("", "   ")
+        with mock.patch.dict("os.environ", {"DEEPSEEK_API_KEY": "k"}, clear=True), \
+                mock.patch.object(staff_ai, "_deepseek_client", return_value=fake):
+            self.assertIsNone(staff_ai.complete_json("s", "u"))
+        self.assertEqual(fake.chat.completions.create.call_count, 2)
+
+    def test_json_with_text_around_it_parsed(self):
+        import staff_ai
+        self.assertEqual(staff_ai._parse('Here: {"text": "a"} thanks'), {"text": "a"})
+        self.assertIsNone(staff_ai._parse("no json"))
+
+
 if __name__ == "__main__":
     unittest.main()

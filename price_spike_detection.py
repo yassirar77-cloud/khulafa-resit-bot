@@ -439,25 +439,25 @@ def format_spike_message_tamil(spike: dict) -> str:
         merchant_part = f" — {merchant}" if merchant else ""
 
         body = (
-            "⚠️ விலை ஏறிடுச்சு! Price naik!\n"
+            "⚠️ Vilai eriduchu! Price naik!\n"
             "\n"
             f"{title}{merchant_part}\n"
-            f"முன்னாடி average: RM{avg:.2f} ({n} resit)\n"
-            f"இன்னைக்கு: RM{current:.2f} (+{percent:.1f}%)\n"
+            f"Munnaadi average: RM{avg:.2f} ({n} resit)\n"
+            f"Innaikku: RM{current:.2f} (+{percent:.1f}%)\n"
             "\n"
-            "👉 சப்ளையர்கிட்ட ஏன் விலை ஏறுச்சு-னு கேளுங்க.\n"
+            "👉 Supplier-kitta yen vilai eruchu-nu kelunga.\n"
         )
 
         cheaper = cheaper_shops(spike)
         if cheaper:
-            body += "\nவேற கடையில இன்னும் cheap-ஆ இருக்கு:\n"
+            body += "\nVera kadaiyila innum cheap-aa irukku:\n"
             for shop in cheaper:
                 body += f"• {shop['shop']}: RM{shop['latest_price']:.2f}\n"
-            body += "\nஅங்க rate-அ compare பண்ணி பாருங்க. 🙏"
+            body += "\nAnga rate-a compare panni paarunga. 🙏"
         elif isinstance(spike.get("shop_prices"), list) and len(spike["shop_prices"]) >= 2:
             # There IS a comparison and nobody beats today's price — say so,
             # or the manager will assume the bot simply didn't check.
-            body += "\nவேற கடையிலயும் இப்போ இதுக்கு cheap-ஆ இல்ல."
+            body += "\nVera kadaiyilayum ippo ithukku cheap-aa illa."
 
         return body.rstrip("\n")
     except Exception:

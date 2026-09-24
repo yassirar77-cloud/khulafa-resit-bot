@@ -160,18 +160,18 @@ class FormatMessages(unittest.TestCase):
 
     def test_chat_question_is_tamil_plus_malay(self):
         out = format_missing_bill_message(self._entry())
-        self.assertIn("🧾 BESTARI FARM bill எங்க?", out)
-        self.assertIn("~3 நாளுக்கு ஒரு தடவை", out)
-        self.assertIn("கடைசி bill: 24/07", out)
-        self.assertIn("13 நாளா ஒன்னும் இல்ல", out)
-        self.assertIn("ஏன் upload பண்ணல?", out)
-        self.assertIn("Supplier மாத்திட்டீங்களா", out)
+        self.assertIn("🧾 BESTARI FARM bill enga?", out)
+        self.assertIn("~3 naalukku oru thadavai", out)
+        self.assertIn("Kadaisi bill: 24/07", out)
+        self.assertIn("13 naalaa onnum illa", out)
+        self.assertIn("Yen upload pannala?", out)
+        self.assertIn("Supplier maathitteengalaa", out)
         self.assertIn("Resit BESTARI FARM dah 13 hari tak upload", out)
 
     def test_daily_supplier_reads_thinamum(self):
         entry = self._entry()
         entry["median_gap_days"] = 1.0
-        self.assertIn("வழக்கமா தினமும் BESTARI FARM", format_missing_bill_message(entry))
+        self.assertIn("Vazhakkamaa dhinamum BESTARI FARM", format_missing_bill_message(entry))
 
     def test_owner_summary_lists_every_quiet_supplier(self):
         chased = self._entry()
