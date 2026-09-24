@@ -159,8 +159,8 @@ class TextTests(_CacheCase):
 
     def test_roster_lists_groups_with_fallback(self):
         text = cn.format_roster(_at(9))
-        self.assertIn("SEK20: morning Syed · night Ismath", text)
-        self.assertIn("KLANG: morning (Cashier) · night (Cashier)", text)
+        self.assertIn("SEK20: morning Syed [bm_tamil] · night Ismath [bm_tamil]", text)
+        self.assertIn("KLANG: morning (Cashier) [bm_tamil] · night (Cashier) [bm_tamil]", text)
         self.assertNotIn("VISTA", text)
 
 

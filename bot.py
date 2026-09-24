@@ -106,6 +106,7 @@ import group_reports
 import food_cost_analytics
 import kitchen_usage
 import manager_registration
+import staff_chat
 from outlet_group_bot import OutletGroupBot
 import key_stock_daily
 import item_sales_watch
@@ -2172,6 +2173,8 @@ HELP_TEXT = (
     "/questions_now — which manager questions are still unanswered\n"
     "/cashier — cashier on shift per outlet group; /cashier SEK20 night Ismath to change\n"
     "/ping_managers — test message to every outlet group (director only)\n"
+    "/lang SEK20 morning tamil — language a cashier reads\n"
+    "/staff_preview <check-in> — preview the natural check-in now\n"
     "/form_chase_now — remind every group whose kitchen form is still "
     "not keyed in\n"
     "/scoreboard_now — 7-day question response scoreboard per chat\n"
@@ -5433,6 +5436,187 @@ async def ping_managers_command(update: Update,
     )
 
 
+async def lang_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Director-only: set the language a cashier reads, per outlet and shift.
+    ``/lang SEK20 morning tamil``; ``/lang`` alone lists everyone."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    await asyncio.to_thread(cashier_names.refresh)
+    args = context.args or []
+    if not args:
+        await message.reply_text(cashier_names.format_roster())
+        return
+    if len(args) != 3:
+        await message.reply_text(
+            "Usage: /lang <CODE> <morning|night> <language>\n"
+            "Languages: " + ", ".join(staff_chat.LANGUAGES)
+        )
+        return
+    code = args[0].strip().upper()
+    known = set(cashier_names.group_chats().values())
+    if code not in known:
+        await message.reply_text(
+            f"Unknown outlet {code}. Registered groups: "
+            + (", ".join(sorted(known)) or "none")
+        )
+        return
+    language = staff_chat.normalize_language(args[2])
+    if language is None:
+        await message.reply_text(
+            f"Unknown language {args[2]!r}. Use one of: "
+            + ", ".join(staff_chat.LANGUAGES)
+        )
+        return
+    result = await asyncio.to_thread(
+        cashier_names.set_language,
+        supabase, code, args[1], language, _command_owner_id(update),
+    )
+    if not result.get("ok"):
+        await message.reply_text(f"⚠️ {result.get('error')}")
+        return
+    logger.info("lang: %s %s -> %s", result["outlet_code"], result["shift"], language)
+    await message.reply_text(
+        f"✅ {result['outlet_code']} {result['shift']}: {language}"
+    )
+
+
+# === Natural staff chat — preview ==========================================
+# Each check-in (staff_chat.SLOTS) is written for every outlet group from the
+# real data, worded by the AI provider, fact-checked, and — in preview mode —
+# sent ONLY to the director chat as one digest per check-in. Nothing reaches a
+# shop group from here yet.
+
+def _staff_slot_facts(slot, registry_code, chat_id, today, bills_by_chat):
+    """Facts for one outlet's check-in; ``None`` = nothing true to say."""
+    if slot not in staff_chat.DATA_SLOTS:
+        return {}
+    codes = staff_chat.data_codes(registry_code)
+    if slot in ("stock", "order"):
+        due = today if slot == "stock" else today + timedelta(days=1)
+        rows = (
+            supabase.table("order_drafts")
+            .select("item, qty, pack, supplier, outlet, due_date")
+            .in_("outlet", codes).eq("due_date", due.isoformat())
+            .execute().data or []
+        )
+        return (staff_chat.stock_facts if slot == "stock" else staff_chat.order_facts)(rows)
+    if slot == "cook":
+        rows = (
+            supabase.table("kitchen_demand_forecast")
+            .select("item_code, unit, recommend_qty, usual_cooked, action, outlet_code")
+            .in_("outlet_code", codes).eq("business_date", today.isoformat())
+            .execute().data or []
+        )
+        return staff_chat.cook_facts(rows)
+    if slot == "bills":
+        return staff_chat.bills_facts(bills_by_chat.get(chat_id) or [])
+    return None
+
+
+_NO_DATA = {
+    "stock": "no order draft for today — nothing to ask",
+    "order": "no order draft for tomorrow — nothing to ask",
+    "cook": "no cook plan change today — nothing to ask",
+    "bills": "no missing supplier bills — nothing to ask",
+}
+
+
+def _build_staff_preview(slot, today):
+    """All outlets' messages for one check-in, plus the log rows."""
+    cashier_names.refresh()
+    groups = sorted(cashier_names.group_chats().items(), key=lambda kv: kv[1])
+    shift = staff_chat.SLOTS[slot][0]
+    bills_by_chat = {}
+    if slot == "bills":
+        for entry in _gather_missing_bills(today=today)["entries"]:
+            if entry.get("ask_today"):
+                bills_by_chat.setdefault(entry["chat_id"], []).append(entry)
+    vocabulary = staff_chat.item_vocabulary()
+    names = cashier_names.all_names()
+    rows, logs = [], []
+    for chat_id, code in groups:
+        cashier = cashier_names.name_for(code, shift)
+        language = cashier_names.language_for(code, shift)
+        row = {"outlet_code": code, "cashier": cashier, "language": language}
+        try:
+            facts = _staff_slot_facts(slot, code, chat_id, today, bills_by_chat)
+        except Exception:
+            logger.exception("staff preview: facts failed (%s %s)", slot, code)
+            row["skip"] = "data lookup failed — see logs"
+            rows.append(row)
+            continue
+        if facts is None:
+            row["skip"] = _NO_DATA.get(slot, "nothing to ask")
+            rows.append(row)
+            continue
+        own = {p.strip() for p in cashier.split("/")}
+        result = staff_chat.build_message(
+            slot, language, facts,
+            seed=staff_chat.seed_for(slot, code, today),
+            vocabulary=vocabulary, other_names=sorted(names - own),
+        )
+        row["result"] = result
+        rows.append(row)
+        logs.append(staff_chat.log_row(
+            slot, code, chat_id, cashier, language, facts, result, staff_chat.PREVIEW
+        ))
+    if logs:
+        try:
+            supabase.table(staff_chat.LOG_TABLE).insert(logs).execute()
+        except Exception:
+            logger.exception("staff preview: log insert failed")
+    return rows
+
+
+async def run_staff_preview(application: Application, slot: str, *,
+                            force: bool = False) -> None:
+    """Scheduled check-in. Only runs when STAFF_CHAT_STYLE=preview (or when
+    the director asks with /staff_preview); the digest goes to the director
+    chat only."""
+    if not force and staff_chat.style() != staff_chat.PREVIEW:
+        return
+    try:
+        rows = await asyncio.to_thread(_build_staff_preview, slot, _my_today())
+    except Exception:
+        logger.exception("staff preview failed (slot=%s)", slot)
+        with contextlib.suppress(Exception):
+            await application.bot.send_message(
+                chat_id=ALERT_CHAT_ID, text=f"⚠️ Staff chat preview ({slot}) failed — see logs."
+            )
+        return
+    ai = sum(1 for r in rows if r.get("result", {}).get("source") == "ai")
+    fallback = sum(1 for r in rows if r.get("result", {}).get("source") == "template")
+    logger.info(
+        "staff preview %s: %d outlet(s), %d ai, %d template, %d skipped",
+        slot, len(rows), ai, fallback, len(rows) - ai - fallback,
+    )
+    await _send_chunked_to(
+        application, ALERT_CHAT_ID, staff_chat.format_preview(slot, rows)
+    )
+
+
+async def staff_preview_command(update: Update,
+                                context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Director-only: run one check-in's preview now, e.g. /staff_preview
+    order. No argument lists the check-ins."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    slot = (context.args[0].strip().lower() if context.args else "")
+    if slot not in staff_chat.SLOTS:
+        await message.reply_text(
+            "Usage: /staff_preview <check-in>\n" + "\n".join(
+                f"{name} — {time_} ({shift})"
+                for name, (shift, time_, _p) in staff_chat.SLOTS.items()
+            )
+            + f"\n\nSTAFF_CHAT_STYLE is {staff_chat.style()}."
+        )
+        return
+    await message.reply_text(f"Writing the {slot} check-in for every outlet…")
+    await run_staff_preview(context.application, slot, force=True)
+
+
 async def questions_now_command(update: Update,
                                 context: ContextTypes.DEFAULT_TYPE) -> None:
     """Owner-only: show the unanswered-question overview on demand (does NOT
@@ -6484,6 +6668,8 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("questions_now", questions_now_command))
     app.add_handler(CommandHandler("cashier", cashier_command))
     app.add_handler(CommandHandler("ping_managers", ping_managers_command))
+    app.add_handler(CommandHandler("lang", lang_command))
+    app.add_handler(CommandHandler("staff_preview", staff_preview_command))
     app.add_handler(CommandHandler("form_chase_now", form_chase_now_command))
     app.add_handler(CommandHandler("scoreboard_now", scoreboard_now_command))
     app.add_handler(CommandHandler("order_drafts_now", order_drafts_now_command))
@@ -6827,6 +7013,21 @@ async def run_bot() -> None:
         id="kitchen_comparison_late",
         replace_existing=True,
     )
+
+    # Natural staff chat check-ins (staff_chat.SLOTS). No-ops unless
+    # STAFF_CHAT_STYLE=preview; in preview every outlet's message goes to the
+    # director chat only, one digest per check-in.
+    for _slot, (_shift, _time, _purpose) in staff_chat.SLOTS.items():
+        _h, _m = (int(x) for x in _time.split(":"))
+        scheduler.add_job(
+            run_staff_preview,
+            trigger="cron",
+            hour=_h,
+            minute=_m,
+            args=[app, _slot],
+            id=f"staff_chat_{_slot}",
+            replace_existing=True,
+        )
 
     async with app:
         await app.start()

@@ -60,3 +60,25 @@ class OutletGroupsWiring(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StaffChatWiring(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(REPO_ROOT, "bot.py")) as f:
+            cls.src = f.read()
+
+    def test_commands_registered_and_director_only(self):
+        for name, fn in (("lang", "lang_command"),
+                         ("staff_preview", "staff_preview_command")):
+            self.assertIn(f'CommandHandler("{name}", {fn})', self.src)
+            self.assertIn("is_reviewer(_command_owner_id(update))",
+                          _block(self.src, f"async def {fn}("))
+
+    def test_scheduled_checkins_only_run_in_preview(self):
+        self.assertIn("for _slot, (_shift, _time, _purpose) in staff_chat.SLOTS.items():", self.src)
+        body = _block(self.src, "async def run_staff_preview(")
+        self.assertIn("staff_chat.style() != staff_chat.PREVIEW", body)
+        # Preview goes to the director chat, never a group.
+        self.assertIn("_send_chunked_to(\n        application, ALERT_CHAT_ID,", body)
+        self.assertNotIn("decision.target_chat_id", body)
