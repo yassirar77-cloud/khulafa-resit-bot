@@ -2184,7 +2184,7 @@ HELP_TEXT = (
     "/ping_managers — test message to every outlet group (director only)\n"
     "/lang SEK20 morning tamil — language a cashier reads\n"
     "/staff_preview <check-in> — preview the natural check-in now\n"
-    "/staff_samples [n] — n Tamil check-ins with back-translations to review\n"
+    "/staff_samples [n] [check-in] — Tamil samples with back-translations (with a check-in: Tamil + BM, pass rate)\n"
     "/form_chase_now — remind every group whose kitchen form is still "
     "not keyed in\n"
     "/scoreboard_now — 7-day question response scoreboard per chat\n"
@@ -5897,12 +5897,13 @@ async def post_staff_morning_summary(application: Application) -> None:
         await _send_chunked_to(application, ALERT_CHAT_ID, text)
 
 
-def _build_tamil_samples(n, today):
-    """``n`` Tamil check-ins across slots and outlets, real facts, full
-    checks — for the director to review. Logged with mode 'sample'."""
+def _build_tamil_samples(n, today, slot=None, languages=("tamil",)):
+    """``n`` check-ins across slots (or just ``slot``) and outlets, real
+    facts, full checks — for the director to review. Languages take turns.
+    Logged with mode 'sample'."""
     cashier_names.refresh()
     groups = sorted(cashier_names.group_chats().items(), key=lambda kv: kv[1])
-    slots = list(staff_chat.SLOTS)
+    slots = [slot] if slot else list(staff_chat.SLOTS)
     vocabulary = staff_chat.item_vocabulary()
     names = cashier_names.all_names()
     bills_by_chat: dict = {}
@@ -5922,15 +5923,16 @@ def _build_tamil_samples(n, today):
             continue
         cashier = cashier_names.name_for(code, staff_chat.SLOTS[slot][0])
         own = {p.strip() for p in cashier.split("/")}
+        language = languages[len(rows) % len(languages)]
         result = staff_chat.build_message(
-            slot, "tamil", facts,
+            slot, language, facts,
             seed=staff_chat.seed_for(slot, code, today) + f"-s{tries}",
             vocabulary=vocabulary, other_names=sorted(names - own),
         )
         rows.append({"slot": slot, "outlet_code": code, "cashier": cashier,
-                     "result": result})
+                     "language": language, "result": result})
         logs.append(staff_chat.log_row(
-            slot, code, chat_id, cashier, "tamil", facts, result, "sample"
+            slot, code, chat_id, cashier, language, facts, result, "sample"
         ))
     _insert_staff_logs(logs, "staff samples")
     return rows
@@ -5938,17 +5940,26 @@ def _build_tamil_samples(n, today):
 
 async def staff_samples_command(update: Update,
                                 context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Director-only: /staff_samples [n] — n (default 10) Tamil check-ins
-    with back-translations, to review the wording. Never sent to groups."""
+    """Director-only: /staff_samples [n] [check-in] — n (default 10) Tamil
+    check-ins with back-translations, to review the wording. With a
+    check-in (e.g. /staff_samples 10 lunch): only that one, Tamil and BM
+    taking turns, with the pass rate. Never sent to groups."""
     message = update.effective_message
     if not message or not is_reviewer(_command_owner_id(update)):
         return
-    try:
-        n = max(1, min(20, int(context.args[0]))) if context.args else 10
-    except ValueError:
-        n = 10
-    await message.reply_text(f"Writing {n} Tamil samples…")
-    rows = await asyncio.to_thread(_build_tamil_samples, n, _my_today())
+    n, slot = 10, None
+    for arg in context.args or []:
+        arg = arg.strip().lower()
+        if arg.isdigit():
+            n = max(1, min(20, int(arg)))
+        elif arg in staff_chat.SLOTS:
+            slot = arg
+    languages = ("tamil", "bm") if slot else ("tamil",)
+    label = f"{slot} (Tamil + BM)" if slot else "Tamil"
+    await message.reply_text(f"Writing {n} {label} samples…")
+    rows = await asyncio.to_thread(
+        _build_tamil_samples, n, _my_today(), slot, languages
+    )
     await _send_chunked_to(
         context.application, message.chat_id, staff_chat.format_samples(rows)
     )

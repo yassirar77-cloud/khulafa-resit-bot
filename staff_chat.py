@@ -102,6 +102,28 @@ def informal_tamil(text) -> list[str]:
     return sorted(set(_INFORMAL_RE.findall(str(text or ""))))
 
 
+# The 15:00 lunch check-in asks about the crowd and what ran out. Wording
+# that states lunch (or the shift) is over slipped through ("Lunch
+# முடிஞ்சுது"), so it is rejected outright. Questions such as "முடிஞ்சுதா?"
+# (did it run out?) are fine.
+_LUNCH_OVER_RE = re.compile(
+    "|".join([
+        "(?:முடிஞ்சுது|முடிந்தது|முடிஞ்சாச்சு|முடிந்துவிட்டது|முடிஞ்சிடுச்சு)(?![%s])"
+        % _TAMIL_CHARS,
+        r"\b(?:lunch|makan tengah hari)\s+(?:dah|sudah|telah)\s+(?:habis|tamat|siap|selesai)\b",
+        r"\b(?:lepas|selepas|habis)\s+lunch\b",
+        r"\blunch\s+(?:is\s+)?(?:over|finished|done)\b",
+        r"\bafter\s+lunch\b",
+    ]),
+    re.IGNORECASE,
+)
+
+
+def lunch_said_over(text) -> list[str]:
+    """Phrases in ``text`` that say lunch / the shift is finished."""
+    return sorted({m.group(0) for m in _LUNCH_OVER_RE.finditer(str(text or ""))})
+
+
 # Fact values that must appear verbatim (so they stay in English letters and
 # 0-9 digits, never translated): per slot, the keys that carry them.
 _REQUIRED_FACTS = {
@@ -132,8 +154,10 @@ SLOTS: dict[str, tuple[str, str, str]] = {
               "order draft: will it last until tonight"),
     "cook": (MORNING, "11:05", "today's cook plan for ONE dish: how much to "
              "cook versus what they usually cook"),
-    "lunch": (MORNING, "15:00", "after lunch: how was the crowd, did any "
-              "dish finish early"),
+    "lunch": (MORNING, "15:00", "ask exactly two questions and nothing "
+              "else: how was the lunch crowd, and did any dish run out "
+              "(sell out) early. Do not say or suggest that lunch or the "
+              "shift is finished or over; do not add any other remark"),
     "order": (NIGHT, "20:05", "tomorrow's order draft: confirm or change "
               "(the main items are listed)"),
     "bills": (NIGHT, "21:05", "a regular supplier's bill hasn't been "
@@ -167,7 +191,7 @@ _T: dict[str, dict[str, str]] = {
         "cook_raise": ["{item} hari ni masak {cook} {unit}, lebih sikit dari biasa.{usual_bm} Ok?",
                        "{item} hari ni masak lebih sikit, {cook} {unit}.{usual_bm} Ok tak?"],
         "lunch": ["Lunch tadi ramai? Ada lauk habis awal?",
-                  "Lunch tadi macam mana? Ada lauk yang cepat habis?"],
+                  "Ramai tak masa lunch tadi? Ada lauk yang habis awal?"],
         "order_ask": ["Esok nak order apa? Bagitau barang & berapa ya.",
                       "Untuk esok, nak order apa? Senaraikan barang & kuantiti ya."],
         "order": ["Order esok: {list}{more_bm}. Ok atau nak tukar?",
@@ -186,8 +210,8 @@ _T: dict[str, dict[str, str]] = {
                      "{item} இன்னைக்கு {cook} {unit} போதும்னு தோணுது.{usual_ta} ஓகேவா?"],
         "cook_raise": ["இன்னைக்கு {item} {cook} {unit} சமைங்க, வழக்கத்தை விட கொஞ்சம் அதிகம்.{usual_ta} சரியா?",
                        "{item} இன்னைக்கு கொஞ்சம் கூட, {cook} {unit} சமைங்க.{usual_ta} ஓகேவா?"],
-        "lunch": ["மதியம் கூட்டம் எப்படி? ஏதாவது கறி சீக்கிரம் தீர்ந்துச்சா?",
-                  "Lunch எப்படி போச்சு? ஏதாவது சீக்கிரம் முடிஞ்சுதா?"],
+        "lunch": ["மதியம் கூட்டம் எப்படி இருந்துச்சு? ஏதாவது கறி சீக்கிரமே தீர்ந்து போச்சா?",
+                  "Lunch நேரத்துல கூட்டம் எப்படி? ஏதாவது dish சீக்கிரமே தீர்ந்துடுச்சா?"],
         "order_ask": ["நாளைக்கு என்ன order பண்ணணும்? சாமானும் அளவும் சொல்லுங்க.",
                       "நாளைக்கு order-க்கு என்ன வேணும்? சாமான், அளவு சொல்லுங்க."],
         "order": ["நாளைக்கு order: {list}{more_ta}. சரியா, மாத்தணுமா?",
@@ -202,7 +226,7 @@ _T: dict[str, dict[str, str]] = {
         "stock": "{item} enough till tonight? Today's draft: {qty} {pack} from {supplier}.",
         "cook_cut": "Today {item}: cooking {cook} {unit} is enough.{usual_en} OK?",
         "cook_raise": "Today {item}: cook {cook} {unit}, a bit more than usual.{usual_en} OK?",
-        "lunch": "How was the lunch crowd? Anything finished early?",
+        "lunch": "How was the lunch crowd? Did any dish run out early?",
         "order_ask": "What do we need to order for tomorrow? Tell me the items and quantities.",
         "order": "Tomorrow's order: {list}{more_en}. OK or change?",
         "bills": "{supplier} bill not in for {days} days (last {last}). Got it? Please upload 🙏",
@@ -514,6 +538,10 @@ def fact_check(text, facts, *, vocabulary=None, other_names=(), language=None,
     rude = informal_tamil(text)
     if rude:
         problems.append("informal Tamil: " + ", ".join(rude))
+    if slot == "lunch":
+        over = lunch_said_over(text)
+        if over:
+            problems.append("says lunch is finished: " + ", ".join(over))
 
     fact_text = " ".join(_fact_strings(facts))
     allowed_nums = {_norm_num(n) for n in _NUM.findall(fact_text)}
@@ -737,23 +765,38 @@ def format_preview(slot: str, rows: list[dict], *, now: datetime | None = None) 
 
 
 def format_samples(rows: list[dict]) -> str:
-    """Tamil review samples: each with the check-in, the outlet, the text,
-    DeepSeek's own English gloss, the independent back-translation, and
-    whether it passed (✅) or the template was used (✏️ + why)."""
+    """Review samples: each with the check-in, the outlet, the language, the
+    text, DeepSeek's own English gloss, the independent back-translation,
+    and whether it passed (✅) or the template was used (✏️ + why). Ends
+    with the pass rate per language."""
+    langs = sorted({row.get("language", "tamil") for row in rows})
+    label = " + ".join(_LANG_NAMES.get(lang, lang) for lang in langs) or "Tamil"
     lines = [
-        f"🧪 {len(rows)} Tamil samples — not sent to any group",
+        f"🧪 {len(rows)} {label} samples — not sent to any group",
         "✅ = AI wording passed every check · ✏️ = template used (reason)",
     ]
     for i, row in enumerate(rows, 1):
         res = row["result"]
+        lang = row.get("language", "tamil")
         mark = "✅" if res["source"] == "ai" else "✏️ " + "; ".join(res["problems"][:2])
-        lines += ["", f"{i}. {row['slot']} · {row['outlet_code']} · {row['cashier']} {mark}",
+        lines += ["", f"{i}. {row['slot']} · {row['outlet_code']} · {row['cashier']} · "
+                      f"{_LANG_NAMES.get(lang, lang)} {mark}",
                   res["text"]]
         if res.get("english"):
             lines.append(f"↳ EN: {res['english']}")
         if res.get("back_translation"):
             lines.append(f"↳ back-translated: {res['back_translation']}")
+    lines.append("")
+    for lang in langs:
+        mine = [r for r in rows if r.get("language", "tamil") == lang]
+        passed = sum(1 for r in mine if r["result"]["source"] == "ai")
+        lines.append(f"Pass rate {_LANG_NAMES.get(lang, lang)}: {passed}/{len(mine)}")
     return "\n".join(lines)
+
+
+_LANG_NAMES = {"tamil": "Tamil", "bm": "BM", "bengali": "Bengali",
+               "english": "English", "indonesian": "Indonesian",
+               BM_TAMIL: "BM+Tamil"}
 
 
 def log_row(slot, outlet_code, chat_id, cashier, language, facts, result, mode) -> dict:

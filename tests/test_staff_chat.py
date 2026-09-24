@@ -453,5 +453,63 @@ class MeaningAndToneTests(unittest.TestCase):
         self.assertIn("↳ back-translated: Is the shop ready?", text)
 
 
+class LunchWordingTests(unittest.TestCase):
+    """The lunch check-in asks two things (crowd, what ran out early) and
+    never says lunch is finished."""
+
+    def test_rejects_lunch_is_finished(self):
+        for text in (
+            "மதிய Lunch முடிஞ்சுது, கூட்டம் எப்படி இருந்துச்சு? ஏதாவது item சீக்கிரம் தீர்ந்து போச்சா?",
+            "Lunch dah habis, ramai tak tadi? Ada lauk habis awal?",
+            "Lepas lunch ni, ramai tak? Ada lauk habis awal?",
+            "Lunch is over — how was the crowd?",
+        ):
+            problems = sc.fact_check(text, {}, vocabulary=set(), slot="lunch",
+                                     language="tamil" if "ம" in text else "bm")
+            self.assertTrue(any("lunch is finished" in p for p in problems), text)
+
+    def test_allows_the_two_questions(self):
+        for text in (
+            "மதியம் கூட்டம் எப்படி இருந்துச்சு? ஏதாவது கறி சீக்கிரமே தீர்ந்து போச்சா?",
+            "மதியம் Lunch நல்லா நடந்துச்சா? ஏதாவது item சீக்கிரம் முடிஞ்சு போச்சா?",
+            "Lunch tadi ramai? Ada lauk habis awal?",
+        ):
+            problems = sc.fact_check(text, {}, vocabulary=set(), slot="lunch",
+                                     language="tamil" if "ம" in text else "bm")
+            self.assertFalse(any("lunch is finished" in p for p in problems), (text, problems))
+
+    def test_only_applies_to_lunch(self):
+        self.assertEqual(sc.lunch_said_over("Lunch dah habis"), ["Lunch dah habis"])
+        problems = sc.fact_check("Lunch dah habis?", {}, vocabulary=set(), slot="night",
+                                 language="bm")
+        self.assertFalse(any("lunch is finished" in p for p in problems))
+
+    def test_templates_pass_their_own_rule(self):
+        for lang in ("bm", "tamil", "english", "indonesian", "bengali", sc.BM_TAMIL):
+            for variant in (0, 1):
+                text = sc.render_template("lunch", lang, {}, variant)
+                self.assertEqual(sc.lunch_said_over(text), [], (lang, text))
+
+    def test_purpose_asks_two_questions_not_finished(self):
+        purpose = sc._purpose("lunch", {})
+        self.assertIn("run out", purpose)
+        self.assertIn("crowd", purpose)
+        self.assertIn("Do not say", purpose)
+
+    def test_samples_show_pass_rate_per_language(self):
+        rows = [
+            {"slot": "lunch", "outlet_code": "SEK6", "cashier": "A", "language": "tamil",
+             "result": {"source": "ai", "problems": [], "text": "x"}},
+            {"slot": "lunch", "outlet_code": "SEK6", "cashier": "A", "language": "bm",
+             "result": {"source": "template", "problems": ["meaning"], "text": "y"}},
+            {"slot": "lunch", "outlet_code": "KLANG", "cashier": "B", "language": "bm",
+             "result": {"source": "ai", "problems": [], "text": "z"}},
+        ]
+        text = sc.format_samples(rows)
+        self.assertIn("3 BM + Tamil samples", text)
+        self.assertIn("Pass rate Tamil: 1/1", text)
+        self.assertIn("Pass rate BM: 1/2", text)
+
+
 if __name__ == "__main__":
     unittest.main()
