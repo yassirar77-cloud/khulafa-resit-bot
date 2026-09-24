@@ -387,11 +387,14 @@ def _scripted(write_text, back="Is the shop ready?", same=True, reason="same"):
 
 
 class MeaningAndToneTests(unittest.TestCase):
-    TAMIL_OK = "காலை வணக்கம் 👋 கடை ரெடியா? ஏதாவது குறைவா இருக்கா?"
+    # The back-translation judge runs for check-ins with data; the order
+    # ask (no draft) is one of them and needs no facts in the text.
+    TAMIL_OK = "நாளைக்கு என்ன order பண்ணணும்? சாமானும் அளவும் சொல்லுங்க."
+    ASK = {"ask": True}
 
     def test_tamil_passes_when_back_translation_matches(self):
         fake = _scripted(self.TAMIL_OK)
-        res = sc.build_message("open", "tamil", {}, complete=fake)
+        res = sc.build_message("order", "tamil", self.ASK, complete=fake)
         self.assertEqual(res["source"], "ai")
         self.assertTrue(res["meaning_ok"])
         self.assertEqual(res["back_translation"], "Is the shop ready?")
@@ -408,32 +411,66 @@ class MeaningAndToneTests(unittest.TestCase):
                 seen["judge"] = json.loads(user)
                 return {"data": {"same_meaning": True}}
             return {"data": {"text": self.TAMIL_OK}}
-        sc.build_message("open", "tamil", {}, complete=complete)
+        sc.build_message("order", "tamil", self.ASK, complete=complete)
         self.assertEqual(seen["user"], self.TAMIL_OK)   # Tamil only, no intent
-        self.assertIn("Morning", seen["judge"]["intended"])
+        self.assertIn("order", seen["judge"]["intended"])
         self.assertEqual(seen["judge"]["actually_written"], "x")
 
     def test_meaning_mismatch_falls_back_to_template(self):
-        # SEK20's case: "left over" where "short" was meant.
-        fake = _scripted("இன்னைக்கு ஏதாவது சாமான் மீதம் இருக்கா?",
-                         back="Is anything left over today?", same=False,
-                         reason="asks about leftovers, not shortages")
-        res = sc.build_message("open", "tamil", {}, complete=fake)
+        fake = _scripted("இன்னைக்கு stock எவ்வளவு மீதம் இருக்கு சொல்லுங்க?",
+                         back="How much stock is left over today?", same=False,
+                         reason="asks about leftover stock, not tomorrow's order")
+        res = sc.build_message("order", "tamil", self.ASK, complete=fake)
         self.assertEqual(res["source"], "template")
         self.assertEqual(res["problems"],
-                         ["meaning check: asks about leftovers, not shortages"])
+                         ["meaning check: asks about leftover stock, not tomorrow's order"])
         self.assertFalse(res["meaning_ok"])
 
     def test_meaning_check_fails_closed(self):
-        res = sc.build_message("open", "tamil", {}, complete=_scripted(self.TAMIL_OK, back=None))
+        res = sc.build_message("order", "tamil", self.ASK,
+                               complete=_scripted(self.TAMIL_OK, back=None))
         self.assertEqual(res["source"], "template")
         self.assertIn("meaning check: no back-translation", res["problems"])
 
     def test_no_meaning_check_for_bm(self):
-        fake = _scripted("Kedai dah siap? Ada barang kurang?")
-        res = sc.build_message("open", "bm", {}, complete=fake)
+        fake = _scripted("Esok nak order apa? Bagitau barang & berapa.")
+        res = sc.build_message("order", "bm", self.ASK, complete=fake)
         self.assertEqual(res["source"], "ai")
         self.assertEqual(fake.calls, [sc.SYSTEM_PROMPT])
+
+    def test_no_data_check_ins_skip_the_judge(self):
+        cases = {
+            "open": "காலை வணக்கம் 👋 கடை ரெடியா? ஏதாவது குறைவா இருக்கா?",
+            "lunch": "மதியம் கூட்டம் எப்படி இருந்துச்சு? ஏதாவது கறி சீக்கிரமே தீர்ந்து போச்சா?",
+            "night": "ராத்திரி எல்லாம் சரியா? ஏதாவது உடைஞ்சதா, தீர்ந்ததா?",
+        }
+        for slot, text in cases.items():
+            # Even a judge that would say "different" is never asked.
+            fake = _scripted(text, same=False, reason="finished quickly vs ran out")
+            res = sc.build_message(slot, "tamil", {}, complete=fake)
+            self.assertEqual(res["source"], "ai", slot)
+            self.assertEqual(fake.calls, [sc.SYSTEM_PROMPT], slot)
+            self.assertIsNone(res["meaning_ok"])
+
+    def test_no_data_check_ins_still_use_hard_rules(self):
+        for slot, text in (
+            ("lunch", "Lunch முடிஞ்சுது, கூட்டம் எப்படி?"),
+            ("open", "காலை வணக்கம், shift முடிஞ்சுது?"),
+            ("open", "கடை ரெடியா? சொல்லு"),
+            ("lunch", "மதியம் கூட்டம் எப்படி? Ayam Goreng 5 pcs தீர்ந்துச்சா?"),
+        ):
+            res = sc.build_message(slot, "tamil", {}, complete=_scripted(text),
+                                   vocabulary={"ayam goreng"})
+            self.assertEqual(res["source"], "template", text)
+
+    def test_data_slots_keep_the_judge(self):
+        self.assertEqual(set(sc.MEANING_SLOTS), {"stock", "cook", "order", "bills"})
+
+    def test_judge_prompt_treats_ran_out_words_as_same(self):
+        for word in ("finished", "ran out", "sold out", "habis", "தீர்ந்து"):
+            self.assertIn(word, sc.JUDGE_PROMPT)
+        self.assertIn("lunch or the shift is over", sc.JUDGE_PROMPT)
+        self.assertIn("different topic", sc.JUDGE_PROMPT)
 
     def test_informal_tamil_rejected(self):
         for rude in ("என்ன வேணும் சொல்லு?", "stock பாத்தியா?", "நீ order போடு"):
@@ -447,8 +484,8 @@ class MeaningAndToneTests(unittest.TestCase):
         self.assertIn("respectful", sc._LANG_PROMPT[sc.BM_TAMIL])
 
     def test_preview_shows_back_translation(self):
-        res = sc.build_message("open", "tamil", {}, complete=_scripted(self.TAMIL_OK))
-        text = sc.format_preview("open", [
+        res = sc.build_message("order", "tamil", self.ASK, complete=_scripted(self.TAMIL_OK))
+        text = sc.format_preview("order", [
             {"outlet_code": "SEK20", "cashier": "Syed", "language": "tamil", "result": res}])
         self.assertIn("↳ back-translated: Is the shop ready?", text)
 
@@ -466,7 +503,7 @@ class LunchWordingTests(unittest.TestCase):
         ):
             problems = sc.fact_check(text, {}, vocabulary=set(), slot="lunch",
                                      language="tamil" if "ம" in text else "bm")
-            self.assertTrue(any("lunch is finished" in p for p in problems), text)
+            self.assertTrue(any("is over" in p for p in problems), text)
 
     def test_allows_the_two_questions(self):
         for text in (
@@ -476,19 +513,25 @@ class LunchWordingTests(unittest.TestCase):
         ):
             problems = sc.fact_check(text, {}, vocabulary=set(), slot="lunch",
                                      language="tamil" if "ம" in text else "bm")
-            self.assertFalse(any("lunch is finished" in p for p in problems), (text, problems))
+            self.assertFalse(any("is over" in p for p in problems), (text, problems))
 
-    def test_only_applies_to_lunch(self):
-        self.assertEqual(sc.lunch_said_over("Lunch dah habis"), ["Lunch dah habis"])
-        problems = sc.fact_check("Lunch dah habis?", {}, vocabulary=set(), slot="night",
+    def test_only_applies_to_no_data_check_ins(self):
+        self.assertEqual(sc.said_over("Lunch dah habis"), ["Lunch dah habis"])
+        self.assertEqual(sc.said_over("Shift is over"), ["Shift is over"])
+        for slot in ("open", "night"):
+            problems = sc.fact_check("Shift dah habis?", {}, vocabulary=set(), slot=slot,
+                                     language="bm")
+            self.assertTrue(any("is over" in p for p in problems), slot)
+        problems = sc.fact_check("Lunch dah habis?", {}, vocabulary=set(), slot="bills",
                                  language="bm")
-        self.assertFalse(any("lunch is finished" in p for p in problems))
+        self.assertFalse(any("is over" in p for p in problems))
 
     def test_templates_pass_their_own_rule(self):
         for lang in ("bm", "tamil", "english", "indonesian", "bengali", sc.BM_TAMIL):
-            for variant in (0, 1):
-                text = sc.render_template("lunch", lang, {}, variant)
-                self.assertEqual(sc.lunch_said_over(text), [], (lang, text))
+            for slot in sc.OVER_SLOTS:
+                for variant in (0, 1):
+                    text = sc.render_template(slot, lang, {}, variant)
+                    self.assertEqual(sc.said_over(text), [], (lang, slot, text))
 
     def test_purpose_asks_two_questions_not_finished(self):
         purpose = sc._purpose("lunch", {})
