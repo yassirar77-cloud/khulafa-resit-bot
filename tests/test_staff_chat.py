@@ -370,5 +370,88 @@ class ScriptAndRetryTests(unittest.TestCase):
         self.assertIsNone(staff_ai._parse("no json"))
 
 
+def _scripted(write_text, back="Is the shop ready?", same=True, reason="same"):
+    """Fake provider: answers the writer, translator and judge prompts."""
+    calls = []
+
+    def complete(system, user):
+        calls.append(system)
+        if system == sc.TRANSLATE_PROMPT:
+            return {"data": {"english": back}} if back is not None else None
+        if system == sc.JUDGE_PROMPT:
+            return {"data": {"same_meaning": same, "reason": reason}}
+        return {"data": {"text": write_text, "english": "EN"},
+                "provider": "deepseek", "model": "deepseek-flash"}
+    complete.calls = calls
+    return complete
+
+
+class MeaningAndToneTests(unittest.TestCase):
+    TAMIL_OK = "காலை வணக்கம் 👋 கடை ரெடியா? ஏதாவது குறைவா இருக்கா?"
+
+    def test_tamil_passes_when_back_translation_matches(self):
+        fake = _scripted(self.TAMIL_OK)
+        res = sc.build_message("open", "tamil", {}, complete=fake)
+        self.assertEqual(res["source"], "ai")
+        self.assertTrue(res["meaning_ok"])
+        self.assertEqual(res["back_translation"], "Is the shop ready?")
+        self.assertEqual(fake.calls, [sc.SYSTEM_PROMPT, sc.TRANSLATE_PROMPT, sc.JUDGE_PROMPT])
+
+    def test_translator_never_sees_the_intended_message(self):
+        seen = {}
+
+        def complete(system, user):
+            if system == sc.TRANSLATE_PROMPT:
+                seen["user"] = user
+                return {"data": {"english": "x"}}
+            if system == sc.JUDGE_PROMPT:
+                seen["judge"] = json.loads(user)
+                return {"data": {"same_meaning": True}}
+            return {"data": {"text": self.TAMIL_OK}}
+        sc.build_message("open", "tamil", {}, complete=complete)
+        self.assertEqual(seen["user"], self.TAMIL_OK)   # Tamil only, no intent
+        self.assertIn("Morning", seen["judge"]["intended"])
+        self.assertEqual(seen["judge"]["actually_written"], "x")
+
+    def test_meaning_mismatch_falls_back_to_template(self):
+        # SEK20's case: "left over" where "short" was meant.
+        fake = _scripted("இன்னைக்கு ஏதாவது சாமான் மீதம் இருக்கா?",
+                         back="Is anything left over today?", same=False,
+                         reason="asks about leftovers, not shortages")
+        res = sc.build_message("open", "tamil", {}, complete=fake)
+        self.assertEqual(res["source"], "template")
+        self.assertEqual(res["problems"],
+                         ["meaning check: asks about leftovers, not shortages"])
+        self.assertFalse(res["meaning_ok"])
+
+    def test_meaning_check_fails_closed(self):
+        res = sc.build_message("open", "tamil", {}, complete=_scripted(self.TAMIL_OK, back=None))
+        self.assertEqual(res["source"], "template")
+        self.assertIn("meaning check: no back-translation", res["problems"])
+
+    def test_no_meaning_check_for_bm(self):
+        fake = _scripted("Kedai dah siap? Ada barang kurang?")
+        res = sc.build_message("open", "bm", {}, complete=fake)
+        self.assertEqual(res["source"], "ai")
+        self.assertEqual(fake.calls, [sc.SYSTEM_PROMPT])
+
+    def test_informal_tamil_rejected(self):
+        for rude in ("என்ன வேணும் சொல்லு?", "stock பாத்தியா?", "நீ order போடு"):
+            problems = sc.fact_check(rude, {}, vocabulary=VOCAB, language="tamil")
+            self.assertTrue(any(p.startswith("informal Tamil") for p in problems), rude)
+        polite = "என்ன வேணும் சொல்லுங்க? stock பாத்தீங்களா? சரியா?"
+        self.assertEqual(sc.informal_tamil(polite), [])
+
+    def test_tamil_prompt_demands_respectful_form(self):
+        self.assertIn("RESPECTFUL", sc._LANG_PROMPT["tamil"])
+        self.assertIn("respectful", sc._LANG_PROMPT[sc.BM_TAMIL])
+
+    def test_preview_shows_back_translation(self):
+        res = sc.build_message("open", "tamil", {}, complete=_scripted(self.TAMIL_OK))
+        text = sc.format_preview("open", [
+            {"outlet_code": "SEK20", "cashier": "Syed", "language": "tamil", "result": res}])
+        self.assertIn("↳ back-translated: Is the shop ready?", text)
+
+
 if __name__ == "__main__":
     unittest.main()

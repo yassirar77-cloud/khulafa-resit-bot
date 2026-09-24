@@ -60,8 +60,10 @@ _KEEP_FACTS_LATIN = (
 )
 _LANG_PROMPT = {
     "tamil": "simple spoken Malaysian Tamil in TAMIL SCRIPT, as a boss types "
-             "to his cashier on WhatsApp. Everyday English/Malay trade words "
-             "(order, bill, draft, Lunch) are fine." + _KEEP_FACTS_LATIN,
+             "to his cashier on WhatsApp. Always the RESPECTFUL form "
+             "(சொல்லுங்க, பாருங்க, பாத்தீங்களா, போடுங்க) — never the informal "
+             "one (சொல்லு, பாரு, பாத்தியா, நீ). Everyday English/Malay trade "
+             "words (order, bill, draft, Lunch) are fine." + _KEEP_FACTS_LATIN,
     "bm": "simple spoken Malaysian Malay (Bahasa Malaysia), kedai register."
           + _KEEP_FACTS_LATIN,
     "bengali": "simple spoken Bengali written in ENGLISH LETTERS (Banglish), "
@@ -70,13 +72,35 @@ _LANG_PROMPT = {
     "english": "simple, plain English for a non-native speaker." + _KEEP_FACTS_LATIN,
     "indonesian": "simple spoken Bahasa Indonesia." + _KEEP_FACTS_LATIN,
     BM_TAMIL: "one short line of simple Malay, then the same in simple spoken "
-              "Tamil in TAMIL SCRIPT on the next line." + _KEEP_FACTS_LATIN,
+              "Tamil in TAMIL SCRIPT on the next line, always in the respectful "
+              "form (சொல்லுங்க, பாருங்க)." + _KEEP_FACTS_LATIN,
 }
 
 # Scripts each language may be written in (beyond English letters).
 _TAMIL_SCRIPT = re.compile(r"[\u0B80-\u0BFF]")
 _BENGALI_SCRIPT = re.compile(r"[\u0980-\u09FF]")
 _ALLOWED_SCRIPTS = {"tamil": {"tamil"}, BM_TAMIL: {"tamil"}}
+
+# Informal Tamil (talking down to staff) — the check-ins always use the
+# respectful form: சொல்லுங்க not சொல்லு, பாத்தீங்களா not பாத்தியா.
+_TAMIL_CHARS = "\u0B80-\u0BFF"
+_INFORMAL_TAMIL = (
+    "சொல்லு", "பாரு", "போடு", "பண்ணு", "அனுப்பு", "எடு", "குடு", "கொடு",
+    "செய்", "தட்டு", "வா", "போ", "நீ", "உன்", "உனக்கு", "உன்னோட",
+    "பாத்தியா", "பார்த்தியா", "சொன்னியா", "போட்டியா", "பண்ணியா",
+    "செஞ்சியா", "வந்தியா", "இருக்கியா", "அனுப்பியா", "எடுத்தியா",
+)
+_INFORMAL_RE = re.compile(
+    "(?<![%s])(%s)(?![%s])" % (
+        _TAMIL_CHARS, "|".join(map(re.escape, _INFORMAL_TAMIL)), _TAMIL_CHARS
+    )
+)
+
+
+def informal_tamil(text) -> list[str]:
+    """Informal (non-respectful) Tamil words in ``text``."""
+    return sorted(set(_INFORMAL_RE.findall(str(text or ""))))
+
 
 # Fact values that must appear verbatim (so they stay in English letters and
 # 0-9 digits, never translated): per slot, the keys that carry them.
@@ -487,6 +511,9 @@ def fact_check(text, facts, *, vocabulary=None, other_names=(), language=None,
     if _BENGALI_SCRIPT.search(text) and "bengali" not in allowed:
         problems.append("Bengali script (Bengali goes in English letters)")
     problems += _missing_facts(text, facts, slot)
+    rude = informal_tamil(text)
+    if rude:
+        problems.append("informal Tamil: " + ", ".join(rude))
 
     fact_text = " ".join(_fact_strings(facts))
     allowed_nums = {_norm_num(n) for n in _NUM.findall(fact_text)}
@@ -536,14 +563,71 @@ SYSTEM_PROMPT = (
 )
 
 
+TRANSLATE_PROMPT = (
+    "Translate this Malaysian Tamil WhatsApp message into plain, literal "
+    "English. Translate only what is written — do not guess context, do not "
+    "fix or improve it. Keep names, items and numbers as they are.\n"
+    'Reply with JSON only: {"english": "<literal translation>"}'
+)
+
+JUDGE_PROMPT = (
+    "A restaurant office meant to send a cashier the INTENDED message. A "
+    "literal translation of what was ACTUALLY written is given. Decide if "
+    "they mean the same thing: the same question, the same facts, nothing "
+    "added, dropped or contradicted. Watch for opposites and near-misses: "
+    "'short/not enough' vs 'left over', start of shift vs end of shift, "
+    "today vs tomorrow, order vs stock. Small wording differences are fine.\n"
+    'Reply with JSON only: {"same_meaning": true|false, "reason": "<short>"}'
+)
+
+MEANING_LANGUAGES = ("tamil", BM_TAMIL)
+
+
+def _tamil_part(text: str) -> str:
+    return "\n".join(
+        line for line in text.splitlines() if _TAMIL_SCRIPT.search(line)
+    )
+
+
+def meaning_check(text, intended_en, purpose, complete) -> dict:
+    """Independent back-translation of the Tamil in ``text``, then a
+    separate judgment of whether it means what was intended. Fails closed:
+    no verdict = not OK. Returns ``{ok, back, reason}``."""
+    tamil = _tamil_part(text)
+    if not tamil:
+        return {"ok": True, "back": "", "reason": "no Tamil"}
+    try:
+        tr = complete(TRANSLATE_PROMPT, tamil)
+        back = str(((tr or {}).get("data") or {}).get("english") or "").strip()
+        if not back:
+            return {"ok": False, "back": "", "reason": "no back-translation"}
+        verdict = complete(JUDGE_PROMPT, json.dumps(
+            {"purpose": purpose, "intended": intended_en, "actually_written": back},
+            ensure_ascii=False,
+        ))
+        data = (verdict or {}).get("data") or {}
+        same = data.get("same_meaning")
+        reason = str(data.get("reason") or "").strip()
+        if same is True:
+            return {"ok": True, "back": back, "reason": reason}
+        return {"ok": False, "back": back,
+                "reason": reason or "meaning check gave no verdict"}
+    except Exception:
+        logger.exception("staff chat: meaning check failed")
+        return {"ok": False, "back": "", "reason": "meaning check failed"}
+
+
+def _purpose(slot, facts) -> str:
+    if slot == "order" and (facts or {}).get("ask"):
+        return ("ask what they need to order for tomorrow (there is no draft "
+                "to show; ask them to list items and quantities)")
+    return SLOTS[slot][2]
+
+
 def build_user_prompt(slot, language, facts, reference, seed, avoid=()) -> str:
     return json.dumps(
         {
-            "purpose": (
-                "ask what they need to order for tomorrow (there is no draft "
-                "to show; ask them to list items and quantities)"
-                if slot == "order" and (facts or {}).get("ask") else SLOTS[slot][2]
-            ),
+            "purpose": _purpose(slot, facts),
             "language": _LANG_PROMPT.get(language, _LANG_PROMPT[DEFAULT_LANGUAGE]),
             "facts": facts or {},
             "reference_message": reference,
@@ -573,6 +657,7 @@ def build_message(slot, language, facts, *, seed="", complete=None,
         "text": template, "english": "", "source": "template", "problems": [],
         "template": template, "ai_text": None, "provider": staff_ai.provider(),
         "model": staff_ai.model(), "tokens_in": None, "tokens_out": None,
+        "back_translation": "", "meaning_ok": None,
     }
     if not template:
         out["problems"] = ["no template"]
@@ -607,6 +692,18 @@ def build_message(slot, language, facts, *, seed="", complete=None,
         out["problems"] = problems
         out["english"] = ""
         return out
+    if language in MEANING_LANGUAGES:
+        check = meaning_check(
+            ai_text,
+            render_template(slot, "english", facts or {}),
+            _purpose(slot, facts),
+            complete,
+        )
+        out.update(back_translation=check["back"], meaning_ok=check["ok"])
+        if not check["ok"]:
+            out["problems"] = [f"meaning check: {check['reason']}"]
+            out["english"] = ""
+            return out
     out.update(text=ai_text, source="ai")
     return out
 
@@ -634,6 +731,28 @@ def format_preview(slot: str, rows: list[dict], *, now: datetime | None = None) 
         lines += ["", head, f"{row['cashier']},", res["text"]]
         if res.get("english"):
             lines.append(f"↳ EN: {res['english']}")
+        if res.get("back_translation"):
+            lines.append(f"↳ back-translated: {res['back_translation']}")
+    return "\n".join(lines)
+
+
+def format_samples(rows: list[dict]) -> str:
+    """Tamil review samples: each with the check-in, the outlet, the text,
+    DeepSeek's own English gloss, the independent back-translation, and
+    whether it passed (✅) or the template was used (✏️ + why)."""
+    lines = [
+        f"🧪 {len(rows)} Tamil samples — not sent to any group",
+        "✅ = AI wording passed every check · ✏️ = template used (reason)",
+    ]
+    for i, row in enumerate(rows, 1):
+        res = row["result"]
+        mark = "✅" if res["source"] == "ai" else "✏️ " + "; ".join(res["problems"][:2])
+        lines += ["", f"{i}. {row['slot']} · {row['outlet_code']} · {row['cashier']} {mark}",
+                  res["text"]]
+        if res.get("english"):
+            lines.append(f"↳ EN: {res['english']}")
+        if res.get("back_translation"):
+            lines.append(f"↳ back-translated: {res['back_translation']}")
     return "\n".join(lines)
 
 
@@ -654,6 +773,8 @@ def log_row(slot, outlet_code, chat_id, cashier, language, facts, result, mode) 
         "model": result.get("model"),
         "tokens_in": result.get("tokens_in"),
         "tokens_out": result.get("tokens_out"),
+        "back_translation": result.get("back_translation") or None,
+        "meaning_ok": result.get("meaning_ok"),
         "mode": mode,
     }
 

@@ -80,5 +80,30 @@ class StaffChatWiring(unittest.TestCase):
         body = _block(self.src, "async def run_staff_preview(")
         self.assertIn("staff_chat.style() != staff_chat.PREVIEW", body)
         # Preview goes to the director chat, never a group.
-        self.assertIn("_send_chunked_to(\n        application, ALERT_CHAT_ID,", body)
+        self.assertIn("application, ALERT_CHAT_ID, staff_chat.format_preview(slot, preview_rows)", body)
         self.assertNotIn("decision.target_chat_id", body)
+
+
+class StaffLiveWiring(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(REPO_ROOT, "bot.py")) as f:
+            cls.src = f.read()
+
+    def test_reply_handler_runs_alongside_others(self):
+        self.assertIn("handle_staff_reply),\n        group=1,", self.src)
+
+    def test_jobs_registered(self):
+        self.assertIn('id="staff_live_tick"', self.src)
+        self.assertIn('id="staff_morning_summary"', self.src)
+
+    def test_live_outlets_skip_classic_duplicates(self):
+        self.assertIn("_staff_live_now(entry.get(\"outlet_code\"))",
+                      _block(self.src, "async def post_cook_plans("))
+        self.assertIn("_staff_live_now(cashier_names.outlet_for_chat(",
+                      _block(self.src, "async def post_missing_bill_checks("))
+
+    def test_samples_command_director_only(self):
+        self.assertIn('CommandHandler("staff_samples", staff_samples_command)', self.src)
+        self.assertIn("is_reviewer(_command_owner_id(update))",
+                      _block(self.src, "async def staff_samples_command("))
