@@ -18,8 +18,11 @@ Rules:
 """
 from __future__ import annotations
 
+import json
 import logging
+import re
 from datetime import date, timedelta
+from pathlib import Path
 
 import item_canonicalization_v2 as icv2
 
@@ -59,9 +62,65 @@ def clean_items(raw) -> list[dict]:
     return out
 
 
+_SYNONYMS_PATH = Path(__file__).resolve().parent / "data" / "staff_item_synonyms.json"
+# Letters of the scripts staff write in: a synonym must not sit inside a
+# longer word ("dim" in "dimsum", "tel" in "hotel").
+_LETTER = r"A-Za-z஀-௿ঀ-৿"
+
+
+def _load_synonyms() -> list[tuple[re.Pattern, str, bool]]:
+    """``[(pattern, item, is_staff)]`` from this list AND the receipt list,
+    longest name first; on equal length the staff list comes first. So
+    "chilli sauce" (receipts) beats "chilli" (staff), and "garlic" (staff:
+    bawang_putih) beats "garlic" (receipts: the whole bawang bucket)."""
+    raw = json.loads(_SYNONYMS_PATH.read_text(encoding="utf-8"))
+    entries: list[tuple[str, str, bool, bool]] = []    # word, item, staff, exact
+    for item, words in raw.items():
+        if item.startswith("_"):
+            continue
+        for word in words:
+            w = word.strip().lower()
+            if w:
+                entries.append((w.lstrip("="), item, True, w.startswith("=")))
+    for variation, item in icv2._PAIRS_LONGEST_FIRST:
+        entries.append((variation.lower(), item, False, False))
+    entries.sort(key=lambda e: (-len(e[0]), not e[2]))
+    out = []
+    for word, item, staff, exact in entries:
+        body = re.escape(word)
+        pattern = (rf"^{body}$" if exact
+                   else rf"(?<![{_LETTER}]){body}(?![{_LETTER}])")
+        out.append((re.compile(pattern), item, staff))
+    return out
+
+
+SYNONYMS = _load_synonyms()
+
+# Processed goods named after a raw item ("chicken nugget", "Knorr chicken
+# stock", "Maggi mee ayam") are not that item — Klang's "Ayam 2kg" draft
+# came from exactly this. Such names are kept unmatched, never guessed.
+_PROCESSED = re.compile(
+    rf"(?<![{_LETTER}])(?:nugget|nuggets|sosej|sausage|sausages|burger|frankfurter|"
+    rf"ball|balls|bebola|stock|kiub|cube|cubes|knorr|maggi|perisa|flavou?r|"
+    rf"cooker|periuk|mesin|machine)"
+    rf"(?![{_LETTER}])"
+)
+
+
 def canonical(name: str) -> str | None:
-    res = icv2.canonicalize_item(name)
-    return res["canonical"] if res.get("matched") else None
+    """The order-history item for a word a cashier wrote, in any of their
+    languages ("கோழி", "murgi", "chicken" -> ayam; "garlic" -> bawang_putih).
+    Longest matching name wins across the staff and receipt lists. Unknown,
+    noise and processed goods -> None, never guessed."""
+    text = str(name or "").strip().lower()
+    if not text or _PROCESSED.search(text):
+        return None
+    if icv2.canonicalize_item(name).get("is_noise"):
+        return None
+    for pattern, item, _staff in SYNONYMS:
+        if pattern.search(text):
+            return item
+    return None
 
 
 def rows_for_reply(thread: dict, items: list[dict], reply_text: str) -> list[dict]:

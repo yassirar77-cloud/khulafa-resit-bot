@@ -79,6 +79,16 @@ _KIND: dict[str, str] = {
     "ghee": DRY,
     "dhal": DRY,
     "packaging": DRY,
+    # finer items learned from cashier order answers (staff_orders); receipts
+    # still lump these into bawang / cili / sayur
+    "bawang_besar": DRY,
+    "bawang_merah": DRY,
+    "bawang_putih": DRY,
+    "cili_kering": DRY,
+    "kentang": DRY,
+    "tomato": PERISHABLE,
+    "halia": PERISHABLE,
+    "daun_kari": PERISHABLE,
     # not an order line
     "nasi_lemak": EXCLUDE,
     "transport": EXCLUDE,
@@ -139,6 +149,14 @@ _DISPLAY: dict[str, tuple[str, str]] = {
     "ghee": ("Ghee", "tin"),
     "dhal": ("Dhal", "kg"),
     "packaging": ("Packaging", "pack"),
+    "bawang_besar": ("Bawang Besar", "kg"),
+    "bawang_merah": ("Bawang Merah", "kg"),
+    "bawang_putih": ("Bawang Putih", "kg"),
+    "cili_kering": ("Cili Kering", "kg"),
+    "kentang": ("Kentang", "kg"),
+    "tomato": ("Tomato", "kg"),
+    "halia": ("Halia", "kg"),
+    "daun_kari": ("Daun Kari", "ikat"),
 }
 
 # Known pack/round-up sizes. The receipt data has no unit column, so we keep
