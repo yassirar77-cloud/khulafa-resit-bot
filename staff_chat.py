@@ -102,26 +102,29 @@ def informal_tamil(text) -> list[str]:
     return sorted(set(_INFORMAL_RE.findall(str(text or ""))))
 
 
-# The 15:00 lunch check-in asks about the crowd and what ran out. Wording
-# that states lunch (or the shift) is over slipped through ("Lunch
-# முடிஞ்சுது"), so it is rejected outright. Questions such as "முடிஞ்சுதா?"
-# (did it run out?) are fine.
-_LUNCH_OVER_RE = re.compile(
+# No-data check-ins (open 08:00, lunch 15:00, night 23:00) must never say
+# lunch or the shift is over: "Lunch முடிஞ்சுது" slipped through, and a
+# morning opening once said the shift had finished. Rejected outright.
+# Questions such as "முடிஞ்சுதா?" (did it run out?) are fine.
+_OVER_RE = re.compile(
     "|".join([
         "(?:முடிஞ்சுது|முடிந்தது|முடிஞ்சாச்சு|முடிந்துவிட்டது|முடிஞ்சிடுச்சு)(?![%s])"
         % _TAMIL_CHARS,
-        r"\b(?:lunch|makan tengah hari)\s+(?:dah|sudah|telah)\s+(?:habis|tamat|siap|selesai)\b",
+        r"\b(?:lunch|makan tengah hari|shift|syif)\s+(?:dah|sudah|telah)\s+"
+        r"(?:habis|tamat|siap|selesai)\b",
         r"\b(?:lepas|selepas|habis)\s+lunch\b",
-        r"\blunch\s+(?:is\s+)?(?:over|finished|done)\b",
+        r"\b(?:lunch|shift)\s+(?:is\s+)?(?:over|finished|done|ended)\b",
         r"\bafter\s+lunch\b",
+        r"\bend of (?:the )?shift\b",
     ]),
     re.IGNORECASE,
 )
+OVER_SLOTS = ("open", "lunch", "night")
 
 
-def lunch_said_over(text) -> list[str]:
+def said_over(text) -> list[str]:
     """Phrases in ``text`` that say lunch / the shift is finished."""
-    return sorted({m.group(0) for m in _LUNCH_OVER_RE.finditer(str(text or ""))})
+    return sorted({m.group(0) for m in _OVER_RE.finditer(str(text or ""))})
 
 
 # Fact values that must appear verbatim (so they stay in English letters and
@@ -538,10 +541,10 @@ def fact_check(text, facts, *, vocabulary=None, other_names=(), language=None,
     rude = informal_tamil(text)
     if rude:
         problems.append("informal Tamil: " + ", ".join(rude))
-    if slot == "lunch":
-        over = lunch_said_over(text)
+    if slot in OVER_SLOTS:
+        over = said_over(text)
         if over:
-            problems.append("says lunch is finished: " + ", ".join(over))
+            problems.append("says lunch/shift is over: " + ", ".join(over))
 
     fact_text = " ".join(_fact_strings(facts))
     allowed_nums = {_norm_num(n) for n in _NUM.findall(fact_text)}
@@ -600,15 +603,31 @@ TRANSLATE_PROMPT = (
 
 JUDGE_PROMPT = (
     "A restaurant office meant to send a cashier the INTENDED message. A "
-    "literal translation of what was ACTUALLY written is given. Decide if "
-    "they mean the same thing: the same question, the same facts, nothing "
-    "added, dropped or contradicted. Watch for opposites and near-misses: "
-    "'short/not enough' vs 'left over', start of shift vs end of shift, "
-    "today vs tomorrow, order vs stock. Small wording differences are fine.\n"
+    "literal translation of what was ACTUALLY written is given; the "
+    "translation itself may be loose, so judge the meaning, not the words.\n"
+    "Treat these as the SAME meaning: finished / ran out / sold out / "
+    "finished early / finished quickly / habis / தீர்ந்து. Different "
+    "polite phrasing, word order, greetings or small filler words are also "
+    "the same. Do not reject for words the translation added on its own "
+    "(e.g. 'afternoon', 'which dish').\n"
+    "Only answer same_meaning=false when the written message:\n"
+    "1. asks about a different topic than intended (e.g. start vs end of "
+    "shift, today vs tomorrow, order vs stock, 'short/not enough' vs 'left "
+    "over');\n"
+    "2. adds or changes a fact, number or item that is not in the intended "
+    "message;\n"
+    "3. says lunch or the shift is over;\n"
+    "4. is rude or informal (orders instead of asks).\n"
     'Reply with JSON only: {"same_meaning": true|false, "reason": "<short>"}'
 )
 
 MEANING_LANGUAGES = ("tamil", BM_TAMIL)
+# Only check-ins that carry data get the back-translation judge. For the
+# no-data ones (open, lunch, night) the hard rules in fact_check decide:
+# no numbers/items outside the data, no "lunch/shift is over", no informal
+# Tamil. The judge was rejecting correct Tamil there over loose
+# back-translations ("finished quickly" vs "ran out").
+MEANING_SLOTS = DATA_SLOTS
 
 
 def _tamil_part(text: str) -> str:
@@ -720,7 +739,7 @@ def build_message(slot, language, facts, *, seed="", complete=None,
         out["problems"] = problems
         out["english"] = ""
         return out
-    if language in MEANING_LANGUAGES:
+    if language in MEANING_LANGUAGES and slot in MEANING_SLOTS:
         check = meaning_check(
             ai_text,
             render_template(slot, "english", facts or {}),
