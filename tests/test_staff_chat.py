@@ -17,6 +17,10 @@ DRAFT = [
     {"item": "ayam", "qty": 75, "pack": "kg", "supplier": "BESTARI FARM (M) SDN BHD"},
     {"item": "kelapa", "qty": 50, "pack": "biji", "supplier": "BESTARI KHAFA"},
 ]
+FULL_DRAFT = DRAFT + [
+    {"item": "garam", "qty": 2, "pack": "kg", "supplier": "BESTARI KHAFA"},
+    {"item": "gula", "qty": 10, "pack": "kg", "supplier": "BESTARI KHAFA"},
+]
 FORECAST = [
     {"item_code": "ikan_kari", "unit": "pcs", "recommend_qty": 11.5,
      "usual_cooked": 15.5, "action": "CUT"},
@@ -60,9 +64,17 @@ class FactsTests(unittest.TestCase):
         })
 
     def test_order_lists_top_three_and_counts_rest(self):
-        facts = sc.order_facts(DRAFT)
+        facts = sc.order_facts(FULL_DRAFT)
         self.assertEqual([i["item"] for i in facts["items"]], ["Ayam", "Sotong", "Kelapa"])
-        self.assertEqual(facts["more"], 1)
+        self.assertEqual(facts["more"], 3)
+        self.assertNotIn("partial", facts)
+
+    def test_short_draft_lists_every_line_as_partial(self):
+        facts = sc.order_facts(DRAFT)            # 4 lines < 5
+        self.assertTrue(facts["partial"])
+        self.assertEqual([i["item"] for i in facts["items"]],
+                         ["Ayam", "Sotong", "Kelapa", "Roti"])
+        self.assertEqual(facts["more"], 0)
 
     def test_cook_picks_biggest_change_and_rounds(self):
         facts = sc.cook_facts(FORECAST)
@@ -115,8 +127,22 @@ class TemplateTests(unittest.TestCase):
         self.assertEqual(len(text.split("\n")), 2)
 
     def test_order_template_content(self):
-        text = sc.render_template("order", "bm", sc.order_facts(DRAFT))
-        self.assertEqual(text, "Order esok: Ayam 75kg, Sotong 19kg, Kelapa 50 biji (+1 lagi). Ok atau nak tukar?")
+        text = sc.render_template("order", "bm", sc.order_facts(FULL_DRAFT))
+        self.assertEqual(text, "Order esok: Ayam 75kg, Sotong 19kg, Kelapa 50 biji (+3 lagi). Ok atau nak tukar?")
+
+    def test_partial_draft_says_main_items_not_full_order(self):
+        facts = sc.order_facts(DRAFT)
+        bm = sc.render_template("order", "bm", facts)
+        self.assertEqual(bm, "Barang utama untuk esok: Ayam 75kg, Sotong 19kg, Kelapa 50 biji, "
+                             "Roti 6 kotak. Ada lagi nak order? Bagitau ya.")
+        self.assertIn("Anything else you need", sc.render_template("order", "english", facts))
+        for lang in ("bm", "tamil", "english", "indonesian", "bengali", sc.BM_TAMIL):
+            for variant in (0, 1):
+                text = sc.render_template("order", lang, facts, variant)
+                self.assertIn("Ayam 75kg", text, lang)
+                self.assertEqual(sc.fact_check(text, facts, vocabulary=VOCAB, language=lang,
+                                               slot="order"), [], (lang, text))
+        self.assertIn("NOT the full order", sc._purpose("order", facts))
 
 
 class FactCheckTests(unittest.TestCase):

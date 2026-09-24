@@ -87,7 +87,18 @@ class ReplyTests(unittest.TestCase):
                                                 "summary_en": "Chicken finished",
                                                 "status": "finished"}))
         self.assertEqual(parsed, {"is_answer": True, "clear": True,
-                                  "summary_en": "Chicken finished", "status": "finished"})
+                                  "summary_en": "Chicken finished", "status": "finished",
+                                  "items": [], "asks_if_bot": False})
+
+    def test_parse_reply_keeps_order_items(self):
+        parsed = sl.parse_reply("What to order?", "Esok nak order apa?",
+                                "esok ayam 40kg ikan 10kg", self._complete({
+                                    "is_answer": True, "clear": True, "summary_en": "x",
+                                    "status": "order",
+                                    "items": [{"item": "ayam", "qty": 40, "unit": "kg"}]}))
+        self.assertEqual(parsed["items"], [{"item": "ayam", "qty": 40, "unit": "kg"}])
+        self.assertIn("never invent", sl.REPLY_PROMPT.lower())
+
 
     def test_parse_reply_bad_or_missing(self):
         self.assertIsNone(sl.parse_reply("q", "q", "r", lambda s, u: None))
@@ -167,6 +178,29 @@ class ThreadRowTests(unittest.TestCase):
                                question_en="q", facts={}, language="bm", cashier="R",
                                now=NOW, status=sl.QUEUED)
         self.assertIsNone(queued["asked_at"])
+
+
+class HonestyTests(unittest.TestCase):
+    def test_detects_are_you_a_bot_in_staff_languages(self):
+        for text in ("Ni bot ke?", "are you a bot?", "Is this a real person?",
+                     "Awak ni robot ke", "Apni ki bot?", "manusia atau bot?",
+                     "இது bot-ஆ?", "நீங்க மனுஷனா?", "நீங்க ஆளா?", "kamu bot"):
+            self.assertTrue(sl.asks_if_bot(text), text)
+
+    def test_ignores_normal_replies(self):
+        for text in ("ok done", "Ayam habis", "order ayam 40kg", "Esok ikan 10kg ok boss",
+                     "bos ke ni?", "ஆள் இல்ல", "சாமான் வந்தாச்சா", "semua ok"):
+            self.assertFalse(sl.asks_if_bot(text), text)
+
+    def test_answer_is_honest_in_every_language(self):
+        self.assertEqual(sl.honest_reply("english"),
+                         "This is the Khulafa office system; the boss reads every reply "
+                         "every morning.")
+        for lang in ("bm", "tamil", "english", "indonesian", "bengali", "bm_tamil"):
+            text = sl.honest_reply(lang)
+            self.assertIn("Khulafa", text)
+            for claim in ("I am a person", "saya orang", "manusia", "real person"):
+                self.assertNotIn(claim, text)
 
 
 if __name__ == "__main__":

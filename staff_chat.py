@@ -195,6 +195,8 @@ _T: dict[str, dict[str, str]] = {
                        "{item} hari ni masak lebih sikit, {cook} {unit}.{usual_bm} Ok tak?"],
         "lunch": ["Lunch tadi ramai? Ada lauk habis awal?",
                   "Ramai tak masa lunch tadi? Ada lauk yang habis awal?"],
+        "order_partial": ["Barang utama untuk esok: {list}. Ada lagi nak order? Bagitau ya.",
+                          "Esok, yang utama: {list}. Kalau ada barang lain, bagitau ya."],
         "order_ask": ["Esok nak order apa? Bagitau barang & berapa ya.",
                       "Untuk esok, nak order apa? Senaraikan barang & kuantiti ya."],
         "order": ["Order esok: {list}{more_bm}. Ok atau nak tukar?",
@@ -215,6 +217,8 @@ _T: dict[str, dict[str, str]] = {
                        "{item} இன்னைக்கு கொஞ்சம் கூட, {cook} {unit} சமைங்க.{usual_ta} ஓகேவா?"],
         "lunch": ["மதியம் கூட்டம் எப்படி இருந்துச்சு? ஏதாவது கறி சீக்கிரமே தீர்ந்து போச்சா?",
                   "Lunch நேரத்துல கூட்டம் எப்படி? ஏதாவது dish சீக்கிரமே தீர்ந்துடுச்சா?"],
+        "order_partial": ["நாளைக்கு முக்கியமான சாமான்: {list}. வேற ஏதாவது வேணும்னா சொல்லுங்க.",
+                          "நாளைக்கு முக்கியமானது: {list}. இன்னும் ஏதாவது order பண்ணணும்னா சொல்லுங்க."],
         "order_ask": ["நாளைக்கு என்ன order பண்ணணும்? சாமானும் அளவும் சொல்லுங்க.",
                       "நாளைக்கு order-க்கு என்ன வேணும்? சாமான், அளவு சொல்லுங்க."],
         "order": ["நாளைக்கு order: {list}{more_ta}. சரியா, மாத்தணுமா?",
@@ -230,6 +234,7 @@ _T: dict[str, dict[str, str]] = {
         "cook_cut": "Today {item}: cooking {cook} {unit} is enough.{usual_en} OK?",
         "cook_raise": "Today {item}: cook {cook} {unit}, a bit more than usual.{usual_en} OK?",
         "lunch": "How was the lunch crowd? Did any dish run out early?",
+        "order_partial": "Main items for tomorrow: {list}. Anything else you need? Tell me.",
         "order_ask": "What do we need to order for tomorrow? Tell me the items and quantities.",
         "order": "Tomorrow's order: {list}{more_en}. OK or change?",
         "bills": "{supplier} bill not in for {days} days (last {last}). Got it? Please upload 🙏",
@@ -241,6 +246,7 @@ _T: dict[str, dict[str, str]] = {
         "cook_cut": "{item} hari ini masak {cook} {unit} cukup.{usual_id} Oke?",
         "cook_raise": "{item} hari ini masak {cook} {unit}, sedikit lebih dari biasa.{usual_id} Oke?",
         "lunch": "Makan siang tadi ramai? Ada lauk yang cepat habis?",
+        "order_partial": "Barang utama untuk besok: {list}. Ada lagi yang perlu dipesan? Kasih tahu ya.",
         "order_ask": "Besok mau order apa? Kasih tahu barang dan jumlahnya ya.",
         "order": "Order besok: {list}{more_id}. Oke atau mau ganti?",
         "bills": "Nota {supplier} sudah {days} hari belum masuk (terakhir {last}). Ada notanya? Tolong upload 🙏",
@@ -252,6 +258,7 @@ _T: dict[str, dict[str, str]] = {
         "cook_cut": "Aaj {item} {cook} {unit} ranna korlei hobe.{usual_bn} Thik ache?",
         "cook_raise": "Aaj {item} {cook} {unit} ranna korun, shadharon er cheye ektu beshi.{usual_bn} Thik ache?",
         "lunch": "Dupure bhir kemon chilo? Kono torkari taratari shesh hoyeche?",
+        "order_partial": "Kalker main item: {list}. Aro kichu lagle bolen.",
         "order_ask": "Kal ki order korte hobe? Jinish ar koto lagbe bolen.",
         "order": "Kalker order: {list}{more_bn}. Thik ache, na bodlaben?",
         "bills": "{supplier} er bill {days} din ashe nai (shesh {last}). Bill ache? Upload korun 🙏",
@@ -283,6 +290,8 @@ def _template_key(slot: str, facts: dict) -> str:
         return "cook_raise" if facts.get("action") == "RAISE" else "cook_cut"
     if slot == "order" and facts.get("ask"):
         return "order_ask"
+    if slot == "order" and facts.get("partial"):
+        return "order_partial"
     return slot
 
 
@@ -376,20 +385,31 @@ def stock_facts(draft_rows) -> dict | None:
     }
 
 
+# A draft with fewer reliable lines than this is shown as "the main items;
+# tell me anything else" so staff don't take it for the full order.
+FULL_DRAFT_LINES = 5
+
+
 def order_facts(draft_rows, top: int = 3) -> dict | None:
-    """Tomorrow's draft: the main items, and how many more."""
+    """Tomorrow's draft: the main items, and how many more. A short draft
+    (fewer than FULL_DRAFT_LINES) lists every line and is marked partial."""
     rows = [r for r in draft_rows or [] if r.get("item") and r.get("qty")]
     if not rows:
         return None
     rows.sort(key=lambda r: (_priority(r["item"]), -float(r["qty"] or 0)))
-    return {
+    partial = len(rows) < FULL_DRAFT_LINES
+    shown = rows if partial else rows[:top]
+    facts = {
         "items": [
             {"item": item_label(r["item"]), "qty": fmt_qty(r["qty"], r.get("pack")),
              "pack": str(r.get("pack") or "")}
-            for r in rows[:top]
+            for r in shown
         ],
-        "more": max(0, len(rows) - top),
+        "more": max(0, len(rows) - len(shown)),
     }
+    if partial:
+        facts["partial"] = True
+    return facts
 
 
 def cook_facts(forecast_rows) -> dict | None:
@@ -579,7 +599,9 @@ SYSTEM_PROMPT = (
     "- 1 to 3 short lines. No headers, no bullet points, no labels.\n"
     "- Do NOT start with or include the cashier's name; it is added before "
     "your text.\n"
-    "- Never pretend to be a specific person and never sign the message.\n"
+    "- Never pretend to be a specific person and never sign the message. "
+    "Never claim or imply to be a person (no 'I am here', 'I will come', "
+    "'me personally'); it is the office system writing.\n"
     "- Ask exactly ONE question.\n"
     "- Use ONLY the facts given. Every number, item, supplier and date you "
     "write must appear in the facts, written exactly as given with 0-9 "
@@ -668,6 +690,10 @@ def _purpose(slot, facts) -> str:
     if slot == "order" and (facts or {}).get("ask"):
         return ("ask what they need to order for tomorrow (there is no draft "
                 "to show; ask them to list items and quantities)")
+    if slot == "order" and (facts or {}).get("partial"):
+        return ("show the main items of tomorrow's order draft (listed); make "
+                "clear these are only the main items, NOT the full order, and "
+                "ask them to tell anything else they need")
     return SLOTS[slot][2]
 
 
