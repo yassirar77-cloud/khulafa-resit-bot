@@ -105,6 +105,18 @@ class SynonymTests(unittest.TestCase):
         "sos_cili": ["chilli sauce", "sos cili"],
         "cili": ["மிளகாய்", "morich", "chilli"],
         "beras": ["அரிசி", "চাল", "chal", "rice"],
+        "bawang_besar": ["onion", "வெங்காயம்", "peyaj", "bawang besar"],
+        "bawang_merah": ["shallot", "சின்ன வெங்காயம்", "bawang merah", "bawang kecil"],
+        "bawang_putih": ["garlic", "பூண்டு", "roshun", "bawang putih"],
+        "bawang": ["bawang"],                       # just "bawang": kept generic
+        "cili_kering": ["dry chilli", "காய்ந்த மிளகாய்", "shukno morich", "cili kering"],
+        "kentang": ["potato", "உருளைக்கிழங்கு", "alu", "aloo", "kentang"],
+        "tomato": ["tomato", "தக்காளி", "টমেটো"],
+        "sos_tomato": ["tomato sauce"],
+        "halia": ["ginger", "இஞ்சி", "আদা", "ada", "halia"],
+        "daun_kari": ["curry leaves", "கறிவேப்பிலை", "daun kari"],
+        # Receipts keep one milk and one roti bucket, so these stay together.
+        "susu": ["milk", "paal", "dudh", "susu pekat", "condensed milk"],
     }
 
     def test_all_languages_map_to_the_same_item(self):
@@ -114,7 +126,8 @@ class SynonymTests(unittest.TestCase):
 
     def test_processed_goods_and_look_alikes_are_not_guessed(self):
         for text in ("chicken nugget", "Knorr chicken stock", "Maggi mee ayam",
-                     "rice cooker", "hotel", "dimsum", "price", "xyz", ""):
+                     "rice cooker", "hotel", "dimsum", "price", "xyz", "",
+                     "ada lagi"):          # "ada" is ginger only as the whole name
             self.assertIsNone(so.canonical(text), text)
 
     def test_every_synonym_points_to_a_known_item(self):
@@ -122,13 +135,17 @@ class SynonymTests(unittest.TestCase):
         import item_canonicalization_v2 as icv2
         with open(so._SYNONYMS_PATH, encoding="utf-8") as f:
             raw = json.load(f)
-        known = set(icv2._CATEGORIES)
+        import order_items
+        known = set(icv2._CATEGORIES) | set(order_items._KIND)
         for item in raw:
             if not item.startswith("_"):
                 self.assertIn(item, known, item)
+                # New items get a draft label, not a title-cased key.
+                self.assertIn(item, order_items._DISPLAY, item)
 
     def test_no_word_means_two_items(self):
         seen = {}
-        for pattern, item, _phrase in so.SYNONYMS:
-            word = pattern.pattern
-            self.assertEqual(seen.setdefault(word, item), item, word)
+        for pattern, item, staff in so.SYNONYMS:
+            if staff:
+                self.assertEqual(seen.setdefault(pattern.pattern, item), item,
+                                 pattern.pattern)

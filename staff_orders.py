@@ -69,14 +69,29 @@ _LETTER = r"A-Za-z஀-௿ঀ-৿"
 
 
 def _load_synonyms() -> list[tuple[re.Pattern, str, bool]]:
-    """``[(pattern, item, is_phrase)]``, longest word first."""
+    """``[(pattern, item, is_staff)]`` from this list AND the receipt list,
+    longest name first; on equal length the staff list comes first. So
+    "chilli sauce" (receipts) beats "chilli" (staff), and "garlic" (staff:
+    bawang_putih) beats "garlic" (receipts: the whole bawang bucket)."""
     raw = json.loads(_SYNONYMS_PATH.read_text(encoding="utf-8"))
-    pairs = [(word.strip().lower(), item)
-             for item, words in raw.items() if not item.startswith("_")
-             for word in words if word.strip()]
-    pairs.sort(key=lambda p: len(p[0]), reverse=True)     # longest match wins
-    return [(re.compile(rf"(?<![{_LETTER}]){re.escape(w)}(?![{_LETTER}])"), item, " " in w)
-            for w, item in pairs]
+    entries: list[tuple[str, str, bool, bool]] = []    # word, item, staff, exact
+    for item, words in raw.items():
+        if item.startswith("_"):
+            continue
+        for word in words:
+            w = word.strip().lower()
+            if w:
+                entries.append((w.lstrip("="), item, True, w.startswith("=")))
+    for variation, item in icv2._PAIRS_LONGEST_FIRST:
+        entries.append((variation.lower(), item, False, False))
+    entries.sort(key=lambda e: (-len(e[0]), not e[2]))
+    out = []
+    for word, item, staff, exact in entries:
+        body = re.escape(word)
+        pattern = (rf"^{body}$" if exact
+                   else rf"(?<![{_LETTER}]){body}(?![{_LETTER}])")
+        out.append((re.compile(pattern), item, staff))
+    return out
 
 
 SYNONYMS = _load_synonyms()
@@ -94,21 +109,16 @@ _PROCESSED = re.compile(
 
 def canonical(name: str) -> str | None:
     """The order-history item for a word a cashier wrote, in any of their
-    languages ("கோழி", "murgi", "chicken" -> ayam). Order: multi-word staff
-    phrases ("coconut milk", "தேங்காய் பால்"), then the receipt
-    canonicaliser (it knows "chilli sauce", "ikan bilis"), then single staff
-    words. Unknown -> None, never guessed."""
+    languages ("கோழி", "murgi", "chicken" -> ayam; "garlic" -> bawang_putih).
+    Longest matching name wins across the staff and receipt lists. Unknown,
+    noise and processed goods -> None, never guessed."""
     text = str(name or "").strip().lower()
     if not text or _PROCESSED.search(text):
         return None
-    for pattern, item, phrase in SYNONYMS:
-        if phrase and pattern.search(text):
-            return item
-    res = icv2.canonicalize_item(name)
-    if res.get("matched"):
-        return res["canonical"]
-    for pattern, item, phrase in SYNONYMS:
-        if not phrase and pattern.search(text):
+    if icv2.canonicalize_item(name).get("is_noise"):
+        return None
+    for pattern, item, _staff in SYNONYMS:
+        if pattern.search(text):
             return item
     return None
 
