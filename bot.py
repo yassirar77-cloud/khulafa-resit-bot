@@ -6820,11 +6820,12 @@ async def run_bot() -> None:
         id="order_drafts",
         replace_existing=True,
     )
-    # Unfilled kitchen-form chaser — every 2 hours at :45. Any posted COOKED/
-    # LEFT form still unsubmitted gets a simple bilingual nag in its group,
-    # repeating until the crew keys in and taps Hantar (live case: a LEFT form
-    # still all "—" at 14:08). The owner is told once when a form has been
-    # ignored ~8 hours. No-ops unless KITCHEN_LOG_ENABLED.
+    # Unfilled kitchen-form chaser — runs every 2 hours at :45, but each open
+    # COOKED/LEFT form is reminded at most twice per shift, all of a group's
+    # open forms go in one message, and nothing goes out 00:00-06:00 unless
+    # the form was due then (kitchen_usage.should_remind). The owner is told
+    # once when a form has been ignored ~8 hours. No-ops unless
+    # KITCHEN_LOG_ENABLED.
     scheduler.add_job(
         kitchen_usage.post_form_reminders,
         trigger="cron",
