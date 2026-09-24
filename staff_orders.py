@@ -18,8 +18,11 @@ Rules:
 """
 from __future__ import annotations
 
+import json
 import logging
+import re
 from datetime import date, timedelta
+from pathlib import Path
 
 import item_canonicalization_v2 as icv2
 
@@ -59,9 +62,55 @@ def clean_items(raw) -> list[dict]:
     return out
 
 
+_SYNONYMS_PATH = Path(__file__).resolve().parent / "data" / "staff_item_synonyms.json"
+# Letters of the scripts staff write in: a synonym must not sit inside a
+# longer word ("dim" in "dimsum", "tel" in "hotel").
+_LETTER = r"A-Za-z஀-௿ঀ-৿"
+
+
+def _load_synonyms() -> list[tuple[re.Pattern, str, bool]]:
+    """``[(pattern, item, is_phrase)]``, longest word first."""
+    raw = json.loads(_SYNONYMS_PATH.read_text(encoding="utf-8"))
+    pairs = [(word.strip().lower(), item)
+             for item, words in raw.items() if not item.startswith("_")
+             for word in words if word.strip()]
+    pairs.sort(key=lambda p: len(p[0]), reverse=True)     # longest match wins
+    return [(re.compile(rf"(?<![{_LETTER}]){re.escape(w)}(?![{_LETTER}])"), item, " " in w)
+            for w, item in pairs]
+
+
+SYNONYMS = _load_synonyms()
+
+# Processed goods named after a raw item ("chicken nugget", "Knorr chicken
+# stock", "Maggi mee ayam") are not that item — Klang's "Ayam 2kg" draft
+# came from exactly this. Such names are kept unmatched, never guessed.
+_PROCESSED = re.compile(
+    rf"(?<![{_LETTER}])(?:nugget|nuggets|sosej|sausage|sausages|burger|frankfurter|"
+    rf"ball|balls|bebola|stock|kiub|cube|cubes|knorr|maggi|perisa|flavou?r|"
+    rf"cooker|periuk|mesin|machine)"
+    rf"(?![{_LETTER}])"
+)
+
+
 def canonical(name: str) -> str | None:
+    """The order-history item for a word a cashier wrote, in any of their
+    languages ("கோழி", "murgi", "chicken" -> ayam). Order: multi-word staff
+    phrases ("coconut milk", "தேங்காய் பால்"), then the receipt
+    canonicaliser (it knows "chilli sauce", "ikan bilis"), then single staff
+    words. Unknown -> None, never guessed."""
+    text = str(name or "").strip().lower()
+    if not text or _PROCESSED.search(text):
+        return None
+    for pattern, item, phrase in SYNONYMS:
+        if phrase and pattern.search(text):
+            return item
     res = icv2.canonicalize_item(name)
-    return res["canonical"] if res.get("matched") else None
+    if res.get("matched"):
+        return res["canonical"]
+    for pattern, item, phrase in SYNONYMS:
+        if not phrase and pattern.search(text):
+            return item
+    return None
 
 
 def rows_for_reply(thread: dict, items: list[dict], reply_text: str) -> list[dict]:

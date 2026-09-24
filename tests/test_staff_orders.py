@@ -85,3 +85,50 @@ class FetchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SynonymTests(unittest.TestCase):
+    """Cashiers answer in Tamil, Bengali, English and Indonesian."""
+
+    CASES = {
+        "ayam": ["கோழி", "kozhi", "মুরগি", "murgi", "chicken", "Chicken 40kg", "ayam"],
+        "ikan": ["மீன்", "meen", "মাছ", "maach", "fish"],
+        "daging": ["மாட்டுக்கறி", "গরুর মাংস", "gorur mangsho", "beef", "daging sapi"],
+        "kambing": ["ஆட்டுக்கறி", "attukari", "খাসি", "khasi", "mutton", "goat"],
+        "sotong": ["கணவாய்", "kanavai", "squid", "cumi"],
+        "udang": ["இறால்", "iral", "চিংড়ি", "chingri", "prawn", "shrimp"],
+        "sayur": ["காய்கறி", "সবজি", "sobji", "vegetables"],
+        "roti": ["ரொட்டி", "parotta", "রুটি", "ruti", "bread"],
+        "telur": ["முட்டை", "muttai", "ডিম", "dim", "eggs"],
+        "santan": ["தேங்காய் பால்", "thengai paal", "coconut milk"],
+        "kelapa": ["தேங்காய்", "coconut"],
+        "sos_cili": ["chilli sauce", "sos cili"],
+        "cili": ["மிளகாய்", "morich", "chilli"],
+        "beras": ["அரிசி", "চাল", "chal", "rice"],
+    }
+
+    def test_all_languages_map_to_the_same_item(self):
+        for item, words in self.CASES.items():
+            for word in words:
+                self.assertEqual(so.canonical(word), item, word)
+
+    def test_processed_goods_and_look_alikes_are_not_guessed(self):
+        for text in ("chicken nugget", "Knorr chicken stock", "Maggi mee ayam",
+                     "rice cooker", "hotel", "dimsum", "price", "xyz", ""):
+            self.assertIsNone(so.canonical(text), text)
+
+    def test_every_synonym_points_to_a_known_item(self):
+        import json
+        import item_canonicalization_v2 as icv2
+        with open(so._SYNONYMS_PATH, encoding="utf-8") as f:
+            raw = json.load(f)
+        known = set(icv2._CATEGORIES)
+        for item in raw:
+            if not item.startswith("_"):
+                self.assertIn(item, known, item)
+
+    def test_no_word_means_two_items(self):
+        seen = {}
+        for pattern, item, _phrase in so.SYNONYMS:
+            word = pattern.pattern
+            self.assertEqual(seen.setdefault(word, item), item, word)
