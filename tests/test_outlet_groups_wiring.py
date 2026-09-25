@@ -162,9 +162,11 @@ class StaffOpsWiring(unittest.TestCase):
     def test_upload_hooks(self):
         photo = _block(self.src, "async def handle_photo(")
         self.assertIn("supplier=False)", photo)      # mini market, any receipt type
-        self.assertIn("supplier=True)", photo)       # invoice check, after item_prices
+        self.assertIn("supplier=True,", photo)       # one bill question, after item_prices
         self.assertLess(photo.index("supplier=False)"), photo.index("if receipt_type == ReceiptType.STAFF_ADVANCE:"))
-        self.assertLess(photo.index("save_item_prices,"), photo.index("supplier=True)"))
+        self.assertLess(photo.index("save_item_prices,"), photo.index("supplier=True,"))
+        # the old audit questions only go out outside live groups
+        self.assertIn("if not ops_group:\n        if findings:\n            await ask_audit_questions", photo)
 
     def test_daily_limit_and_reaction(self):
         send = _block(self.src, "async def _ops_send(")
@@ -200,7 +202,8 @@ class QuietReceiptWiring(unittest.TestCase):
         self.assertIn("quiet = cashier_names.outlet_for_chat(message.chat_id) is not None",
                       self.photo)
         self.assertIn('if not (quiet and await _react(context.bot, message, RECEIPT_READING)):\n'
-                      '        await message.reply_text("Processing receipt…")', self.photo)
+                      '        await message.reply_text(_receipt_text(message.chat_id, "reading"))',
+                      self.photo)
 
     def test_saved_reaction_replaces_confirmation(self):
         self.assertIn("await _react(context.bot, message, RECEIPT_SAVED)", self.photo)
@@ -208,5 +211,46 @@ class QuietReceiptWiring(unittest.TestCase):
                       self.photo)
 
     def test_problems_still_get_text(self):
-        self.assertIn('"Failed to read receipt. Try a clearer photo."', self.photo)
-        self.assertIn('"Saved OCR locally but database write failed."', self.photo)
+        self.assertIn('_receipt_text(message.chat_id, "read_failed")', self.photo)
+        self.assertIn('_receipt_text(message.chat_id, "save_failed")', self.photo)
+
+
+class OldGroupMessagesWiring(unittest.TestCase):
+    """Old group messages: one staff question per bill, language-aware texts,
+    no separate nudges in live groups."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(REPO_ROOT, "bot.py")) as f:
+            cls.src = f.read()
+
+    def test_receipt_texts_follow_cashier_language(self):
+        texts = self.src[self.src.index("_RECEIPT_TEXTS = {"):self.src.index("def _receipt_text(")]
+        for key in ("reading", "read_failed", "save_failed", "review_dup", "review_failed",
+                    "review_flagged", "advance_noname"):
+            self.assertIn(f'"{key}": {{', texts)
+        helper = self.src[self.src.index("def _receipt_text("):]
+        helper = helper[:helper.index("\n\n\n")]
+        self.assertIn("cashier_names.language_for_chat(chat_id)", helper)
+
+    def test_no_17h_nudge_in_live_groups(self):
+        body = _block(self.src, "async def post_question_reminders(")
+        self.assertIn("if not _staff_live_now(cashier_names.outlet_for_chat(q.get(\"chat_id\")))",
+                      body)
+
+    def test_slow_items_skip_live_groups(self):
+        body = _block(self.src, "async def post_slow_item_checks(")
+        self.assertIn("_staff_live_now(cashier_names.outlet_for_chat(decision.target_chat_id))",
+                      body)
+
+    def test_tamil_spike_note_only_outside_live_groups(self):
+        photo = _block(self.src, "async def handle_photo(")
+        self.assertIn("if spikes and ops_group:", photo)
+        self.assertIn('ops_candidates["pricerise"]', photo)
+        self.assertLess(photo.index("if spikes and ops_group:"),
+                        photo.index("format_spike_message_tamil(spike)"))
+
+    def test_one_combined_reminder_message(self):
+        tick = _block(self.src, "async def staff_live_tick(")
+        self.assertIn("staff_live.group_reminders(actions)", tick)
+        self.assertIn("staff_live.reminder_text(latest.get(\"language\"), len(due))", tick)

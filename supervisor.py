@@ -66,7 +66,7 @@ REPLY_FOOTER = (
 # tap target), and the nudge's own message_id is logged linked to the
 # original question, so either reply closes the loop.
 REMINDER_TEXT = (
-    "👋 Boss, நேத்து ஒரு கேள்வி கேட்டேன் — இன்னும் பதில் வரல.\n"
+    "👋 நேத்து ஒரு கேள்வி கேட்டேன் — இன்னும் பதில் வரல.\n"
     "இந்த message-அ அழுத்தி பிடிங்க (long press), 'Reply' தட்டுங்க, "
     "பதில் சொல்லுங்க 🙏"
 )
@@ -243,7 +243,7 @@ def format_reply_ack() -> str:
     """The thank-you a manager sees the moment his answer is captured —
     the loop must FEEL closed or they stop answering."""
     return (
-        "சரி boss, பதில் note பண்ணிட்டேன் ✅ நன்றி!\n"
+        "சரி, பதில் note பண்ணிட்டேன் ✅ நன்றி 🙏\n"
         "Terima kasih, jawapan disimpan ✅"
     )
 

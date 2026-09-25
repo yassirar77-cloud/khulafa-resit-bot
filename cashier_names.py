@@ -171,6 +171,24 @@ def language_for(outlet_code, shift, default="bm_tamil") -> str:
     return _langs.get((code, normalize_shift(shift) or ""), default)
 
 
+def language_for_chat(chat_id, now: datetime | None = None, *, shift=None,
+                      default="bm_tamil") -> str:
+    """Language of the cashier on shift in this group (or on ``shift``);
+    ``default`` for a chat that isn't an outlet group."""
+    code = outlet_for_chat(chat_id)
+    if code is None:
+        return default
+    return language_for(code, shift or shift_at(now)[0], default)
+
+
+def pick(table: dict, language: str) -> str:
+    """One text from ``{language: text}`` in the cashier's language. BM+Tamil
+    readers get both lines; an unknown language falls back to BM."""
+    if language == "bm_tamil":
+        return f"{table['bm']}\n{table['tamil']}"
+    return table.get(language) or table["bm"]
+
+
 def all_names() -> set[str]:
     """Every cashier name, split on "/" ("Mahadir / Pandi" -> both)."""
     out = set()

@@ -294,7 +294,7 @@ class WeeklyAndSummaryTests(unittest.TestCase):
                asked_at=now, answered_at=now),
         ]
         text = staff_live.format_morning_summary(threads)
-        self.assertIn("🧾 Unusual invoices", text)
+        self.assertIn("🧾 Supplier bill questions", text)
         self.assertIn("Ayam 80 ekor (usual 55 ekor) — Event / booking", text)
         self.assertIn("not asked (daily limit)", text)
         self.assertIn("Vadai −37% (shop +12%) — Taste not right", text)
@@ -312,3 +312,67 @@ class WeeklyAndSummaryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OldQuestionsTests(unittest.TestCase):
+    """The old price-spike / overbuy / audit questions, now staff questions."""
+
+    def test_one_question_per_bill_most_useful_first(self):
+        pick = staff_ops.upload_question
+        self.assertIsNone(pick(None, {}))
+        self.assertEqual(pick(None, {"newsupplier": {}, "bigbuy": {}})["kind"], "bigbuy")
+        self.assertEqual(pick({"kind": "high", "item": "ayam"}, {"bigbuy": {}})["kind"], "high")
+        self.assertEqual(pick({"kind": "rare", "item": "x"},
+                              {"pricerise": {"item": "ayam", "label": "Ayam"}})["kind"],
+                         "pricerise")
+        self.assertEqual(pick({"kind": "high", "item": "ayam"},
+                              {"dupbill": {}, "pricerise": {"label": "Ayam"}})["kind"], "dupbill")
+
+    def test_texts_all_languages_polite(self):
+        for kind in ("pricerise", "bigbuy", "dupbill", "newsupplier"):
+            flag = {"kind": kind, "item": "ayam", "label": "Ayam"}
+            for lang in LANGS + (staff_chat.BM_TAMIL,):
+                text = staff_ops.invoice_text(flag, "Bestari", lang)
+                self.assertTrue(text and "{" not in text, (kind, lang))
+                for banned in ("!", "RM", "boss", "Boss", "long press", "Reply"):
+                    self.assertNotIn(banned, text, (kind, lang, banned))
+        self.assertEqual(
+            staff_ops.invoice_text({"kind": "pricerise", "item": "ayam", "label": "Ayam"},
+                                   "Bestari", "bm"),
+            "Ayam dari Bestari harga naik dari biasa. Supplier naikkan harga?")
+
+    def test_buttons(self):
+        f = {"kind": "pricerise"}
+        self.assertEqual(staff_live.button_set("invoice", f), "pricerise")
+        labels = [b[0][0] for b in staff_live.keyboard(1, "pricerise", "bm")]
+        self.assertEqual(labels, ["Ya, harga naik", "Salah bil", "Lain"])
+        self.assertEqual(staff_live.button_set("invoice", {"kind": "bigbuy"}), "invoice")
+        self.assertEqual(staff_live.button_set("invoice", {"kind": "dupbill"}), "dupbill")
+        self.assertEqual(staff_live.button_set("invoice", {"kind": "newsupplier"}), "newsupplier")
+        self.assertIn("invoice", staff_live.REMIND_SLOTS)
+
+    def test_one_combined_reminder_per_group(self):
+        now = datetime(2026, 9, 25, 14, 0, tzinfo=MYT)
+        asked = (now - timedelta(minutes=35)).isoformat()
+        threads = [
+            {"id": 1, "chat_id": -1, "status": "open", "slot": "invoice", "asked_at": asked},
+            {"id": 2, "chat_id": -1, "status": "open", "slot": "minimarket", "asked_at": asked},
+            {"id": 3, "chat_id": -1, "status": "open", "slot": "wastage", "asked_at": asked},
+            {"id": 4, "chat_id": -2, "status": "open", "slot": "bills", "asked_at": asked},
+        ]
+        grouped = staff_live.group_reminders(staff_live.plan_tick(threads, now))
+        self.assertEqual(sorted(t["id"] for t in grouped[-1]), [1, 2])   # wastage: none
+        self.assertEqual([t["id"] for t in grouped[-2]], [4])
+        many = staff_live.reminder_text("tamil", 2)
+        self.assertIn("2", many)
+        self.assertNotEqual(many, staff_live.reminder_text("tamil"))
+        self.assertIn("\n", staff_live.reminder_text(staff_chat.BM_TAMIL, 3))
+
+    def test_summary_describes_each_kind(self):
+        threads = [_t("SEK14", "invoice", "no_reply",
+                      facts={"kind": "pricerise", "supplier": "Bestari", "item_label": "Ayam"}),
+                   _t("SEK14", "invoice", "dropped",
+                      facts={"kind": "dupbill", "supplier": "Bestari", "not_asked": True})]
+        text = "\n".join(staff_ops.summary_sections(threads))
+        self.assertIn("Bestari — Ayam price up — no reply", text)
+        self.assertIn("looks like a duplicate bill — not asked (daily limit)", text)

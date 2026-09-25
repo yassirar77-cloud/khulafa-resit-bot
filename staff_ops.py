@@ -329,12 +329,21 @@ CHOICES = {
     "thrown": ("finished", "Some thrown away", True),
     "none": ("ok", "Nothing thrown", False),
     "threw": ("finished", "Food thrown yesterday", True),
+    "yesrise": ("other", "Supplier raised the price", False),
+    "wrongbill": ("problem", "Wrong bill", False),
+    "twobills": ("ok", "Two different bills", False),
+    "sentdouble": ("other", "Same bill sent twice", False),
+    "usualout": ("short", "Usual supplier had none", False),
+    "cheaper": ("other", "Cheaper here", False),
 }
 
 BUTTON_SETS = {
     "invoice": ("event", "stockout", "supextra", "other"),
     "rare": ("event", "newmenu", "wrongdel", "other"),
     "minimarket": ("nodeliv", "forgot", "suddenout", "other"),
+    "pricerise": ("yesrise", "wrongbill", "other"),
+    "dupbill": ("twobills", "sentdouble", "other"),
+    "newsupplier": ("usualout", "cheaper", "other"),
     "taste": ("tasteok", "tastebad", "nottried"),
     "leftover": ("allgone", "kept", "thrown"),
     "wastage": ("none", "threw"),
@@ -347,31 +356,36 @@ LABELS = {
            "forgot": "Lupa order", "suddenout": "Habis tiba-tiba", "other": "Lain",
            "tasteok": "Rasa ok", "tastebad": "Rasa kurang", "nottried": "Tak sempat try",
            "allgone": "Semua habis", "kept": "Ada lebih", "thrown": "Ada buang",
-           "none": "Tiada", "threw": "Ada buang"},
+           "none": "Tiada", "threw": "Ada buang",
+                "yesrise": "Ya, harga naik", "wrongbill": "Salah bil", "twobills": "Bil lain", "sentdouble": "Hantar 2 kali", "usualout": "Supplier biasa habis", "cheaper": "Lebih murah"},
     "tamil": {"event": "Event/order", "stockout": "Stock தீர்ந்தது", "supextra": "Supplier அதிகம்",
               "newmenu": "புது menu", "wrongdel": "தவறா வந்தது", "nodeliv": "Supplier அனுப்பல",
               "forgot": "Order மறந்துட்டோம்", "suddenout": "திடீர்னு தீர்ந்தது", "other": "வேற",
               "tasteok": "Taste சரி", "tastebad": "Taste சரியில்ல", "nottried": "Try பண்ணல",
               "allgone": "எல்லாம் தீர்ந்தது", "kept": "மீதம் இருக்கு", "thrown": "கொட்டணும்",
-              "none": "இல்ல", "threw": "கொட்டினோம்"},
+              "none": "இல்ல", "threw": "கொட்டினோம்",
+                "yesrise": "ஆமா, விலை ஏறிச்சு", "wrongbill": "Bill தப்பு", "twobills": "வேற bill", "sentdouble": "2 தடவை அனுப்பினேன்", "usualout": "வழக்கமானதுல இல்ல", "cheaper": "விலை குறைவு"},
     "bengali": {"event": "Event/order", "stockout": "Stock shesh", "supextra": "Supplier beshi",
                 "newmenu": "Notun menu", "wrongdel": "Bhul delivery", "nodeliv": "Supplier dey nai",
                 "forgot": "Order bhule gechi", "suddenout": "Hothat shesh", "other": "Onno",
                 "tasteok": "Shaad thik", "tastebad": "Shaad kom", "nottried": "Try kori nai",
                 "allgone": "Shob shesh", "kept": "Baki ache", "thrown": "Felte hobe",
-                "none": "Na", "threw": "Fele diyechi"},
+                "none": "Na", "threw": "Fele diyechi",
+                "yesrise": "Hya, dam bereche", "wrongbill": "Bill bhul", "twobills": "Alada bill", "sentdouble": "2 bar pathiechi", "usualout": "Purono-te nei", "cheaper": "Kom dam"},
     "english": {"event": "Event/booking", "stockout": "Ran out", "supextra": "Supplier extra",
                 "newmenu": "New menu", "wrongdel": "Wrong delivery", "nodeliv": "No delivery",
                 "forgot": "Forgot order", "suddenout": "Ran out suddenly", "other": "Other",
                 "tasteok": "Tastes OK", "tastebad": "Not right", "nottried": "Didn't try",
                 "allgone": "All finished", "kept": "Some left", "thrown": "Throwing some",
-                "none": "None", "threw": "Threw some"},
+                "none": "None", "threw": "Threw some",
+                "yesrise": "Yes, price up", "wrongbill": "Wrong bill", "twobills": "Different bills", "sentdouble": "Sent twice", "usualout": "Usual one out", "cheaper": "Cheaper"},
     "indonesian": {"event": "Event/pesanan", "stockout": "Stok habis", "supextra": "Supplier lebih",
                    "newmenu": "Menu baru", "wrongdel": "Salah kirim", "nodeliv": "Supplier tak kirim",
                    "forgot": "Lupa pesan", "suddenout": "Tiba-tiba habis", "other": "Lain",
                    "tasteok": "Rasa oke", "tastebad": "Rasa kurang", "nottried": "Belum coba",
                    "allgone": "Semua habis", "kept": "Ada sisa", "thrown": "Ada dibuang",
-                   "none": "Tidak ada", "threw": "Ada dibuang"},
+                   "none": "Tidak ada", "threw": "Ada dibuang",
+                "yesrise": "Ya, harga naik", "wrongbill": "Nota salah", "twobills": "Nota lain", "sentdouble": "Terkirim 2x", "usualout": "Supplier biasa habis", "cheaper": "Lebih murah"},
 }
 
 DETAIL_PROMPTS = {
@@ -404,7 +418,10 @@ def button_set(slot: str, facts: dict | None) -> str | None:
     """Which buttons an ops question gets (None for info messages)."""
     facts = facts or {}
     if slot == "invoice":
-        return "rare" if facts.get("kind") == "rare" else "invoice"
+        kind = facts.get("kind")
+        if kind in ("rare", "pricerise", "dupbill", "newsupplier"):
+            return kind
+        return "invoice"        # high quantity, big bill
     if slot == "minimarket":
         return "minimarket"
     if slot == "afternoon":
@@ -458,6 +475,34 @@ _TEXTS = {
         "bengali": "Aajker {supplier} invoice-e {item} {qty} ache — ei dokane {item} shadharon kena hoy na. Kisher jonno, bolben?",
         "english": "{supplier} invoice today has {item} {qty} — this outlet rarely buys {item}. What is it for?",
         "indonesian": "Nota {supplier} hari ini ada {item} {qty} — outlet ini jarang beli {item}. Untuk apa ya?",
+    },
+    "invoice_pricerise": {
+        "bm": "{item} dari {supplier} harga naik dari biasa. Supplier naikkan harga?",
+        "tamil": "{supplier}-ல {item} விலை வழக்கத்தை விட ஏறியிருக்கு. Supplier விலை ஏத்திட்டாங்களா?",
+        "bengali": "{supplier}-er {item}-er dam shadharon-er cheye beshi. Supplier ki dam barieche?",
+        "english": "{item} from {supplier} costs more than usual. Did the supplier raise the price?",
+        "indonesian": "Harga {item} dari {supplier} naik dari biasanya. Supplier menaikkan harga?",
+    },
+    "invoice_bigbuy": {
+        "bm": "Bil {supplier} hari ni lebih besar dari biasa. Kenapa beli lebih kali ni?",
+        "tamil": "இன்னைக்கு {supplier} bill வழக்கத்தை விட பெருசா இருக்கு. இந்த தடவை ஏன் அதிகம் வாங்கினீங்கன்னு சொல்லுங்க?",
+        "bengali": "Aajker {supplier} bill shadharon-er cheye boro. Ebar beshi kinlen keno, bolben?",
+        "english": "Today's {supplier} bill is bigger than usual. Why more this time?",
+        "indonesian": "Nota {supplier} hari ini lebih besar dari biasa. Kenapa beli lebih kali ini?",
+    },
+    "invoice_dupbill": {
+        "bm": "Bil {supplier} ni nampak sama dengan satu lagi bil hari ni. Dua bil berbeza ke?",
+        "tamil": "இந்த {supplier} bill இன்னைக்கு வந்த இன்னொரு bill மாதிரியே இருக்கு. ரெண்டும் வேற வேற bill-ஆ?",
+        "bengali": "Ei {supplier} bill aajker arekta bill-er moto dekhacche. Duto alada bill?",
+        "english": "This {supplier} bill looks the same as another one today. Are they two different bills?",
+        "indonesian": "Nota {supplier} ini terlihat sama dengan nota lain hari ini. Dua nota berbeda?",
+    },
+    "invoice_newsupplier": {
+        "bm": "Supplier baru: {supplier}. Kenapa beli di sini kali ni?",
+        "tamil": "புது supplier: {supplier}. இந்த தடவை ஏன் இங்க வாங்கினீங்கன்னு சொல்லுங்க?",
+        "bengali": "Notun supplier: {supplier}. Ebar ekhane kinlen keno, bolben?",
+        "english": "New supplier: {supplier}. Why buy here this time?",
+        "indonesian": "Supplier baru: {supplier}. Kenapa beli di sini kali ini?",
     },
     "minimarket": {
         "bm": "Ada bil {shop} masuk: {items}. Kenapa kali ni beli kat kedai runcit?",
@@ -660,12 +705,36 @@ def qty_text(qty, canonical) -> str:
 
 
 def invoice_text(flag: dict, supplier: str, language: str) -> str:
+    """The one question about a supplier bill, by ``flag["kind"]``: high
+    (quantity), rare (item), pricerise, bigbuy, dupbill, newsupplier."""
     import order_items
-    item = order_items.display_name(flag["item"])
-    key = "invoice_rare" if flag["kind"] == "rare" else "invoice_high"
-    values = {"supplier": supplier, "item": item, "qty": qty_text(flag["qty"], flag["item"]),
-              "usual": qty_text(flag.get("usual") or 0, flag["item"])}
+    kind = flag["kind"]
+    item_key = flag.get("item") or ""
+    item = flag.get("label") or (order_items.display_name(item_key) if item_key else "")
+    values = {"supplier": supplier, "item": item}
+    if kind in ("high", "rare"):
+        values.update(qty=qty_text(flag["qty"], item_key),
+                      usual=qty_text(flag.get("usual") or 0, item_key))
+    key = {"high": "invoice_high", "rare": "invoice_rare"}.get(kind, f"invoice_{kind}")
     return _in(language, lambda l: _TEXTS[key][l].format(**values))
+
+
+# One question per bill at most, the most useful first.
+UPLOAD_PRIORITY = ("dupbill", "pricerise", "high", "rare", "bigbuy", "newsupplier")
+
+
+def upload_question(flag: dict | None, candidates: dict | None) -> dict | None:
+    """Pick the single question for a supplier bill. ``flag`` is
+    ``invoice_flag``'s result (kind high/rare); ``candidates`` holds the
+    older checks that fired: ``{"dupbill": {}, "pricerise": {"item":…,
+    "label":…}, "bigbuy": {}, "newsupplier": {}}``."""
+    found = dict(candidates or {})
+    if flag:
+        found[flag["kind"]] = flag
+    for kind in UPLOAD_PRIORITY:
+        if kind in found:
+            return {**(found[kind] or {}), "kind": kind}
+    return None
 
 
 def minimarket_items(names, limit: int = 3) -> str:
@@ -781,11 +850,17 @@ def summary_sections(threads, label=str) -> list[str]:
     lines: list[str] = []
     inv = [t for t in threads if t.get("slot") == "invoice"]
     if inv:
-        lines += ["", "🧾 Unusual invoices:"]
+        lines += ["", "🧾 Supplier bill questions:"]
         for t in inv:
             f = t.get("facts") or {}
-            what = (f"{f.get('item_label')} {f.get('qty_text')} (usual {f.get('usual_text')})"
-                    if f.get("kind") == "high" else f"{f.get('item_label')} {f.get('qty_text')} (rarely bought)")
+            what = {
+                "high": f"{f.get('item_label')} {f.get('qty_text')} (usual {f.get('usual_text')})",
+                "rare": f"{f.get('item_label')} {f.get('qty_text')} (rarely bought)",
+                "pricerise": f"{f.get('item_label')} price up",
+                "bigbuy": "bill bigger than usual",
+                "dupbill": "looks like a duplicate bill",
+                "newsupplier": "new supplier",
+            }.get(f.get("kind"), f.get("kind") or "?")
             lines.append(f"• {label(t.get('outlet_code'))}: {f.get('supplier')} — {what} — {reason(t)}")
     mm = [t for t in threads if t.get("slot") == "minimarket"]
     if mm:

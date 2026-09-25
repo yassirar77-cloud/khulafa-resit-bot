@@ -33,6 +33,8 @@ import os
 import re
 import time
 from datetime import date, datetime, timedelta
+
+import kitchen_texts
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
@@ -715,61 +717,72 @@ def evaluate_usage(item_code: str, cooked, left, itemwise_rows: list,
 
 # --- form / numpad copy ------------------------------------------------------
 
-_PHASE_COPY = {
-    PHASE_COOKED: {
-        "title": "🍳 Rekod Masak — Petang",
-        "prompt": "berapa dimasak",
-    },
-    PHASE_COOKED_NIGHT: {
-        "title": "🌙 Rekod Masak Malam — Tambahan",
-        # The night form captures only the EXTRA cooked at night, added on top of
-        # the 6PM amount.
-        "prompt": "berapa tambah masak malam",
-    },
-    PHASE_LEFT: {
-        "title": "🌙 Rekod Baki — Tutup Kedai",
-        "prompt": "berapa tinggal",
-    },
+_PHASE_KEYS = {
+    PHASE_COOKED: ("title_cooked", "prompt_cooked"),
+    # The night form captures only the EXTRA cooked at night, added on top of
+    # the 6PM amount.
+    PHASE_COOKED_NIGHT: ("title_night", "prompt_night"),
+    PHASE_LEFT: ("title_left", "prompt_left"),
 }
 
 
-def form_title(phase: str) -> str:
-    return _PHASE_COPY.get(phase, _PHASE_COPY[PHASE_COOKED])["title"]
+def form_language(chat_id, phase=None) -> str:
+    """The language a kitchen message is written in: the one set for that
+    group's cashier (/lang). A form belongs to its shift — the 18:00 cooked
+    form to the day cashier, the 00:00 / 02:00 forms to the night cashier —
+    so its text doesn't switch language when a tap lands after 19:00."""
+    import cashier_names
+    shift = None
+    if phase == PHASE_COOKED:
+        shift = cashier_names.MORNING
+    elif phase in (PHASE_COOKED_NIGHT, PHASE_LEFT):
+        shift = cashier_names.NIGHT
+    try:
+        return cashier_names.language_for_chat(chat_id, shift=shift)
+    except Exception:
+        logger.exception("kitchen: language lookup failed")
+        return "bm_tamil"
 
 
-def numpad_prompt(phase: str) -> str:
-    return _PHASE_COPY.get(phase, _PHASE_COPY[PHASE_COOKED])["prompt"]
+def form_title(phase: str, language: str = "bm") -> str:
+    key = _PHASE_KEYS.get(phase, _PHASE_KEYS[PHASE_COOKED])[0]
+    return kitchen_texts.short(key, language)
 
 
-def form_text(phase: str, business_date, outlet_label, entries: dict, outlet_code) -> str:
-    """Header text above the per-item tap buttons. Items are entered by tapping
-    a button (then the numpad), not by typing. Bilingual (BM + Tamil)."""
+def numpad_prompt(phase: str, language: str = "bm") -> str:
+    key = _PHASE_KEYS.get(phase, _PHASE_KEYS[PHASE_COOKED])[1]
+    return kitchen_texts.short(key, language)
+
+
+def form_text(phase: str, business_date, outlet_label, entries: dict, outlet_code,
+              language: str = "bm") -> str:
+    """Header text above the per-item tap buttons, in the cashier's language.
+    Items are entered by tapping a button (then the numpad), not by typing."""
     done = sum(1 for c in required_codes(outlet_code) if entries.get(c) is not None)
     total = len(required_codes(outlet_code))
     lines = [
-        form_title(phase),
+        form_title(phase, language),
         f"{outlet_label} • {business_date}",
     ]
     if phase == PHASE_COOKED_NIGHT:
-        lines.append(f"Tap item untuk key-in tambahan masak malam ({done} item). Skip jika tiada.")
-        lines.append("தமிழ்: item-ஐ தட்டி இரவு கூடுதலை மட்டும் போடுங்க.")
+        lines.append(kitchen_texts.text("instr_night", language, done=done))
     else:
-        lines.append(f"Tap untuk key-in ({done}/{total}). Yang tak isi = 0.")
-        lines.append("தமிழ்: item-ஐ தட்டி எண் போடுங்க. போடாதது = 0.")
+        lines.append(kitchen_texts.text("instr", language, done=done, total=total))
     # Mistake-fixing before Hantar: re-tap an item to change it, 🗑 to clear.
-    lines.append("Tekan balik barang untuk betulkan sebelum Hantar.")
+    lines.append(kitchen_texts.text("fix", language))
     return "\n".join(lines)
 
 
-def numpad_text(phase: str, item_label: str, unit: str, current: str = "—") -> str:
+def numpad_text(phase: str, item_label: str, unit: str, current: str = "—",
+                language: str = "bm") -> str:
     """Header above the numpad. The running value shows in a pop-up toast as you
     tap (the message isn't re-edited per digit). ``current`` is the value already
     saved for this item (shown as a reference) — typing a new number REPLACES it,
-    or tap 🗑 Kosongkan to unset it."""
-    unit_hint = "(kg, boleh 1 titik perpuluhan)" if unit == "kg" else "(pcs, nombor bulat)"
+    or tap 🗑 to unset it."""
+    unit_hint = kitchen_texts.short("unit_kg" if unit == "kg" else "unit_pcs", language)
     return "\n".join([
-        f"{item_label} — {numpad_prompt(phase)} {unit_hint}",
-        f"Sekarang: {current}. Taip nilai baru → ✓ (papar di pop-up atas). 🗑 Kosongkan untuk buang.",
+        f"{item_label} — {numpad_prompt(phase, language)} {unit_hint}",
+        kitchen_texts.text("numpad_now", language, current=current),
     ])
 
 
@@ -780,7 +793,8 @@ def _cb(session_id, item_code, action) -> str:
     return f"{CALLBACK_PREFIX}:{session_id}:{item_code}:{action}"
 
 
-def build_item_keyboard(session_id, outlet_code, entries: dict, phase: str = PHASE_COOKED):
+def build_item_keyboard(session_id, outlet_code, entries: dict, phase: str = PHASE_COOKED,
+                        language: str = "bm"):
     """One button per item (✓ prefix + value when filled, "—" when empty) plus
     a final Hantar button. Returns an InlineKeyboardMarkup. ``phase`` controls
     the Hantar gating label (the night form only needs one item)."""
@@ -797,14 +811,14 @@ def build_item_keyboard(session_id, outlet_code, entries: dict, phase: str = PHA
         rows.append([InlineKeyboardButton(text, callback_data=_cb(session_id, code, "open"))])
 
     if can_submit(entries, outlet_code, phase):
-        hantar_label = "📤 Hantar"
+        hantar_label = kitchen_texts.short("send", language)
     else:
-        hantar_label = "📤 Hantar (key sekurang-kurangnya 1 item)"
+        hantar_label = kitchen_texts.short("send_need", language)
     rows.append([InlineKeyboardButton(hantar_label, callback_data=_cb(session_id, FORM_TOKEN, "send"))])
     return InlineKeyboardMarkup(rows)
 
 
-def build_numpad_keyboard(session_id, item_code, unit: str):
+def build_numpad_keyboard(session_id, item_code, unit: str, language: str = "bm"):
     """The inline numpad for one item.
 
     pcs (3×4): [1 2 3] [4 5 6] [7 8 9] [⌫ 0 ✓]
@@ -822,11 +836,11 @@ def build_numpad_keyboard(session_id, item_code, unit: str):
     ]
     if unit == "kg":
         rows.append([b(".", "dot"), b("0", "d0"), b("⌫", "bs")])
-        rows.append([b("✓ Simpan", "ok")])
+        rows.append([b(kitchen_texts.short("btn_save", language), "ok")])
     else:
         rows.append([b("⌫", "bs"), b("0", "d0"), b("✓", "ok")])
     # Per-item clear — reset this item back to "—" if the wrong item was tapped.
-    rows.append([b("🗑 Kosongkan", "clr")])
+    rows.append([b(kitchen_texts.short("btn_clear", language), "clr")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1837,105 +1851,104 @@ def day_record_complete(client, outlet_code, business_date) -> bool:
 
 # --- summary rendering -------------------------------------------------------
 
-def render_save_confirmation(outlet_label, business_date, usage: list) -> str:
+def render_save_confirmation(outlet_label, business_date, usage: list,
+                             language: str = "bm") -> str:
     """STAGE 1 (02:00) save confirmation: usage numbers ONLY — no POS comparison,
     no flags. Posted in the group right after LEFT so staff see the record saved
-    correctly (masak / baki / guna per item). The Used-vs-POS comparison comes in
+    correctly (cooked / left / used per item). The Used-vs-POS comparison comes in
     STAGE 2 at 09:00 once the POS sales email is ingested."""
     lines = [
-        f"✅ Rekod siap — Guna {outlet_label} {business_date}",
+        kitchen_texts.short("save_head", language, outlet=outlet_label, date=business_date),
         "",
     ]
     for ev in usage:
         unit = ev["unit"]
-        cooked = format_value(ev["cooked"], unit)
-        left = format_value(ev["left"], unit)
-        used = format_value(ev["used"], unit)
-        lines.append(f"• {ev['label']}: masak {cooked}, baki {left}, guna {used} {unit}")
+        lines.append(kitchen_texts.short(
+            "save_line", language, label=ev["label"], cooked=format_value(ev["cooked"], unit),
+            left=format_value(ev["left"], unit), used=format_value(ev["used"], unit), unit=unit))
     lines.append("")
-    lines.append("Guna vs POS akan keluar pagi nanti (lepas data POS masuk).")
+    lines.append(kitchen_texts.text("save_foot", language))
     return "\n".join(lines)
 
 
-def render_pos_incomplete(outlet_label, business_date, coverage=None) -> str:
+def render_pos_incomplete(outlet_label, business_date, coverage=None,
+                          language: str = "bm") -> str:
     """STAGE 2 notice when the day's POS is not yet COMPLETE — a 24h day reports in
     two shifts (~7PM day + ~7AM-next-day overnight), so comparing before both are
-    in would be against a half-day of sales. Show "⏳ POS belum lengkap" and do
+    in would be against a half-day of sales. Show "⏳ POS not complete" and do
     NOT flag; the comparison is deferred and retried later. The detail line names
     what's still missing (nothing yet vs. overnight shift pending)."""
     cov = coverage or {}
-    header = f"⏳ POS belum lengkap — {outlet_label} {business_date}"
+    header = kitchen_texts.short("pos_wait_head", language, outlet=outlet_label, date=business_date)
     missing = missing_pos_shifts(cov)
     if not cov.get("summary_present") and not cov.get("shift_count"):
-        detail = "POS belum masuk lagi."
+        detail = kitchen_texts.text("pos_wait_none", language)
     elif missing:
-        detail = f"Shift {_shift_names_my(missing)} belum masuk."
+        detail = kitchen_texts.text("pos_wait_shift", language,
+                                    shifts=_shift_names(missing, language))
     elif not cov.get("summary_present"):
-        detail = "Ringkasan harian POS belum masuk."
+        detail = kitchen_texts.text("pos_wait_summary", language)
     elif not cov.get("summaries_cover_shifts", True):
         # Both shift emails are in, but the daily-close summary so far only
         # covers part of the 24h day (e.g. the ~7AM close's email pending).
-        detail = "Ringkasan harian POS baru cover sebahagian shift — tunggu email tutup pagi."
+        detail = kitchen_texts.text("pos_wait_partial", language)
     else:
-        detail = "Menunggu data POS penuh."
-    return (
-        f"{header}\n{detail} "
-        "Perbandingan Guna vs POS akan dibuat bila POS penuh. Tiada flag sekarang."
-    )
+        detail = kitchen_texts.text("pos_wait_full", language)
+    return f"{header}\n{detail}\n{kitchen_texts.text('pos_wait_foot', language)}"
 
 
-_SHIFT_NAME_MY = {"day": "siang", "overnight": "malam"}
+def _shift_names(shift_types, language: str = "bm") -> str:
+    """Shift names in the reader's language: ['day','overnight'] -> 'siang + malam'."""
+    keys = {"day": "shift_day", "overnight": "shift_overnight"}
+    return " + ".join(
+        kitchen_texts.short(keys[t], language) if t in keys else str(t) for t in shift_types
+    ) or "POS"
 
 
 def _shift_names_my(shift_types) -> str:
-    """Malay names for shift types, joined: ['day','overnight'] -> 'siang + malam'."""
-    return " + ".join(_SHIFT_NAME_MY.get(t, t) for t in shift_types) or "POS"
+    """Malay names for shift types (kept for existing callers)."""
+    return _shift_names(shift_types, "bm")
 
 
-def render_pos_missing_shift(outlet_label, business_date, coverage=None) -> str:
-    """STAGE 2 ingestion-gap ALERT: by the final (14:00) retry a shift of this
+def render_pos_missing_shift(outlet_label, business_date, coverage=None,
+                             language: str = "bm") -> str:
+    """STAGE 2 ingestion-gap notice: by the final (14:00) retry a shift of this
     day's POS still hasn't been ingested, so the day can never complete on its own
-    — distinct from the normal "belum lengkap" wait. Names the missing shift(s) so
-    the gap can be investigated (email never arrived / parse fail / dedup). Never
-    flags — we still refuse to compare a half-day."""
+    — distinct from the normal "not complete" wait. Names the missing shift(s).
+    Never flags — we still refuse to compare a half-day."""
     cov = coverage or {}
     missing = missing_pos_shifts(cov)
-    label = _shift_names_my(missing) if missing else "ringkasan harian"
-    return (
-        f"⚠️ POS {label} hilang untuk {outlet_label} {business_date} — "
-        "tak boleh banding Guna vs POS.\n"
-        "Email POS shift ni nampaknya tak masuk (ingestion gap) — sila semak."
-    )
+    what = (_shift_names(missing, language) if missing
+            else kitchen_texts.short("daily_summary", language))
+    return kitchen_texts.text("pos_missing", language, what=what, outlet=outlet_label,
+                              date=business_date)
 
 
-def render_pos_only_summary(outlet_label, business_date, evaluations: list) -> str:
+def render_pos_only_summary(outlet_label, business_date, evaluations: list,
+                            language: str = "bm") -> str:
     """STAGE 2 (final pass) notice for a day the kitchen NEVER keyed in: the
-    shop is still shown what the POS says it sold per tracked item, with an
-    explicit "tak boleh banding" line and a Tamil plea to fill the form daily.
+    shop is still shown what the POS says it sold per tracked item, with a
+    "can't compare" line and a request to fill the form daily.
     No flags ever — there is no Used side to compare."""
     lines = [
-        f"🧾 POS punya jualan — {outlet_label} • {business_date}",
+        kitchen_texts.short("pos_only_head", language, outlet=outlet_label, date=business_date),
         "",
-        "Kitchen tak key in rekod Masak/Baki untuk hari ni, jadi tak boleh "
-        "banding Guna vs POS. Tapi ikut POS, jualan hari tu:",
+        kitchen_texts.text("pos_only_intro", language),
         "",
     ]
     for ev in evaluations:
-        pos = format_value(ev.get("pos"), ev["unit"])
-        lines.append(f"• {ev['label']}: POS jual {pos} {ev['unit']}")
-    lines += [
-        "",
-        "👨‍🍳 நேத்து Masak/Baki form fill பண்ணல — அதனால comparison "
-        "பண்ண முடியல. இனிமேல் தினமும் form fill பண்ணுங்க, அப்போ தான் "
-        "Guna vs POS சரியா வரும் 🙏",
-    ]
+        lines.append(kitchen_texts.short(
+            "pos_only_line", language, label=ev["label"],
+            pos=format_value(ev.get("pos"), ev["unit"]), unit=ev["unit"]))
+    lines += ["", kitchen_texts.text("pos_only_foot", language)]
     return "\n".join(lines)
 
 
-def render_mini_summary(outlet_label, business_date, evaluations: list) -> str:
+def render_mini_summary(outlet_label, business_date, evaluations: list,
+                        language: str = "bm") -> str:
     """The short Used-vs-POS recap (STAGE 2) posted in the group at 09:00."""
     lines = [
-        "📊 Ringkasan Guna vs POS",
+        kitchen_texts.short("mini_head", language),
         f"{outlet_label} • {business_date}",
         "",
     ]
@@ -1954,19 +1967,18 @@ def render_mini_summary(outlet_label, business_date, evaluations: list) -> str:
         if ev.get("source") == "purchase":
             # Telur Ikan: consumption vs purchase, not vs sales.
             if ev["pos"] is None:
-                lines.append(f"➖ {ev['label']}: guna {used} {unit} vs tiada rekod beli")
+                lines.append(kitchen_texts.short("mini_line_nobuy", language, label=ev["label"],
+                                                 used=used, unit=unit))
             else:
-                beli = format_value(ev["pos"], unit)
-                lines.append(f"{mark} {ev['label']}: {used} {unit} guna vs {beli} {unit} beli")
+                lines.append(kitchen_texts.short(
+                    "mini_line_buy", language, mark=mark, label=ev["label"], used=used,
+                    pos=format_value(ev["pos"], unit), unit=unit))
         else:
-            pos = format_value(ev["pos"], unit)
-            lines.append(f"{mark} {ev['label']}: guna {used} vs POS {pos} {unit}")
-    if flagged == 0:
-        lines.append("")
-        lines.append("Semua padan 👍")
-    else:
-        lines.append("")
-        lines.append("🔴 = guna lebih dari POS (bocor?)  ⚠️ = guna kurang (silap key-in?)")
+            lines.append(kitchen_texts.short(
+                "mini_line", language, mark=mark, label=ev["label"], used=used,
+                pos=format_value(ev["pos"], unit), unit=unit))
+    lines.append("")
+    lines.append(kitchen_texts.text("mini_all_ok" if flagged == 0 else "mini_legend", language))
     return "\n".join(lines)
 
 
@@ -1988,7 +2000,7 @@ def leak_items(evaluations: list) -> list:
     ]
 
 
-def _leak_line(ev: dict) -> str:
+def _leak_line(ev: dict, language: str = "bm") -> str:
     unit = ev.get("unit", "pcs")
     used = format_value(ev.get("used"), unit)
     compared = format_value(ev.get("pos"), unit)
@@ -1996,35 +2008,24 @@ def _leak_line(ev: dict) -> str:
         over = format_value(float(ev["used"]) - float(ev["pos"]), unit)
     except (KeyError, TypeError, ValueError):
         over = "?"
-    if ev.get("source") == "purchase":
-        return (
-            f"• {ev.get('label', '?')}: guna {used} {unit}, "
-            f"beli {compared} {unit} மட்டும் — {over} {unit} அதிகம்"
-        )
-    return (
-        f"• {ev.get('label', '?')}: guna {used} {unit}, "
-        f"POS jual {compared} {unit} மட்டும் — {over} {unit} அதிகம்"
-    )
+    key = "waste_line_buy" if ev.get("source") == "purchase" else "waste_line"
+    return kitchen_texts.short(key, language, label=ev.get("label", "?"), used=used,
+                               pos=compared, over=over, unit=unit)
 
 
-def render_pandari_wastage(outlet_label, business_date, leaks: list) -> str:
-    """Tamil note to the pandari, posted in the kitchen group right after the
-    mini summary. Returns ``""`` when there is nothing over-used."""
+def render_pandari_wastage(outlet_label, business_date, leaks: list,
+                           language: str = "bm") -> str:
+    """Note for the cook, in the cashier's language, posted in the kitchen
+    group right after the recap. ``""`` when nothing was over-used."""
     if not leaks:
         return ""
     lines = [
-        f"👨‍🍳 பண்டாரி கவனிக்கணும் — {outlet_label} • {business_date}",
+        kitchen_texts.short("waste_head", language, outlet=outlet_label, date=business_date),
         "",
-        "POS-ல வித்ததை விட kitchen-ல guna பண்ணது அதிகம்:",
+        kitchen_texts.text("waste_intro", language),
     ]
-    lines += [_leak_line(ev) for ev in leaks]
-    lines += [
-        "",
-        "தேவைக்கு மேல masak ஆயிடுச்சு. மிச்சம் = wastage = கடைக்கு loss.",
-        "Sales பாத்து அளவா masak பண்ணுங்க — wastage-அ குறைங்க. 🙏",
-        "",
-        "ஏன் இவ்வளவு அதிகம் ஆச்சு? சொல்லுங்க.",
-    ]
+    lines += [_leak_line(ev, language) for ev in leaks]
+    lines += ["", kitchen_texts.text("waste_foot", language)]
     return "\n".join(lines)
 
 
@@ -2059,22 +2060,27 @@ async def _send_wastage_followups(application, kitchen_chat_id, outlet_code,
     try:
         import supervisor
 
-        pandari_msg = supervisor.with_reply_footer(
-            render_pandari_wastage(outlet_label, business_date, leaks)
-        )
+        import cashier_names
+
+        # In an outlet group this is a note for the cook in the cashier's
+        # language — no "long-press Reply" footer and no 17:00 chase; the
+        # 10:30 wastage question (staff_ops) asks what was thrown.
+        in_group = cashier_names.is_outlet_group(kitchen_chat_id)
+        pandari_msg = render_pandari_wastage(
+            outlet_label, business_date, leaks, form_language(kitchen_chat_id))
+        if pandari_msg and not in_group:
+            pandari_msg = supervisor.with_reply_footer(pandari_msg)
         if pandari_msg:
             with contextlib.suppress(Exception):
                 sent = await application.bot.send_message(
                     chat_id=kitchen_chat_id, text=pandari_msg
                 )
-                # The kitchen group is the real audience (the bot already
-                # posts the comparison there), so this question is tracked
-                # and chased like any other.
-                await asyncio.to_thread(
-                    supervisor.log_question,
-                    _supabase, kitchen_chat_id, sent.message_id,
-                    "kitchen_wastage", pandari_msg,
-                )
+                if not in_group:
+                    await asyncio.to_thread(
+                        supervisor.log_question,
+                        _supabase, kitchen_chat_id, sent.message_id,
+                        "kitchen_wastage", pandari_msg,
+                    )
 
         manager_msg = render_manager_wastage(outlet_label, business_date, leaks)
         if not manager_msg:
@@ -2087,6 +2093,10 @@ async def _send_wastage_followups(application, kitchen_chat_id, outlet_code,
             manager_registration.get_manager, _supabase, outlet_code
         )
         manager_chat_id = mgr.get("chat_id") if mgr else None
+        # A registered outlet's "manager" is its group, which just got the
+        # note above — never post the same numbers there twice.
+        if manager_chat_id is not None and cashier_names.is_outlet_group(manager_chat_id):
+            return
         try:
             owner_chat_id = int(os.environ["ALERT_CHAT_ID"])
         except (KeyError, TypeError, ValueError):
@@ -2276,39 +2286,27 @@ def find_unsubmitted_forms(client, *, now: datetime | None = None) -> list[dict]
         return []
 
 
-def render_form_reminder(outlet_label, form: dict) -> str:
-    """The chase message, simple Tamil + Malay. Adapts: an untouched form
-    gets "go tap the items", a filled-but-unsent one gets "just tap
-    Hantar". Never raises; ``""`` on malformed input."""
+def render_form_reminder(outlet_label, form: dict, language: str = "bm") -> str:
+    """The chase message in the cashier's language. Adapts: an untouched form
+    gets "tap the items", a filled-but-unsent one gets "just tap Hantar".
+    Never raises; ``""`` on malformed input."""
     try:
-        title = form_title(form.get("phase") or PHASE_COOKED)
+        title = form_title(form.get("phase") or PHASE_COOKED, language)
         missing = int(form["total"]) - int(form["filled"])
-        head = (
-            "⏰ Form இன்னும் fill ஆகல!\n"
-            f"{title} — {outlet_label} • {form.get('business_date')}\n\n"
-        )
+        head = kitchen_texts.short("remind_head", language, title=title, outlet=outlet_label,
+                                   date=form.get("business_date"))
         if form.get("all_filled"):
-            body = (
-                "எல்லா item-um போட்டீங்க 👍 ஆனா அனுப்பல!\n"
-                "மேல form-ல 'Hantar' தட்டுங்க. அப்பதான் முடியும் 🙏\n\n"
-                "Semua dah isi tapi belum Hantar — sila tekan Hantar."
-            )
+            body = kitchen_texts.text("remind_all_filled", language)
         else:
-            body = (
-                f"{form['total']} item-ல {missing} இன்னும் காலி.\n"
-                "மேல இருக்கற form-ல item-அ தட்டி எண் போடுங்க.\n"
-                "எல்லாம் போட்டு 'Hantar' தட்டுங்க. "
-                "Key in பண்ணிட்டா இந்த reminder நின்னுடும் 🙏\n\n"
-                "Form belum isi lagi — sila tekan item kat atas & key in, "
-                "lepas tu Hantar."
-            )
-        return head + body
+            body = kitchen_texts.text("remind_missing", language, missing=missing,
+                                      total=form["total"])
+        return f"{head}\n\n{body}"
     except Exception:
         logger.exception("kitchen: form reminder render failed")
         return ""
 
 
-def render_group_reminder(outlet_label, forms: list[dict]) -> str:
+def render_group_reminder(outlet_label, forms: list[dict], language: str = "bm") -> str:
     """ONE reminder for all of a group's open forms. A single form keeps the
     detailed per-form wording; several are listed one line each. Never
     raises; ``""`` on malformed input."""
@@ -2317,21 +2315,19 @@ def render_group_reminder(outlet_label, forms: list[dict]) -> str:
         if not forms:
             return ""
         if len(forms) == 1:
-            return render_form_reminder(outlet_label, forms[0])
-        lines = [f"⏰ {len(forms)} form இன்னும் முடியல — {outlet_label}", ""]
+            return render_form_reminder(outlet_label, forms[0], language)
+        lines = [kitchen_texts.short("remind_many_head", language, n=len(forms),
+                                     outlet=outlet_label), ""]
         for f in forms:
-            title = form_title(f.get("phase") or PHASE_COOKED)
+            title = form_title(f.get("phase") or PHASE_COOKED, language)
             if f.get("all_filled"):
-                state = "எல்லாம் போட்டாச்சு, 'Hantar' மட்டும் தட்டுங்க"
+                state = kitchen_texts.short("remind_state_filled", language)
             else:
                 missing = int(f["total"]) - int(f["filled"])
-                state = f"{f['total']} item-ல {missing} இன்னும் காலி"
+                state = kitchen_texts.short("remind_state_missing", language,
+                                            missing=missing, total=f["total"])
             lines.append(f"• {title} {f.get('business_date')}: {state}")
-        lines += [
-            "",
-            "Form-ல item-அ தட்டி எண் போடுங்க, அப்புறம் 'Hantar' 🙏",
-            "Sila isi semua form & tekan Hantar.",
-        ]
+        lines += ["", kitchen_texts.text("remind_many_foot", language)]
         return "\n".join(lines)
     except Exception:
         logger.exception("kitchen: group form reminder render failed")
@@ -2402,7 +2398,8 @@ async def post_form_reminders(application) -> None:
         sent = reminded = 0
         for chat_id, group_forms in by_chat.items():
             text = render_group_reminder(
-                outlet_display_name(group_forms[0].get("outlet_code")), group_forms
+                outlet_display_name(group_forms[0].get("outlet_code")), group_forms,
+                form_language(chat_id),
             )
             if not text:
                 continue
@@ -2574,7 +2571,9 @@ async def _handle_numpad_key(query, session_id, item_code, action) -> None:
         session = await asyncio.to_thread(get_session, _supabase, session_id)
         if session is None or session.get("status") == "submitted":
             with contextlib.suppress(Exception):
-                await query.answer("Sesi dah tamat — tunggu borang baru.")
+                await query.answer(kitchen_texts.short(
+                    "session_over", form_language(getattr(query.message, "chat_id", None),
+                                                  (session or {}).get("phase"))))
             return
         st = {"buffer": session.get("buffer") or "", "phase": session.get("phase") or PHASE_COOKED}
 
@@ -2696,15 +2695,18 @@ async def handle_kitchen_callback(update, context) -> None:
             await query.answer()
 
     session = await asyncio.to_thread(get_session, _supabase, session_id)
+    msg_chat = getattr(query.message, "chat_id", None)
     if session is None:
         with contextlib.suppress(Exception):
             await query.answer()
         with contextlib.suppress(Exception):
-            await query.edit_message_text("Sesi ini dah tamat. Tunggu borang baru.")
+            await query.edit_message_text(
+                kitchen_texts.text("session_over", form_language(msg_chat)))
         return
+    lang = form_language(session.get("chat_id") or msg_chat, session.get("phase"))
     if session.get("status") == "submitted":
         with contextlib.suppress(Exception):
-            await query.answer("Borang ini dah dihantar.")
+            await query.answer(kitchen_texts.short("already_sent", lang))
         return
 
     outlet_code = session["outlet_code"]
@@ -2722,9 +2724,9 @@ async def handle_kitchen_callback(update, context) -> None:
         if not can_submit(entries, outlet_code, phase):
             with contextlib.suppress(Exception):
                 if phase == PHASE_COOKED_NIGHT:
-                    await query.answer("Key sekurang-kurangnya 1 item tambahan dulu.", show_alert=True)
+                    await query.answer(kitchen_texts.short("need_one", lang), show_alert=True)
                 else:
-                    await query.answer("Isi semua item dulu sebelum Hantar.", show_alert=True)
+                    await query.answer(kitchen_texts.short("need_all", lang), show_alert=True)
             return
         # Validation passed — clear the spinner before the slow finalize.
         with contextlib.suppress(Exception):
@@ -2739,8 +2741,7 @@ async def handle_kitchen_callback(update, context) -> None:
             logger.exception("kitchen: claim_session_for_submit failed for session %s", session_id)
             with contextlib.suppress(Exception):
                 await query.message.reply_text(
-                    "⚠️ Gagal simpan ke pangkalan data. "
-                    "Cuba tekan Hantar sekali lagi — kalau masih gagal, maklum boss."
+                    "⚠️ " + kitchen_texts.text("save_failed", lang)
                 )
             return
         if not claimed:
@@ -2758,19 +2759,19 @@ async def handle_kitchen_callback(update, context) -> None:
                 await asyncio.to_thread(_save_session, _supabase, session_id, status="open")
             logger.exception("kitchen: finalize_submission failed for session %s", session_id)
             if _is_missing_table_error(exc):
-                note = ("Jadual kitchen belum siap dalam DB (PGRST205). "
-                        "Cuba tekan Hantar sekali lagi nanti.")
-            else:
-                note = "Gagal simpan ke pangkalan data. Cuba tekan Hantar sekali lagi."
+                logger.error("kitchen: kitchen tables missing (PGRST205)")
+            note = kitchen_texts.text("save_failed", lang)
             with contextlib.suppress(Exception):
                 await query.message.reply_text(f"⚠️ {note}")
             return
         _clear_numpad_state(session_id)
         with contextlib.suppress(Exception):
-            await query.edit_message_text(f"✅ Tersimpan — {form_title(phase)}\n{outlet_label} • {business_date}")
+            await query.edit_message_text(
+                kitchen_texts.short("saved", lang, title=form_title(phase, lang))
+                + f"\n{outlet_label} • {business_date}")
         if phase == PHASE_LEFT and evaluations:
             # STAGE 1: usage-only save confirmation (no POS comparison at 02:00).
-            summary = render_save_confirmation(outlet_label, business_date, evaluations)
+            summary = render_save_confirmation(outlet_label, business_date, evaluations, lang)
             with contextlib.suppress(Exception):
                 await context.bot.send_message(chat_id=session["chat_id"], text=summary)
         return
@@ -2798,8 +2799,8 @@ async def handle_kitchen_callback(update, context) -> None:
         )
         with contextlib.suppress(Exception):
             await query.edit_message_text(
-                numpad_text(phase, meta["label"], unit, current),
-                reply_markup=build_numpad_keyboard(session_id, item_code, unit),
+                numpad_text(phase, meta["label"], unit, current, lang),
+                reply_markup=build_numpad_keyboard(session_id, item_code, unit, lang),
             )
         return
 
@@ -2811,8 +2812,8 @@ async def handle_kitchen_callback(update, context) -> None:
         )
         with contextlib.suppress(Exception):
             await query.edit_message_text(
-                form_text(phase, business_date, outlet_label, entries, outlet_code),
-                reply_markup=build_item_keyboard(session_id, outlet_code, entries, phase),
+                form_text(phase, business_date, outlet_label, entries, outlet_code, lang),
+                reply_markup=build_item_keyboard(session_id, outlet_code, entries, phase, lang),
             )
         return
 
@@ -2831,8 +2832,8 @@ async def handle_kitchen_callback(update, context) -> None:
         t_edit = time.monotonic()
         with contextlib.suppress(Exception):
             await query.edit_message_text(
-                form_text(phase, business_date, outlet_label, entries, outlet_code),
-                reply_markup=build_item_keyboard(session_id, outlet_code, entries, phase),
+                form_text(phase, business_date, outlet_label, entries, outlet_code, lang),
+                reply_markup=build_item_keyboard(session_id, outlet_code, entries, phase, lang),
             )
         logger.info("kitchen numpad ✓ commit %s=%r: edit %.0fms",
                     item_code, value, (time.monotonic() - t_edit) * 1000)
@@ -2857,10 +2858,11 @@ async def _post_one(application, chat_id, outlet_code, business_date, phase) -> 
     entries = _load_entries(session)
     # Original tap-button layout: one button per item + Hantar. Entry is via the
     # (fast, in-memory) numpad when an item is tapped.
+    lang = form_language(chat_id, phase)
     msg = await application.bot.send_message(
         chat_id=chat_id,
-        text=form_text(phase, business_date, outlet_label, entries, outlet_code),
-        reply_markup=build_item_keyboard(session["id"], outlet_code, entries, phase),
+        text=form_text(phase, business_date, outlet_label, entries, outlet_code, lang),
+        reply_markup=build_item_keyboard(session["id"], outlet_code, entries, phase, lang),
     )
     await asyncio.to_thread(_save_session, _supabase, session["id"], message_id=msg.message_id)
     return True
@@ -3018,7 +3020,8 @@ async def post_comparison_digests(
                     evaluate_outlet_day, _supabase, outlet_code, d
                 )
                 if evaluations:
-                    summary = render_mini_summary(outlet_label, d, evaluations)
+                    summary = render_mini_summary(outlet_label, d, evaluations,
+                                                  form_language(chat_id))
                     with contextlib.suppress(Exception):
                         await application.bot.send_message(chat_id=chat_id, text=summary)
                     posted += 1
@@ -3048,7 +3051,8 @@ async def post_comparison_digests(
                         with contextlib.suppress(Exception):
                             await application.bot.send_message(
                                 chat_id=chat_id,
-                                text=render_pos_only_summary(outlet_label, d, pos_evals),
+                                text=render_pos_only_summary(outlet_label, d, pos_evals,
+                                                             form_language(chat_id)),
                             )
                         posted += 1
                 # Final (14:00) pass: any still-incomplete day is an ingestion gap.
@@ -3060,7 +3064,8 @@ async def post_comparison_digests(
                     with contextlib.suppress(Exception):
                         await application.bot.send_message(
                             chat_id=chat_id,
-                            text=render_pos_missing_shift(outlet_label, d, cov),
+                            text=render_pos_missing_shift(outlet_label, d, cov,
+                                                          form_language(chat_id)),
                         )
                     alerted += 1
             elif notify_missing and pending:
@@ -3073,7 +3078,7 @@ async def post_comparison_digests(
                 with contextlib.suppress(Exception):
                     await application.bot.send_message(
                         chat_id=chat_id,
-                        text=render_pos_incomplete(outlet_label, d, cov),
+                        text=render_pos_incomplete(outlet_label, d, cov, form_language(chat_id)),
                     )
                 deferred += 1
             # 11:00 (notify_missing False, alert_missing_shift False): silent.

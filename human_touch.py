@@ -44,20 +44,20 @@ _GREETINGS = [
 # Every variant truthfully reports the upward step: the reply handler
 # forwards the answer to the owner right after this ack is sent.
 _ACKS = [
-    "சரி {name}, note பண்ணிட்டேன் ✅ Boss-க்கும் அனுப்பிட்டேன். நன்றி!",
-    "Ok {name} 👍 பதிவு ஆச்சு ✅ Boss பாப்பாரு. நன்றி!",
-    "நல்லது {name} 🙏 எழுதி வெச்சுட்டேன் ✅ Boss-க்கு காட்டிட்டேன்.",
+    "சரி {name}, note பண்ணிட்டேன் ✅ Office-க்கும் அனுப்பிட்டேன். நன்றி 🙏",
+    "Ok {name} 👍 பதிவு ஆச்சு ✅ Office பாக்கும். நன்றி 🙏",
+    "நல்லது {name} 🙏 எழுதி வெச்சுட்டேன் ✅ Office-க்கு காட்டிட்டேன்.",
 ]
 
 # Same acks without a name, for outlet groups: the cashier's name is already
 # the first line of every group message.
 _GROUP_ACKS = [
-    "Note பண்ணிட்டேன் ✅ Boss-க்கும் அனுப்பிட்டேன். நன்றி!",
-    "பதிவு ஆச்சு 👍 Boss பாப்பாரு. நன்றி!",
-    "எழுதி வெச்சுட்டேன் ✅ Boss-க்கு காட்டிட்டேன் 🙏",
+    "Note பண்ணிட்டேன் ✅ Office-க்கும் அனுப்பிட்டேன். நன்றி 🙏",
+    "பதிவு ஆச்சு 👍 Office பாக்கும். நன்றி 🙏",
+    "எழுதி வெச்சுட்டேன் ✅ Office-க்கு காட்டிட்டேன் 🙏",
 ]
 
-_DEFAULT_NAME = "boss"
+_DEFAULT_NAME = ""          # staff are never called "boss"
 
 
 def _pick(variants: list[str], chat_id, on_date: date) -> str:
@@ -74,8 +74,8 @@ def _clean_name(manager_name) -> str:
     name = str(manager_name or "").strip()
     if not name:
         return _DEFAULT_NAME
-    # First name only — "Ravi boss" reads warmer than a full registry name.
-    return f"{name.split()[0]} boss"
+    # First name only.
+    return name.split()[0]
 
 
 def greeting(manager_name, chat_id, on_date: date | None = None) -> str:
@@ -85,9 +85,10 @@ def greeting(manager_name, chat_id, on_date: date | None = None) -> str:
         return ""
     try:
         base = on_date or date.today()
-        return _pick(_GREETINGS, chat_id, base).format(
-            name=_clean_name(manager_name)
-        )
+        name = _clean_name(manager_name)
+        if not name:
+            return "வணக்கம் 🙏"
+        return _pick(_GREETINGS, chat_id, base).format(name=name)
     except Exception:
         logger.exception("human touch: greeting failed")
         return ""
@@ -116,7 +117,7 @@ def ack(manager_name, chat_id, on_date: date | None = None) -> str:
         return _pick(_ACKS, chat_id, base).format(name=_clean_name(manager_name))
     except Exception:
         logger.exception("human touch: ack failed")
-        return "சரி boss, பதில் note பண்ணிட்டேன் ✅ நன்றி!"
+        return "சரி, பதில் note பண்ணிட்டேன் ✅ நன்றி 🙏"
 
 
 async def show_typing(bot, chat_id) -> None:
@@ -184,9 +185,9 @@ def praise_message(stat: dict) -> str:
         if asked == 0 or answered < asked:
             return ""
         return (
-            "🌟 இந்த வாரம் சூப்பர்!\n"
+            "🌟 இந்த வாரம் சூப்பர் 👏\n"
             f"கேட்ட {asked} கேள்விக்கும் பதில் சொன்னீங்க 👏\n"
-            "Boss-க்கும் தெரியும். இப்படியே continue பண்ணுங்க 🙏"
+            "Office-க்கும் தெரியும். இப்படியே continue பண்ணுங்க 🙏"
         )
     except Exception:
         logger.exception("human touch: praise failed")
