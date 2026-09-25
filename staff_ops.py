@@ -141,6 +141,14 @@ def _day(value) -> date | None:
         return None
 
 
+# Invoice lines that are fees, not goods: never asked about.
+_NOT_GOODS = re.compile(
+    r"(transport|delivery|deliver|penghantaran|hantar|service|servis|charge|caj|"
+    r"deposit|rounding|\btax\b|\bsst\b|discount|diskaun|\bfee\b)",
+    re.IGNORECASE,
+)
+
+
 def invoice_flag(lines, history, *, receipt_date, merchant, outlet_days: int) -> dict | None:
     """The one question worth asking about an invoice, or None.
 
@@ -172,7 +180,7 @@ def invoice_flag(lines, history, *, receipt_date, merchant, outlet_days: int) ->
     for line in lines or []:
         item = str(line.get("canonical_item") or "").lower()
         qty = float(line.get("qty") or 0)
-        if not item or qty <= 0:
+        if not item or qty <= 0 or _NOT_GOODS.search(item):
             continue
         past = [v for (i, _r), v in per_receipt.items() if i == item and v["qty"] > 0]
         if len(past) >= INVOICE_MIN_HISTORY:

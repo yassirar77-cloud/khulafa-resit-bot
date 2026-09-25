@@ -62,6 +62,13 @@ class InvoiceTests(unittest.TestCase):
                                       receipt_date=self.D, merchant="EASA", outlet_days=30)
         self.assertEqual(flag["kind"], "rare")
 
+    def test_fees_never_asked(self):
+        hist = _hist("X", "ayam", [5] * 30, self.D, step=1)
+        for fee in ("transport", "delivery charge", "service charge"):
+            self.assertIsNone(staff_ops.invoice_flag(
+                [{"canonical_item": fee, "qty": 1}], hist,
+                receipt_date=self.D, merchant="EVEREST", outlet_days=30), fee)
+
     def test_rare_needs_history(self):
         self.assertIsNone(staff_ops.invoice_flag(
             [{"canonical_item": "tepung dhall", "qty": 2}], [],
