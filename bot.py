@@ -6271,8 +6271,16 @@ async def run_staff_ops(application: Application, slot: str) -> None:
         if not praise:
             logger.info("staff ops praise: no winners this week")
             return
+    filled: set = set()
+    if slot == "leftover":
+        # The 02:00 kitchen form ("Rekod Baki") already asks for leftovers;
+        # the 03:00 question only goes to groups that didn't fill it in.
+        filled = await asyncio.to_thread(_left_form_filled, db, today - timedelta(days=1))
     outcomes: dict = {}
     for chat_id, code in groups:
+        if chat_id in filled:
+            outcomes[code] = "02:00 form filled"
+            continue
         language = _cashier_language(code)
         try:
             msg = await asyncio.to_thread(_ops_message, db, slot, code, today, language, praise)
@@ -6287,6 +6295,21 @@ async def run_staff_ops(application: Application, slot: str) -> None:
                                          slot=slot, **msg)
     logger.info("staff ops %s: %s", slot,
                 ", ".join(f"{c} {o}" for c, o in sorted(outcomes.items())))
+
+
+def _left_form_filled(db, business_date) -> set:
+    """Chats that submitted the 02:00 leftover form for ``business_date``
+    (at 03:00 that is yesterday's date). A failed read asks everyone."""
+    try:
+        rows = (db.table(kitchen_usage.SESSION_TABLE).select("chat_id")
+                .eq("phase", kitchen_usage.PHASE_LEFT)
+                .eq("business_date", business_date.isoformat())
+                .in_("status", ["submitted", "submitting"])
+                .execute().data or [])
+    except Exception:
+        logger.exception("staff ops: 02:00 form lookup failed")
+        return set()
+    return {r.get("chat_id") for r in rows}
 
 
 def _ops_message(db, slot, code, today, language, praise) -> dict | None:
