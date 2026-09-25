@@ -173,3 +173,16 @@ class StaffOpsWiring(unittest.TestCase):
         upload = _block(self.src, "async def staff_ops_on_upload(")
         self.assertIn('reaction="👌"', upload)
         self.assertIn("_already_asked", upload)
+
+
+class LeftoverSkipWiring(unittest.TestCase):
+    def test_leftover_skips_groups_that_filled_the_0200_form(self):
+        with open(os.path.join(REPO_ROOT, "bot.py")) as f:
+            src = f.read()
+        run = _block(src, "async def run_staff_ops(")
+        self.assertIn("_left_form_filled, db, today - timedelta(days=1)", run)
+        self.assertIn("if chat_id in filled:", run)
+        helper = src[src.index("def _left_form_filled("):]
+        helper = helper[:helper.index("\ndef ")]
+        self.assertIn("kitchen_usage.PHASE_LEFT", helper)
+        self.assertIn('"submitted"', helper)

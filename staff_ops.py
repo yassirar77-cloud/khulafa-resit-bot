@@ -4,7 +4,8 @@ What goes to each live outlet group (approved by the director, see
 docs/staff_questions_v2_review.md):
 
   03:00  leftover       night cashier: what's left, kept, thrown + a
-                        rotating food-safety line                 [buttons]
+                        rotating food-safety line — only groups that
+                        didn't fill in the 02:00 kitchen form     [buttons]
   09:00  sales          morning cashier: yesterday busier/quieter than a
                         usual same weekday -> cook/order less/more (info,
                         items sold only, never RM)
