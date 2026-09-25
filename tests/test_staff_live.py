@@ -16,7 +16,7 @@ NOW = datetime(2026, 9, 24, 11, 0, tzinfo=MY)      # morning shift
 CHAT = -5207657926
 
 
-def _t(status, minutes_ago=None, *, chat=CHAT, slot="stock", tid=1, created=None,
+def _t(status, minutes_ago=None, *, chat=CHAT, slot="bills", tid=1, created=None,
        shift="morning", shift_date="2026-09-24", **kw):
     row = {"id": tid, "chat_id": chat, "status": status, "slot": slot,
            "outlet_code": "BISTRO7", "shift": shift, "shift_date": shift_date,
@@ -44,6 +44,15 @@ class PlanTests(unittest.TestCase):
     def test_reminder_after_thirty_minutes_once(self):
         self.assertEqual([a for a, _ in sl.plan_tick([_t("open", 35)], NOW)], ["remind"])
         self.assertEqual(sl.plan_tick([_t("reminded", 50)], NOW), [])
+
+    def test_reminders_only_for_money_questions(self):
+        for slot in ("bills", "minimarket", "invoice"):
+            self.assertEqual([a for a, _ in sl.plan_tick([_t("open", 35, slot=slot)], NOW)],
+                             ["remind"], slot)
+        for slot in ("wastage", "leftover", "afternoon", "sales", "order", "lunch"):
+            self.assertEqual(sl.plan_tick([_t("open", 35, slot=slot)], NOW), [], slot)
+            self.assertEqual([a for a, _ in sl.plan_tick([_t("open", 61, slot=slot)], NOW)],
+                             ["expire"], slot)
 
     def test_expires_after_one_hour(self):
         self.assertEqual([a for a, _ in sl.plan_tick([_t("reminded", 61)], NOW)], ["expire"])
