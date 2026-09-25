@@ -106,6 +106,38 @@ class ItemDropTests(unittest.TestCase):
         self.assertIsNone(staff_ops.item_drop(self._daily(20), asked_recently=["vadai"]))
 
 
+class TasteableTests(unittest.TestCase):
+    YES = ("AYAM BAWANG", "MAGGI GORENG TELUR MATA", "NAAN  MOZZERALA CHEESE", "TOSAI BIASA A",
+           "NASI G AYAM  MAMAK", "VADAI", "NASI LEMAK BUNGKUS", "TELUR SAMBAL", "ROTI TELUR",
+           "TEH TARIK", "TEH TARIK ( T )", "MILO", "KOPI O", "LIMAU  PANAS", "TEH  HALIA",
+           "NESCAFE( T )", "SOTONG  RM")
+    NO = ("PAPADOM", "NASI PUTIH", "LIMAU AIS ( T )", "MILO AIS ( T )", "TEHOLIMAUAIS(T)",
+          "EXTRA JOSS ANGUR( T )", "MINERAL WATER SMALL", "COKE TIN", "100 PLUS", "AIS KOSONG",
+          "AIR SUAM", "TELUR REBUS", "TELUR  MATA", "TELUR 1/2 MASAK", "TAMBAH NASI",
+          "EXTRA SAYUR", "ORANGE JUICE( T )", "SOYA TIN", "KACANG 2.00", "SAMOSA 0.80",
+          "CHILLI HIJAU", "SIRAP AIS ( T )")
+
+    def test_dishes_and_hot_drinks_only(self):
+        self.assertEqual([n for n in self.YES if not staff_ops.tasteable(n)], [])
+        self.assertEqual([n for n in self.NO if staff_ops.tasteable(n)], [])
+
+    def test_drop_skips_drinks_and_sides(self):
+        daily = {}
+        start = date(2026, 8, 20)
+        for i in range(21):
+            recent = i >= 18
+            daily[(start + timedelta(days=i)).isoformat()] = {
+                "LIMAU AIS ( T )": 10 if recent else 40,     # biggest drop, cold drink
+                "PAPADOM": 12 if recent else 40,            # plain side
+                "NASI LEMAK BIASA": 20 if recent else 40,   # cooked dish
+                "ROTI CANAI": 1000}
+        self.assertEqual(staff_ops.item_drop(daily)["item"], "NASI LEMAK BIASA")
+
+    def test_labels_never_show_money(self):
+        self.assertEqual(staff_ops.pos_item_label("SOTONG  RM"), "Sotong")
+        self.assertEqual(staff_ops.pos_item_label("KACANG 2.00"), "Kacang")
+
+
 class LimitTests(unittest.TestCase):
     def test_may_send(self):
         self.assertTrue(staff_ops.may_send("leftover", 0))

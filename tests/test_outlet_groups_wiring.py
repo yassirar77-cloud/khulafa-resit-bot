@@ -171,7 +171,7 @@ class StaffOpsWiring(unittest.TestCase):
         self.assertIn("staff_ops.may_send(", send)
         self.assertIn('"not_asked": True', send)
         upload = _block(self.src, "async def staff_ops_on_upload(")
-        self.assertIn('reaction="👌"', upload)
+        self.assertNotIn("set_message_reaction", upload)   # handle_photo reacts
         self.assertIn("_already_asked", upload)
 
 
@@ -186,3 +186,27 @@ class LeftoverSkipWiring(unittest.TestCase):
         helper = helper[:helper.index("\ndef ")]
         self.assertIn("kitchen_usage.PHASE_LEFT", helper)
         self.assertIn('"submitted"', helper)
+
+
+class QuietReceiptWiring(unittest.TestCase):
+    """Outlet groups: reactions on the bill photo instead of confirmation texts."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(REPO_ROOT, "bot.py")) as f:
+            cls.photo = _block(f.read(), "async def handle_photo(")
+
+    def test_reading_reaction_replaces_processing_text(self):
+        self.assertIn("quiet = cashier_names.outlet_for_chat(message.chat_id) is not None",
+                      self.photo)
+        self.assertIn('if not (quiet and await _react(context.bot, message, RECEIPT_READING)):\n'
+                      '        await message.reply_text("Processing receipt…")', self.photo)
+
+    def test_saved_reaction_replaces_confirmation(self):
+        self.assertIn("await _react(context.bot, message, RECEIPT_SAVED)", self.photo)
+        self.assertIn("if not saved_quietly:\n            await _reply_chunked(message, user_alert)",
+                      self.photo)
+
+    def test_problems_still_get_text(self):
+        self.assertIn('"Failed to read receipt. Try a clearer photo."', self.photo)
+        self.assertIn('"Saved OCR locally but database write failed."', self.photo)

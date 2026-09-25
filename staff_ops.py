@@ -18,7 +18,7 @@ docs/staff_questions_v2_review.md):
   on upload  minimarket a mini market / kedai runcit receipt   [buttons]
   Mon 11:05  praise     weekly praise in every group (info)
 
-Max 5 staff messages per group per day (reminders and 👌 reactions don't
+Max 5 staff messages per group per day (reminders and reactions on bills don't
 count): the tip and the sales note are skipped first, then extra
 invoice/mini-market questions (those still reach the director's summary).
 
@@ -210,13 +210,45 @@ def sales_signal(yesterday_count, usual_counts) -> dict | None:
 # --- item sales drop ---------------------------------------------------------------
 
 def pos_item_label(name) -> str:
-    """'MILO AIS ( T )' -> 'Milo Ais'; 'ROTI TELUR' -> 'Roti Telur'."""
-    s = re.sub(r"\(.*?\)", "", str(name or "")).strip()
+    """'MILO AIS ( T )' -> 'Milo Ais'; 'ROTI TELUR' -> 'Roti Telur';
+    'SOTONG  RM' -> 'Sotong' (never a price or 'RM' in a staff message)."""
+    s = re.sub(r"\(.*?\)", "", str(name or ""))
+    s = re.sub(r"\bRM\b.*$|\b\d+\.\d{2}\b", "", s, flags=re.IGNORECASE).strip()
     return re.sub(r"\s+", " ", s).title()
 
 
+# Taste checks are for cooked dishes and hand-made hot drinks only. The POS
+# categories are unreliable (vadai sits under SOFT DRINKS, a half-boiled egg
+# under MINUMAN), so this goes by the item name.
+_NOT_TASTEABLE = re.compile(
+    r"("
+    # cold drinks and juices
+    r"\bAIS\b|AIS\s*\(|AIS$|\bICE\b|SEJUK|JUICE|\bJUS\b|\bSIRAP\b|"
+    # bottled / canned / packet / plain water
+    r"MINERAL|\bTIN\b|\bCAN\b|BOTOL|100\s*PLUS|\bCOKE\b|COCA|PEPSI|SPRITE|F\s*&\s*N|"
+    r"EXTRA\s*JOSS|RED\s*BULL|\bSOYA\b|BOBO|\bYEO|DUTCH|\bAIR\s+(SUAM|PANAS|KOSONG)\b|"
+    # plain sides and add-ons
+    r"PAPADOM|PAPPADOM|NASI\s+PUTIH|NASI\s+KOSONG|^TAMBAH|^EXTRA|^EX\b|TAMPA|"
+    r"^TELUR\s*(REBUS|MASIN|MATA|DADAR|GORENG|1/2|SEPARUH)|CHILLI\s+HIJAU|^KUAH|^SAMBAL\b|"
+    r"^ACAR|KEROPOK|KERUPUK|"
+    # bought-in snacks, fruit, sweets, fees
+    r"KACANG|\bGULA\b|\bASAM\b|\bBUAH\b|^PISANG$|SAMOSA|KARIPAP|KARI\s*POP|DELIVERY"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def tasteable(name) -> bool:
+    """True for a cooked dish or a hand-made hot drink (teh tarik, kopi,
+    milo panas); False for cold drinks, bottled/canned items, papadom,
+    plain rice, eggs and other plain sides."""
+    s = re.sub(r"\s+", " ", str(name or "")).strip()
+    return bool(s) and not _NOT_TASTEABLE.search(s)
+
+
 def item_drop(daily: dict, *, asked_recently=()) -> dict | None:
-    """The one item whose plates dropped most, relative to the shop.
+    """The one item whose plates dropped most, relative to the shop. Only
+    cooked dishes and hand-made hot drinks count (``tasteable``).
 
     ``daily``: ``{business_date: {ITEM: qty}}`` for the last ~5 weeks of full
     days. Recent = the last 3 days, base = the days before. Rule: item down
@@ -235,7 +267,7 @@ def item_drop(daily: dict, *, asked_recently=()) -> dict | None:
     items = {i for d in days for i in daily[d]}
     best = None
     for item in items:
-        if item.upper() in asked:
+        if item.upper() in asked or not tasteable(item):
             continue
         base_vals = [daily[d].get(item, 0) for d in base]
         present = [v for v in base_vals if v]
