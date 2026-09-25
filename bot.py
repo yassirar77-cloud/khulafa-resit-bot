@@ -5604,7 +5604,11 @@ def _build_staff_preview(slot, today):
     shift = staff_chat.SLOTS[slot][0]
     bills_by_chat = {}
     if slot == "bills":
+        handed = _recent_handins(today)
         for entry in _gather_missing_bills(today=today)["entries"]:
+            outlet = cashier_names.outlet_for_chat(entry.get("chat_id"))
+            if (outlet, str(entry.get("supplier") or "").upper()) in handed:
+                continue    # the paper bill went to the boss; don't re-ask this week
             if entry.get("ask_today"):
                 bills_by_chat.setdefault(entry["chat_id"], []).append(entry)
     vocabulary = staff_chat.item_vocabulary()
@@ -5641,6 +5645,9 @@ def _build_staff_preview(slot, today):
         )
         row["result"] = result
         row["facts"] = facts
+        if slot == "bills":
+            row["thread_facts"] = {**facts, **staff_chat.bills_detail(
+                bills_by_chat.get(chat_id) or [])}
         rows.append(row)
         logs.append(staff_chat.log_row(
             slot, code, chat_id, cashier, language, facts, result,
@@ -5676,6 +5683,9 @@ async def run_staff_preview(application: Application, slot: str, *,
     the director asks with /staff_preview); the digest goes to the director
     chat only."""
     if not force and staff_chat.style() != staff_chat.PREVIEW:
+        return
+    if not force and not staff_live.slot_enabled(slot):
+        logger.info("staff chat %s: paused (STAFF_CHAT_SLOTS)", slot)
         return
     try:
         rows = await asyncio.to_thread(_build_staff_preview, slot, _my_today())
@@ -5756,44 +5766,145 @@ def _answers_today(today) -> dict:
     return out
 
 
+def _markup(thread_id, slot, facts, language):
+    rows = staff_live.keyboard(thread_id, staff_live.button_set(slot, facts), language)
+    if not rows:
+        return None
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(label, callback_data=data) for label, data in row]
+         for row in rows]
+    )
+
+
 async def _live_send_or_queue(application, row) -> str:
-    """Send a live check-in, or queue it behind the group's open question."""
+    """Send a live check-in with its tap-to-answer buttons. A question still
+    open in that group is closed as no-reply first — it never holds the new
+    one back (so nothing drifts past midnight)."""
     result, facts = row["result"], row.get("facts") or {}
     now = datetime.now(MALAYSIA_TZ)
     question_en = result.get("english") or staff_chat.render_template(
         row["slot"], "english", facts
     )
-    common = dict(
-        outlet_code=row["outlet_code"], chat_id=row["chat_id"], slot=row["slot"],
-        text=result["text"], question_en=question_en, facts=facts,
-        language=row["language"], cashier=row["cashier"], now=now,
-    )
     active = await asyncio.to_thread(_active_thread, row["chat_id"])
     if active:
-        await asyncio.to_thread(
-            lambda: supabase.table(staff_live.TABLE).insert(
-                staff_live.thread_row(status=staff_live.QUEUED, **common)
-            ).execute()
-        )
-        return "queued"
-    sent = await application.bot.send_message(chat_id=row["chat_id"], text=result["text"])
-    await asyncio.to_thread(
-        lambda: supabase.table(staff_live.TABLE).insert(
-            staff_live.thread_row(status=staff_live.OPEN, message_id=sent.message_id, **common)
-        ).execute()
+        await asyncio.to_thread(_thread_update, active["id"], {"status": staff_live.NO_REPLY})
+        logger.info("staff live: %s %s closed (no reply) for the %s check-in",
+                    row["outlet_code"], active.get("slot"), row["slot"])
+    record = staff_live.thread_row(
+        outlet_code=row["outlet_code"], chat_id=row["chat_id"], slot=row["slot"],
+        text=result["text"], question_en=question_en,
+        facts=row.get("thread_facts") or facts,
+        language=row["language"], cashier=row["cashier"], now=now,
+        status=staff_live.OPEN,
     )
+    inserted = await asyncio.to_thread(
+        lambda: supabase.table(staff_live.TABLE).insert(record).execute().data or []
+    )
+    thread_id = inserted[0]["id"] if inserted else None
+    try:
+        sent = await application.bot.send_message(
+            chat_id=row["chat_id"], text=result["text"],
+            reply_markup=_markup(thread_id, row["slot"], facts, row["language"]),
+        )
+    except Exception:
+        if thread_id is not None:
+            await asyncio.to_thread(_thread_update, thread_id, {"status": staff_live.DROPPED})
+        raise
+    if thread_id is not None:
+        await asyncio.to_thread(_thread_update, thread_id, {"message_id": sent.message_id})
     return "sent"
 
 
 async def _release(application, thread) -> None:
     sent = await application.bot.send_message(
-        chat_id=thread["chat_id"], text=thread["question_text"]
+        chat_id=thread["chat_id"], text=thread["question_text"],
+        reply_markup=_markup(thread["id"], thread.get("slot"), thread.get("facts"),
+                             thread.get("language")),
     )
     await asyncio.to_thread(_thread_update, thread["id"], {
         "status": staff_live.OPEN,
         "asked_at": datetime.now(MALAYSIA_TZ).isoformat(),
         "message_id": sent.message_id,
     })
+
+
+def _recent_handins(today) -> set[tuple[str, str]]:
+    """``{(outlet_code, SUPPLIER)}`` whose paper bill was handed to the boss
+    in the last 7 days — not asked about again this week."""
+    since = (today - timedelta(days=7)).isoformat()
+    try:
+        rows = (supabase.table("staff_bill_handins").select("outlet_code, supplier")
+                .gte("created_at", since).execute().data or [])
+    except Exception:
+        logger.exception("staff live: hand-in lookup failed")
+        return set()
+    return {(r.get("outlet_code"), str(r.get("supplier") or "").upper()) for r in rows}
+
+
+def _record_handin(thread) -> None:
+    row = staff_live.handin_row(thread)
+    if not row:
+        return
+    try:
+        supabase.table("staff_bill_handins").insert(row).execute()
+        logger.info("staff live: bill handed in %s %s", row["outlet_code"], row["supplier"])
+    except Exception:
+        logger.exception("staff live: hand-in save failed (thread %s)", thread.get("id"))
+
+
+async def handle_staff_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A tap on a check-in's button: it counts as the answer. "Change" /
+    "Problem" / "Something ran out" also ask for the details in text."""
+    query = update.callback_query
+    parsed = staff_live.parse_callback(query.data if query else None)
+    if not parsed:
+        return
+    thread_id, code = parsed
+    rows = await asyncio.to_thread(
+        lambda: _thread_select(id=thread_id).limit(1).execute().data or []
+    )
+    thread = rows[0] if rows else None
+    message = query.message
+    if not thread or not message or thread.get("chat_id") != message.chat_id:
+        with contextlib.suppress(Exception):
+            await query.answer()
+        return
+    language = thread.get("language")
+    now = datetime.now(MALAYSIA_TZ)
+    outcome = staff_live.tap_outcome(thread, code, now)
+    if outcome != "answer":
+        with contextlib.suppress(Exception):
+            await query.answer(staff_live.thanks_text(language))
+            await query.edit_message_reply_markup(reply_markup=None)
+        return
+    label = next((b.text for row in (message.reply_markup.inline_keyboard
+                                      if message.reply_markup else [])
+                  for b in row if b.callback_data == query.data), code)
+    fields = staff_live.tap_fields(code, label, now)
+    await asyncio.to_thread(_thread_update, thread_id, fields)
+    thread.update(fields)
+    logger.info("staff live: tap %s %s -> %s", thread.get("outlet_code"),
+                thread.get("slot"), code)
+    if fields["reply_status"] == staff_live.HANDED_IN:
+        await asyncio.to_thread(_record_handin, thread)
+    with contextlib.suppress(Exception):
+        await query.answer(staff_live.thanks_text(language))
+        await query.edit_message_reply_markup(reply_markup=None)
+    prompt = staff_live.detail_prompt(code, language) if fields["awaiting_detail"] else None
+    if prompt:
+        await context.bot.send_message(chat_id=message.chat_id, text=prompt,
+                                       reply_to_message_id=message.message_id,
+                                       allow_sending_without_reply=True)
+
+
+def _detail_thread(chat_id):
+    """The last answered question here that is waiting for typed details."""
+    rows = (
+        _thread_select(chat_id=chat_id, status=staff_live.ANSWERED)
+        .eq("awaiting_detail", True)
+        .order("answered_at", desc=True).limit(1).execute().data or []
+    )
+    return rows[0] if rows else None
 
 
 async def staff_live_tick(application: Application) -> None:
@@ -5854,6 +5965,11 @@ async def handle_staff_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if staff_live.asks_if_bot(message.text):
         await _answer_honestly(message, code)
         return
+    now = datetime.now(MALAYSIA_TZ)
+    waiting = await asyncio.to_thread(_detail_thread, message.chat_id)
+    if staff_live.awaiting_detail(waiting, now):
+        await _save_detail(waiting, message, code)
+        return
     thread = await asyncio.to_thread(_active_thread, message.chat_id)
     if not thread:
         return
@@ -5880,7 +5996,10 @@ async def handle_staff_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "reply_text": message.text,
         "reply_en": (parsed or {}).get("summary_en") or None,
         "reply_status": (parsed or {}).get("status") or "other",
+        "answer_source": "text",
     })
+    if (parsed or {}).get("status") == staff_live.HANDED_IN:
+        await asyncio.to_thread(_record_handin, thread)
     logger.info("staff live: answered %s %s (%s)", code, thread.get("slot"),
                 (parsed or {}).get("status"))
     # Order answers with items + quantities become order history, so the
@@ -5891,6 +6010,22 @@ async def handle_staff_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.info("staff live: saved %d order items for %s", saved, code)
     # One question at a time: the group's next queued check-in goes now.
     await staff_live_tick(context.application)
+
+
+async def _save_detail(thread, message, code) -> None:
+    """Typed details after a "Change" / "Problem" tap: read them, add them to
+    that answer, and learn any order items."""
+    parsed = await asyncio.to_thread(
+        staff_live.parse_reply, thread.get("question_en"), thread.get("question_text"),
+        message.text, staff_ai.complete_json,
+    )
+    await asyncio.to_thread(_thread_update, thread["id"], staff_live.detail_fields(
+        thread, message.text, (parsed or {}).get("summary_en")))
+    if thread.get("slot") == "order" and (parsed or {}).get("items"):
+        rows = staff_orders.rows_for_reply(thread, parsed["items"], message.text)
+        saved = await asyncio.to_thread(staff_orders.save, supabase, rows)
+        logger.info("staff live: saved %d order items for %s", saved, code)
+    logger.info("staff live: details for %s %s", code, thread.get("slot"))
 
 
 async def _answer_honestly(message, code) -> None:
@@ -7156,6 +7291,8 @@ async def run_bot() -> None:
                        handle_staff_reply),
         group=1,
     )
+    # Tap-to-answer buttons on live check-ins ("sc:<thread>:<choice>").
+    app.add_handler(CallbackQueryHandler(handle_staff_button, pattern=r"^sc:\d+:\w+$"))
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

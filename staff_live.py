@@ -45,12 +45,17 @@ QUEUED, OPEN, REMINDED = "queued", "open", "reminded"
 ANSWERED, NO_REPLY, DROPPED = "answered", "no_reply", "dropped"
 ACTIVE = (OPEN, REMINDED)
 
-REMIND_AFTER = timedelta(hours=1)
-EXPIRE_AFTER = timedelta(hours=2)
+# A question gets one reminder after 30 minutes and expires after an hour,
+# so it never holds the next check-in back (nothing drifts past midnight).
+REMIND_AFTER = timedelta(minutes=30)
+EXPIRE_AFTER = timedelta(hours=1)
+LATE_TAP_WINDOW = timedelta(hours=12)   # a button tap on an expired question still counts
+DETAIL_WINDOW = timedelta(hours=1)      # typed details after "Change" / "Problem"
 QUIET_START_HOUR, QUIET_END_HOUR = 0, 6
 SLOW_REPLY_MINUTES = 30
 
-REPLY_STATUSES = ("ok", "short", "finished", "problem", "order", "other")
+REPLY_STATUSES = ("ok", "short", "finished", "problem", "order", "handed_in", "other")
+HANDED_IN = "handed_in"
 
 
 def live_outlets() -> set[str]:
@@ -60,6 +65,18 @@ def live_outlets() -> set[str]:
 
 def is_live(outlet_code) -> bool:
     return str(outlet_code or "").strip().upper() in live_outlets()
+
+
+def enabled_slots() -> set[str]:
+    """Check-ins that run, from ``STAFF_CHAT_SLOTS`` (e.g. ``order,bills``).
+    Unset or empty = all of them."""
+    raw = os.environ.get("STAFF_CHAT_SLOTS") or ""
+    chosen = {s.strip().lower() for s in raw.split(",") if s.strip()}
+    return chosen or set(staff_chat.SLOTS)
+
+
+def slot_enabled(slot) -> bool:
+    return str(slot or "").lower() in enabled_slots()
 
 
 def _ts(value) -> datetime | None:
@@ -186,7 +203,9 @@ REPLY_PROMPT = (
     "- summary_en: one short English sentence of what they said.\n"
     "- status: ok (all fine / confirmed), short (something running low), "
     "finished (something sold out / finished), problem (broken, issue), "
-    "order (they gave order items/quantities), other.\n"
+    "order (they gave order items/quantities), handed_in (for a bill "
+    "question: they gave the paper bill to the boss / office instead of "
+    "uploading it), other.\n"
     "- items: ONLY when they list things to order with quantities, each "
     "{item, qty, unit}: item = the usual Malay name in English letters "
     "(ayam, ikan, sotong, udang, kambing, daging, telur, santan, roti, gas "
@@ -278,6 +297,214 @@ def decide_reply(thread: dict, parsed: dict | None, *, is_reply_to_question: boo
     if not parsed["clear"] and not thread.get("clarify_sent_at"):
         return "clarify"
     return "answer"
+
+
+# --- tap-to-answer buttons -------------------------------------------------------
+#
+# Every question carries buttons in the cashier's language. A tap counts as
+# the answer; "Change" / "Problem" / "Something ran out" also ask them to
+# type the details, which are added to the same answer.
+
+# code -> (reply_status, English summary, asks for typed details)
+CHOICES = {
+    "ok": ("ok", "OK", False),
+    "change": ("order", "Wants to change it", True),
+    "allok": ("ok", "All OK", False),
+    "problem": ("problem", "Has a problem", True),
+    "upload": ("ok", "Uploading the bill now", False),
+    "gave": (HANDED_IN, "Gave the bill to the boss", False),
+    "nobill": ("other", "No bill", False),
+    "ranout": ("finished", "Something ran out", True),
+    "enough": ("ok", "Enough", False),
+    "short": ("short", "Not enough", True),
+}
+
+# button set -> the choices it offers, in order
+BUTTON_SETS = {
+    "order": ("ok", "change"),
+    "status": ("allok", "problem"),
+    "bills": ("upload", "gave", "nobill"),
+    "lunch": ("ok", "ranout"),
+    "stock": ("enough", "short"),
+    "cook": ("ok", "change"),
+}
+
+_LABELS = {
+    "english": {"ok": "✅ OK", "change": "✏️ Change", "allok": "✅ All OK",
+                "problem": "⚠️ Problem", "upload": "✅ Uploading now",
+                "gave": "📦 Gave to boss", "nobill": "❌ No bill",
+                "ranout": "⚠️ Something ran out", "enough": "✅ Enough",
+                "short": "⚠️ Not enough"},
+    "bm": {"ok": "✅ OK", "change": "✏️ Tukar", "allok": "✅ Semua OK",
+           "problem": "⚠️ Ada masalah", "upload": "✅ Upload sekarang",
+           "gave": "📦 Dah bagi bos", "nobill": "❌ Tiada bil",
+           "ranout": "⚠️ Ada yang habis", "enough": "✅ Cukup",
+           "short": "⚠️ Tak cukup"},
+    "tamil": {"ok": "✅ சரி", "change": "✏️ மாத்தணும்", "allok": "✅ எல்லாம் சரி",
+              "problem": "⚠️ பிரச்சனை இருக்கு", "upload": "✅ இப்போ upload பண்றேன்",
+              "gave": "📦 Boss-கிட்ட கொடுத்தேன்", "nobill": "❌ Bill இல்ல",
+              "ranout": "⚠️ ஏதோ தீர்ந்துடுச்சு", "enough": "✅ போதும்",
+              "short": "⚠️ போதாது"},
+    "bengali": {"ok": "✅ Thik ache", "change": "✏️ Bodlabo", "allok": "✅ Shob thik",
+                "problem": "⚠️ Shomossha ache", "upload": "✅ Ekhon upload korchi",
+                "gave": "📦 Boss ke diyechi", "nobill": "❌ Bill nai",
+                "ranout": "⚠️ Kichu shesh", "enough": "✅ Jothesto",
+                "short": "⚠️ Kom ache"},
+    "indonesian": {"ok": "✅ Oke", "change": "✏️ Ganti", "allok": "✅ Semua aman",
+                   "problem": "⚠️ Ada masalah", "upload": "✅ Upload sekarang",
+                   "gave": "📦 Sudah kasih bos", "nobill": "❌ Tidak ada nota",
+                   "ranout": "⚠️ Ada yang habis", "enough": "✅ Cukup",
+                   "short": "⚠️ Kurang"},
+}
+
+_DETAIL_PROMPT = {
+    "change": {
+        "english": "OK, please type the changes (item and quantity).",
+        "bm": "Ok, taip apa nak tukar (barang & berapa).",
+        "tamil": "சரி, என்ன மாத்தணும்னு type பண்ணுங்க (சாமான், அளவு).",
+        "bengali": "Thik ache, ki bodlaben likhe din (jinish ar koto).",
+        "indonesian": "Oke, ketik apa yang mau diganti (barang & jumlah).",
+    },
+    "problem": {
+        "english": "What's the problem? Please type a few words.",
+        "bm": "Apa masalahnya? Taip sikit ya.",
+        "tamil": "என்ன பிரச்சனை? கொஞ்சம் type பண்ணுங்க.",
+        "bengali": "Ki shomossha? Ektu likhe din.",
+        "indonesian": "Masalahnya apa? Tolong ketik ya.",
+    },
+    "ranout": {
+        "english": "What ran out? Please type it.",
+        "bm": "Apa yang habis? Taip ya.",
+        "tamil": "என்ன தீர்ந்துச்சு? Type பண்ணுங்க.",
+        "bengali": "Ki shesh hoyeche? Likhe din.",
+        "indonesian": "Apa yang habis? Tolong ketik ya.",
+    },
+    "short": {
+        "english": "What is not enough? Please type it.",
+        "bm": "Apa yang tak cukup? Taip ya.",
+        "tamil": "எது போதாது? Type பண்ணுங்க.",
+        "bengali": "Ki kom ache? Likhe din.",
+        "indonesian": "Apa yang kurang? Tolong ketik ya.",
+    },
+}
+
+_THANKS = {"english": "Noted, thank you 🙏", "bm": "Baik, terima kasih 🙏",
+           "tamil": "சரி, நன்றி 🙏", "bengali": "Thik ache, dhonnobad 🙏",
+           "indonesian": "Oke, terima kasih 🙏"}
+
+
+def _lang(language: str) -> str:
+    """Buttons are short: BM+Tamil cashiers get the BM labels."""
+    return language if language in _LABELS else "bm"
+
+
+def button_set(slot: str, facts: dict | None) -> str | None:
+    """Which buttons a question gets. The open "what do you need tomorrow?"
+    order question has none — the answer has to be typed."""
+    if slot == "order":
+        return None if (facts or {}).get("ask") else "order"
+    if slot in ("open", "night"):
+        return "status"
+    return slot if slot in BUTTON_SETS else None
+
+
+def keyboard(thread_id, set_key: str | None, language: str) -> list[list[tuple[str, str]]]:
+    """Rows of ``(label, callback_data)``; ``[]`` for no buttons. Kept free of
+    Telegram types so it can be tested; bot.py builds the markup."""
+    if not set_key or thread_id is None:
+        return []
+    labels = _LABELS[_lang(language)]
+    buttons = [(labels[c], f"sc:{thread_id}:{c}") for c in BUTTON_SETS[set_key]]
+    # Three bill buttons stack; two sit side by side.
+    return [[b] for b in buttons] if len(buttons) > 2 else [buttons]
+
+
+def parse_callback(data) -> tuple[int, str] | None:
+    parts = str(data or "").split(":")
+    if len(parts) != 3 or parts[0] != "sc" or parts[2] not in CHOICES:
+        return None
+    try:
+        return int(parts[1]), parts[2]
+    except ValueError:
+        return None
+
+
+def tap_outcome(thread: dict, code: str, now: datetime) -> str:
+    """What a tap on ``thread`` does: 'answer', 'already' (answered before)
+    or 'stale' (dropped, or expired too long ago)."""
+    status = thread.get("status")
+    if status in ACTIVE:
+        return "answer"
+    if status == ANSWERED:
+        return "already"
+    asked = _ts(thread.get("asked_at"))
+    if status == NO_REPLY and asked and now - asked <= LATE_TAP_WINDOW:
+        return "answer"
+    return "stale"
+
+
+def tap_fields(code: str, label: str, now: datetime) -> dict:
+    """The thread update for a tap."""
+    reply_status, summary, detail = CHOICES[code]
+    return {
+        "status": ANSWERED,
+        "answered_at": now.isoformat(),
+        "reply_text": f"[button] {label}",
+        "reply_en": summary,
+        "reply_status": reply_status,
+        "answer_source": "button",
+        "awaiting_detail": detail,
+    }
+
+
+def detail_prompt(code: str, language: str) -> str | None:
+    table = _DETAIL_PROMPT.get(code)
+    if not table:
+        return None
+    if language == staff_chat.BM_TAMIL:
+        return f"{table['bm']}\n{table['tamil']}"
+    return table.get(language) or table["bm"]
+
+
+def thanks_text(language: str) -> str:
+    return _THANKS.get(_lang(language), _THANKS["bm"])
+
+
+def detail_fields(thread: dict, text: str, summary_en: str | None) -> dict:
+    """Typed details after a Change / Problem tap, added to the answer."""
+    base = thread.get("reply_en") or ""
+    detail = (summary_en or text or "").strip()
+    return {
+        "reply_text": f"{thread.get('reply_text') or ''}\n{text}".strip(),
+        "reply_en": f"{base}: {detail}" if base else detail,
+        "awaiting_detail": False,
+    }
+
+
+def awaiting_detail(thread: dict | None, now: datetime) -> bool:
+    if not thread or not thread.get("awaiting_detail"):
+        return False
+    answered = _ts(thread.get("answered_at"))
+    return bool(answered and now - answered <= DETAIL_WINDOW)
+
+
+def handin_row(thread: dict) -> dict | None:
+    """``staff_bill_handins`` row for a bill question answered "gave it to
+    the boss"; None when the thread isn't one."""
+    if thread.get("slot") != "bills":
+        return None
+    facts = thread.get("facts") or {}
+    supplier = facts.get("supplier_full") or facts.get("supplier")
+    if not supplier:
+        return None
+    return {
+        "outlet_code": thread.get("outlet_code"),
+        "supplier": supplier,
+        "last_bill": facts.get("last_iso"),
+        "days_missing": int(facts["days"]) if str(facts.get("days") or "").isdigit() else None,
+        "cashier": thread.get("cashier"),
+        "thread_id": thread.get("id"),
+    }
 
 
 # --- director's morning summary --------------------------------------------------
@@ -380,6 +607,17 @@ def format_morning_summary(threads: list[dict], label_for=None) -> str:
     by_slot = _by_slot(threads)
     if by_slot:
         lines += ["", "By check-in time (all outlets):"] + [f"• {r}" for r in by_slot]
+    handed = [t for t in threads if t.get("status") == ANSWERED
+              and t.get("slot") == "bills" and t.get("reply_status") == HANDED_IN]
+    if handed:
+        lines += ["", "📦 Bills handed in, not uploaded — please check the paper bills:"]
+        for t in sorted(handed, key=lambda t: str(t.get("answered_at"))):
+            f = t.get("facts") or {}
+            last = f" (last upload {f['last']})" if f.get("last") else ""
+            lines.append(
+                f"• {label(t.get('outlet_code'))}: {f.get('supplier') or 'supplier?'}{last}"
+                f" — {t.get('cashier') or 'cashier'}, {_local_hhmm(t.get('answered_at'))}"
+            )
     issues = [t for t in threads if t.get("status") == ANSWERED
               and t.get("reply_status") in ("short", "finished", "problem")]
     if issues:

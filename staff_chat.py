@@ -457,6 +457,17 @@ def bills_facts(entries) -> dict | None:
     }
 
 
+def bills_detail(entries) -> dict:
+    """Stored with the bills question (never shown to the writer): the full
+    supplier name and last-bill date, for a "gave it to the boss" record."""
+    rows = [e for e in entries or [] if e.get("supplier") and e.get("last_date")]
+    if not rows:
+        return {}
+    rows.sort(key=lambda e: -int(e.get("days_overdue") or 0))
+    return {"supplier_full": str(rows[0]["supplier"]),
+            "last_iso": rows[0]["last_date"].isoformat()}
+
+
 _COMPANY_SUFFIX = re.compile(
     r"\s*(\(M\)|\bSDN\.?\s*BHD\b\.?|\bBHD\b\.?)", re.IGNORECASE
 )
