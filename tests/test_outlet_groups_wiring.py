@@ -124,8 +124,8 @@ class StaffLiveWiring(unittest.TestCase):
                       self.src)
         send = _block(self.src, "async def _live_send_or_queue(")
         self.assertIn("reply_markup=_markup(thread_id", send)
-        # The question still open is closed, never queued behind.
-        self.assertIn('{"status": staff_live.NO_REPLY}', send)
+        # Questions run side by side now (staff_ops): nothing is closed early.
+        self.assertNotIn('{"status": staff_live.NO_REPLY}', send)
         tap = _block(self.src, "async def handle_staff_button(")
         self.assertIn("staff_live.tap_outcome(", tap)
         self.assertIn("_record_handin", tap)
@@ -145,3 +145,31 @@ class StaffLiveWiring(unittest.TestCase):
         self.assertIn('CommandHandler("staff_samples", staff_samples_command)', self.src)
         self.assertIn("is_reviewer(_command_owner_id(update))",
                       _block(self.src, "async def staff_samples_command("))
+
+
+class StaffOpsWiring(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(REPO_ROOT, "bot.py")) as f:
+            cls.src = f.read()
+
+    def test_jobs_and_command(self):
+        for slot in ("leftover", "sales", "wastage", "afternoon", "praise"):
+            self.assertIn(f'("{slot}", {{', self.src)
+        self.assertIn('id=f"staff_ops_{_slot}"', self.src)
+        self.assertIn('CommandHandler("draft", draft_command)', self.src)
+
+    def test_upload_hooks(self):
+        photo = _block(self.src, "async def handle_photo(")
+        self.assertIn("supplier=False)", photo)      # mini market, any receipt type
+        self.assertIn("supplier=True)", photo)       # invoice check, after item_prices
+        self.assertLess(photo.index("supplier=False)"), photo.index("if receipt_type == ReceiptType.STAFF_ADVANCE:"))
+        self.assertLess(photo.index("save_item_prices,"), photo.index("supplier=True)"))
+
+    def test_daily_limit_and_reaction(self):
+        send = _block(self.src, "async def _ops_send(")
+        self.assertIn("staff_ops.may_send(", send)
+        self.assertIn('"not_asked": True', send)
+        upload = _block(self.src, "async def staff_ops_on_upload(")
+        self.assertIn('reaction="👌"', upload)
+        self.assertIn("_already_asked", upload)

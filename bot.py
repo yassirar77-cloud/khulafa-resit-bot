@@ -110,6 +110,7 @@ import manager_registration
 import staff_chat
 import staff_ai
 import staff_live
+import staff_ops
 import staff_orders
 from outlet_group_bot import OutletGroupBot
 import key_stock_daily
@@ -1763,6 +1764,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     receipt_id = stored.get("id")
     receipt_type = classification.receipt_type
 
+    # Staff questions v2: a mini market buy gets one "why?" in the group,
+    # whatever the receipt was classified as (most come in as UNKNOWN).
+    if staff_ops.is_minimarket(stored.get("merchant")):
+        await staff_ops_on_upload(context.application, stored, message, supplier=False)
+
     if receipt_type == ReceiptType.STAFF_ADVANCE:
         try:
             await asyncio.to_thread(
@@ -1871,6 +1877,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception as e:
         logger.warning("Price aggregation failed (non-critical): %s", e)
     # === End price aggregation ===
+
+    # Staff questions v2: invoice far above the outlet's usual -> "why?";
+    # a normal one gets a 👌 (staff_ops.invoice_flag).
+    if not staff_ops.is_minimarket(stored.get("merchant")):
+        await staff_ops_on_upload(context.application, stored, message, supplier=True)
 
     # === Price spike detection (PR #25) ===
     # Compare each just-saved item against historical averages (merchant
@@ -5733,12 +5744,18 @@ def _thread_select(**eq):
     return q
 
 
-def _active_thread(chat_id):
+def _active_thread(chat_id, reply_to_message_id=None):
+    """The open question a message answers: the one it replies to, else the
+    latest open one in that group."""
     rows = (
         _thread_select(chat_id=chat_id)
         .in_("status", list(staff_live.ACTIVE))
-        .order("asked_at", desc=True).limit(1).execute().data or []
+        .order("asked_at", desc=True).limit(10).execute().data or []
     )
+    if reply_to_message_id is not None:
+        for r in rows:
+            if r.get("message_id") == reply_to_message_id:
+                return r
     return rows[0] if rows else None
 
 
@@ -5777,19 +5794,16 @@ def _markup(thread_id, slot, facts, language):
 
 
 async def _live_send_or_queue(application, row) -> str:
-    """Send a live check-in with its tap-to-answer buttons. A question still
-    open in that group is closed as no-reply first — it never holds the new
-    one back (so nothing drifts past midnight)."""
+    """Send a live check-in with its tap-to-answer buttons. Other questions
+    may still be open; each expires on its own. Not limited: the 21:05 bills
+    question always goes (staff_ops.may_send leaves room for it)."""
     result, facts = row["result"], row.get("facts") or {}
     now = datetime.now(MALAYSIA_TZ)
     question_en = result.get("english") or staff_chat.render_template(
         row["slot"], "english", facts
     )
-    active = await asyncio.to_thread(_active_thread, row["chat_id"])
-    if active:
-        await asyncio.to_thread(_thread_update, active["id"], {"status": staff_live.NO_REPLY})
-        logger.info("staff live: %s %s closed (no reply) for the %s check-in",
-                    row["outlet_code"], active.get("slot"), row["slot"])
+    # Other questions may still be open (the 03:00 leftover, an invoice
+    # question): each has its own buttons and expires on its own after an hour.
     record = staff_live.thread_row(
         outlet_code=row["outlet_code"], chat_id=row["chat_id"], slot=row["slot"],
         text=result["text"], question_en=question_en,
@@ -5970,10 +5984,11 @@ async def handle_staff_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if staff_live.awaiting_detail(waiting, now):
         await _save_detail(waiting, message, code)
         return
-    thread = await asyncio.to_thread(_active_thread, message.chat_id)
+    reply_to = message.reply_to_message
+    thread = await asyncio.to_thread(
+        _active_thread, message.chat_id, reply_to.message_id if reply_to else None)
     if not thread:
         return
-    reply_to = message.reply_to_message
     is_reply = bool(reply_to and reply_to.message_id == thread.get("message_id"))
     parsed = await asyncio.to_thread(
         staff_live.parse_reply, thread.get("question_en"), thread.get("question_text"),
@@ -6035,6 +6050,425 @@ async def _answer_honestly(message, code) -> None:
     logger.info("staff live: answered 'are you a bot?' honestly in %s", code)
 
 
+# === Staff questions v2 (staff_ops) ==========================================
+# Cost, wastage and food quality in the live outlet groups: 03:00 leftover,
+# 09:00 sales note, 10:30 wastage, 16:00 taste check or tip, invoice and mini
+# market questions on upload, Monday praise. Max 5 staff messages per group
+# per day (staff_ops.may_send). Each slot can be paused with STAFF_CHAT_SLOTS.
+
+def _ops_db() -> Client:
+    """A fresh client per scheduled run: the shared one is not safe to use
+    from two worker threads at once (see _sales_supabase)."""
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
+def _ops_ready(slot) -> bool:
+    return (staff_chat.style() != staff_chat.CLASSIC
+            and bool(staff_live.live_outlets()) and staff_live.slot_enabled(slot))
+
+
+def _outlet_label(code) -> str:
+    import outlet_mapping
+    return "D.U" if str(code).upper() == "DAMANSARA" else outlet_mapping.outlet_display_name(code)
+
+
+def _ops_groups() -> list[tuple[int, str]]:
+    """``[(chat_id, registry_code)]`` of the live outlet groups."""
+    cashier_names.refresh()
+    return [(chat_id, code) for chat_id, code in
+            sorted(cashier_names.group_chats().items(), key=lambda kv: kv[1])
+            if staff_live.is_live(code)]
+
+
+def _ops_threads_since(db, since_iso, columns="*"):
+    return fetch_all_pages(
+        lambda: db.table(staff_live.TABLE).select(columns)
+        .gte("created_at", since_iso).order("id")
+    )
+
+
+def _ops_counts(db, code, now) -> tuple[int, int]:
+    since = datetime.combine(now.date(), datetime.min.time(), MALAYSIA_TZ).isoformat()
+    rows = (db.table(staff_live.TABLE).select("outlet_code, slot, status, asked_at")
+            .eq("outlet_code", code).gte("asked_at", since).execute().data or [])
+    return staff_ops.count_today(rows, code, now.date(), MALAYSIA_TZ)
+
+
+async def _ops_send(application, db, *, code, chat_id, slot, text, question_en,
+                    facts, info=False, record_if_capped=False, reply_to=None) -> str:
+    """Send one staff_ops message to a live group (with its buttons), within
+    the daily limit. Returns sent / capped / failed."""
+    now = datetime.now(MALAYSIA_TZ)
+    shift, _day = cashier_names.shift_at(now)
+    language = cashier_names.language_for(code, shift)
+    cashier = cashier_names.name_for(code, shift)
+    sent_today, events = await asyncio.to_thread(_ops_counts, db, code, now)
+    if not staff_ops.may_send(slot, sent_today, events):
+        logger.info("staff ops: %s %s not sent (daily limit: %d sent, %d events)",
+                    code, slot, sent_today, events)
+        if record_if_capped:
+            record = staff_live.thread_row(
+                outlet_code=code, chat_id=chat_id, slot=slot, text=text,
+                question_en=question_en, facts={**facts, "not_asked": True},
+                language=language, cashier=cashier, now=now, status=staff_live.DROPPED)
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(
+                    lambda: db.table(staff_live.TABLE).insert(record).execute())
+        return "capped"
+    record = staff_live.thread_row(
+        outlet_code=code, chat_id=chat_id, slot=slot, text=text, question_en=question_en,
+        facts=facts, language=language, cashier=cashier, now=now,
+        status=staff_live.INFO if info else staff_live.OPEN)
+    record["asked_at"] = now.isoformat()
+    inserted = await asyncio.to_thread(
+        lambda: db.table(staff_live.TABLE).insert(record).execute().data or [])
+    thread_id = inserted[0]["id"] if inserted else None
+    markup = None if info else _markup(thread_id, slot, facts, language)
+    try:
+        sent = await application.bot.send_message(
+            chat_id=chat_id, text=text, reply_markup=markup,
+            reply_to_message_id=reply_to, allow_sending_without_reply=True)
+    except Exception:
+        logger.exception("staff ops: send failed (%s %s)", code, slot)
+        if thread_id is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(lambda: db.table(staff_live.TABLE).update(
+                    {"status": staff_live.DROPPED}).eq("id", thread_id).execute())
+        return "failed"
+    if thread_id is not None:
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(lambda: db.table(staff_live.TABLE).update(
+                {"message_id": sent.message_id}).eq("id", thread_id).execute())
+    logger.info("staff ops: sent %s %s", code, slot)
+    return "sent"
+
+
+def _cashier_language(code, now=None) -> str:
+    shift, _day = cashier_names.shift_at(now or datetime.now(MALAYSIA_TZ))
+    return cashier_names.language_for(code, shift)
+
+
+# --- sales data -------------------------------------------------------------
+
+def _summary_items(db, summary_ids) -> dict:
+    """``{summary_id: {ITEM: qty}}`` from the POS full-day item list."""
+    out: dict = {}
+    ids = list(summary_ids)
+    for i in range(0, len(ids), 20):
+        chunk = ids[i:i + 20]
+        rows = fetch_all_pages(
+            lambda: db.table("sales_daily_itemwise").select("summary_id, item_name, qty")
+            .in_("summary_id", chunk).order("id"))
+        for r in rows:
+            name = str(r.get("item_name") or "").strip().upper()
+            if name:
+                d = out.setdefault(r["summary_id"], {})
+                d[name] = d.get(name, 0.0) + float(r.get("qty") or 0)
+    return out
+
+
+def _full_day_counts(db, code, dates) -> dict:
+    """``{date: items sold}`` from the POS full-day (D) reports."""
+    rows = (db.table("sales_daily_summary").select("id, business_date")
+            .eq("outlet_code", f"D-{code}")
+            .in_("business_date", [d.isoformat() for d in dates])
+            .execute().data or [])
+    items = _summary_items(db, [r["id"] for r in rows])
+    out: dict = {}
+    for r in rows:
+        d = date.fromisoformat(str(r["business_date"])[:10])
+        out[d] = out.get(d, 0.0) + sum(items.get(r["id"], {}).values())
+    return {d: v for d, v in out.items() if v > 0}
+
+
+def _day_shift_counts(db, code, dates) -> dict:
+    """``{date: items sold}`` from the day-shift (S) reports — the latest
+    report per day when the POS sent one twice."""
+    rows = (db.table("sales_daily").select("id, shift_business_date")
+            .eq("outlet_code", f"S-{code}").eq("shift_type", "day")
+            .in_("shift_business_date", [d.isoformat() for d in dates])
+            .execute().data or [])
+    latest: dict = {}
+    for r in rows:
+        d = date.fromisoformat(str(r["shift_business_date"])[:10])
+        if d not in latest or r["id"] > latest[d]:
+            latest[d] = r["id"]
+    if not latest:
+        return {}
+    ids = list(latest.values())
+    items = fetch_all_pages(
+        lambda: db.table("sales_items").select("sales_daily_id, qty")
+        .in_("sales_daily_id", ids).order("id"))
+    per_id: dict = {}
+    for r in items:
+        per_id[r["sales_daily_id"]] = per_id.get(r["sales_daily_id"], 0.0) + float(r.get("qty") or 0)
+    return {d: per_id.get(i, 0.0) for d, i in latest.items() if per_id.get(i)}
+
+
+def _sales_note(db, code, today) -> dict | None:
+    """Yesterday vs the usual same weekday. The full-day report when it is
+    already in (by 09:00), else the day-shift report."""
+    yesterday = today - timedelta(days=1)
+    dates = [yesterday] + [yesterday - timedelta(weeks=k) for k in range(1, 7)]
+    full_day = True
+    counts = _full_day_counts(db, code, dates)
+    if yesterday not in counts:
+        full_day = False
+        counts = _day_shift_counts(db, code, dates)
+    if yesterday not in counts:
+        return None
+    signal = staff_ops.sales_signal(counts[yesterday],
+                                    [v for d, v in counts.items() if d != yesterday])
+    if not signal:
+        return None
+    return {**signal, "full_day": full_day, "weekday": yesterday.weekday(),
+            "date": yesterday.isoformat()}
+
+
+def _item_drop_for(db, code, today) -> dict | None:
+    """The one menu item selling clearly less (full-day reports, ~3 weeks)."""
+    start = today - timedelta(days=26)
+    rows = (db.table("sales_daily_summary").select("id, business_date")
+            .eq("outlet_code", f"D-{code}").gte("business_date", start.isoformat())
+            .execute().data or [])
+    if not rows:
+        return None
+    latest = max(date.fromisoformat(str(r["business_date"])[:10]) for r in rows)
+    if (today - latest).days > 4:
+        return None     # POS reports stale — nothing trustworthy to say
+    items = _summary_items(db, [r["id"] for r in rows])
+    daily: dict = {}
+    for r in rows:
+        d = str(r["business_date"])[:10]
+        day = daily.setdefault(d, {})
+        for name, qty in items.get(r["id"], {}).items():
+            day[name] = day.get(name, 0.0) + qty
+    since = (today - timedelta(days=staff_ops.DROP_REPEAT_DAYS)).isoformat()
+    asked = (db.table(staff_live.TABLE).select("facts")
+             .eq("outlet_code", code).eq("slot", "afternoon").gte("created_at", since)
+             .execute().data or [])
+    recent = [(a.get("facts") or {}).get("item") for a in asked]
+    return staff_ops.item_drop(daily, asked_recently=[r for r in recent if r])
+
+
+# --- scheduled slots ----------------------------------------------------------
+
+async def run_staff_ops(application: Application, slot: str) -> None:
+    """03:00 leftover · 09:00 sales · 10:30 wastage · 16:00 afternoon ·
+    Mon 11:05 praise, for every live outlet group."""
+    if not _ops_ready(slot):
+        logger.info("staff ops %s: off (style / live outlets / STAFF_CHAT_SLOTS)", slot)
+        return
+    today = _my_today()
+    db = await asyncio.to_thread(_ops_db)
+    groups = await asyncio.to_thread(_ops_groups)
+    praise = {}
+    if slot == "praise":
+        since = datetime.combine(today - timedelta(days=7), datetime.min.time(),
+                                 MALAYSIA_TZ).isoformat()
+        week = await asyncio.to_thread(_ops_threads_since, db, since)
+        praise = staff_ops.weekly_winners(week, [c for _chat, c in groups], _outlet_label)
+        if not praise:
+            logger.info("staff ops praise: no winners this week")
+            return
+    outcomes: dict = {}
+    for chat_id, code in groups:
+        language = _cashier_language(code)
+        try:
+            msg = await asyncio.to_thread(_ops_message, db, slot, code, today, language, praise)
+        except Exception:
+            logger.exception("staff ops: %s facts failed for %s", slot, code)
+            outcomes[code] = "failed"
+            continue
+        if not msg:
+            outcomes[code] = "nothing"
+            continue
+        outcomes[code] = await _ops_send(application, db, code=code, chat_id=chat_id,
+                                         slot=slot, **msg)
+    logger.info("staff ops %s: %s", slot,
+                ", ".join(f"{c} {o}" for c, o in sorted(outcomes.items())))
+
+
+def _ops_message(db, slot, code, today, language, praise) -> dict | None:
+    """``{text, question_en, facts, info}`` for one group, or None."""
+    if slot == "leftover":
+        return {"text": staff_ops.leftover_text(today, language),
+                "question_en": staff_ops.leftover_text(today, "english"), "facts": {}}
+    if slot == "wastage":
+        return {"text": staff_ops.wastage_text(language),
+                "question_en": staff_ops.wastage_text("english"), "facts": {}}
+    if slot == "sales":
+        note = _sales_note(db, code, today)
+        if not note:
+            return None
+        args = (note, note["weekday"], )
+        return {"text": staff_ops.sales_text(*args, language, full_day=note["full_day"]),
+                "question_en": staff_ops.sales_text(*args, "english", full_day=note["full_day"]),
+                "facts": note, "info": True}
+    if slot == "afternoon":
+        drop = _item_drop_for(db, code, today)
+        if drop:
+            facts = {k: drop[k] for k in ("item", "label", "drop_pct", "shop_pct")}
+            return {"text": staff_ops.itemdrop_text(drop["label"], language),
+                    "question_en": staff_ops.itemdrop_text(drop["label"], "english"),
+                    "facts": facts, "record_if_capped": True}
+        return {"text": staff_ops.tip_text(today, language),
+                "question_en": staff_ops.tip_text(today, "english"),
+                "facts": {"tip": staff_ops.tip_index(today)}, "info": True}
+    if slot == "praise":
+        return {"text": staff_ops.praise_text(praise, language),
+                "question_en": staff_ops.praise_text(praise, "english"),
+                "facts": praise, "info": True}
+    return None
+
+
+# --- on upload: invoice check and mini market ----------------------------------
+
+def _invoice_inputs(db, receipt_id, chat_id, receipt_date):
+    """This invoice's lines and the outlet's other purchases (8 weeks)."""
+    lines_rows = (db.table("item_prices").select("canonical_item, qty")
+                  .eq("receipt_id", receipt_id).execute().data or [])
+    lines: dict = {}
+    for r in lines_rows:
+        item = r.get("canonical_item")
+        if item:
+            lines[item] = lines.get(item, 0.0) + float(r.get("qty") or 0)
+    rdate = date.fromisoformat(str(receipt_date)[:10])
+    start = (rdate - timedelta(weeks=8)).isoformat()
+    history = fetch_all_pages(
+        lambda: db.table("item_prices")
+        .select("receipt_id, receipt_date, merchant, canonical_item, qty")
+        .eq("chat_id", chat_id).gte("receipt_date", start)
+        .lte("receipt_date", rdate.isoformat()).neq("receipt_id", receipt_id).order("id"))
+    days = {str(h.get("receipt_date"))[:10] for h in history}
+    return ([{"canonical_item": k, "qty": v} for k, v in lines.items()], history, len(days))
+
+
+def _already_asked(db, receipt_id) -> bool:
+    rows = (db.table(staff_live.TABLE).select("id")
+            .eq("facts->>receipt_id", str(receipt_id)).limit(1).execute().data or [])
+    return bool(rows)
+
+
+def _fresh_receipt(receipt_date, days: int = 3) -> bool:
+    try:
+        d = date.fromisoformat(str(receipt_date)[:10])
+    except ValueError:
+        return False
+    return (_my_today() - d).days <= days
+
+
+async def staff_ops_on_upload(application, stored: dict, message, *, supplier: bool) -> None:
+    """After a bill is saved in a live outlet group: a mini market receipt
+    gets "why from the mini market?"; a supplier invoice far above the
+    outlet's usual (or a rarely bought item) gets "why?"; a normal supplier
+    invoice gets a 👌. Never breaks the receipt pipeline."""
+    try:
+        code = cashier_names.outlet_for_chat(message.chat_id)
+        receipt_id = stored.get("id")
+        if not code or not staff_live.is_live(code) or receipt_id is None:
+            return
+        if staff_chat.style() == staff_chat.CLASSIC:
+            return
+        merchant = stored.get("merchant")
+        if not _fresh_receipt(stored.get("receipt_date")):
+            return
+        db = supabase
+        if staff_ops.is_minimarket(merchant):
+            if not staff_live.slot_enabled("minimarket"):
+                return
+            if await asyncio.to_thread(_already_asked, db, receipt_id):
+                return
+            names = [i.get("name") or i.get("description") or ""
+                     for i in (stored.get("items") or []) if isinstance(i, dict)]
+            shop = staff_ops.shop_name(merchant)
+            items = staff_ops.minimarket_items(names)
+            language = _cashier_language(code)
+            await _ops_send(
+                application, db, code=code, chat_id=message.chat_id, slot="minimarket",
+                text=staff_ops.minimarket_text(shop, items, language),
+                question_en=staff_ops.minimarket_text(shop, items, "english"),
+                facts={"receipt_id": receipt_id, "shop": shop, "items": items},
+                record_if_capped=True, reply_to=message.message_id)
+            return
+        if not supplier or not staff_live.slot_enabled("invoice"):
+            return
+        if await asyncio.to_thread(_already_asked, db, receipt_id):
+            return
+        lines, history, outlet_days = await asyncio.to_thread(
+            _invoice_inputs, db, receipt_id, message.chat_id, stored.get("receipt_date"))
+        if not lines:
+            return
+        flag = staff_ops.invoice_flag(lines, history, receipt_date=stored.get("receipt_date"),
+                                      merchant=merchant, outlet_days=outlet_days)
+        if not flag:
+            with contextlib.suppress(Exception):
+                await application.bot.set_message_reaction(
+                    chat_id=message.chat_id, message_id=message.message_id, reaction="👌")
+            return
+        import order_items
+        supplier_name = staff_chat._short_supplier(merchant) or str(merchant or "").title()
+        language = _cashier_language(code)
+        facts = {"receipt_id": receipt_id, "kind": flag["kind"], "item": flag["item"],
+                 "item_label": order_items.display_name(flag["item"]),
+                 "qty_text": staff_ops.qty_text(flag["qty"], flag["item"]),
+                 "usual_text": staff_ops.qty_text(flag.get("usual") or 0, flag["item"]),
+                 "supplier": supplier_name}
+        await _ops_send(
+            application, db, code=code, chat_id=message.chat_id, slot="invoice",
+            text=staff_ops.invoice_text(flag, supplier_name, language),
+            question_en=staff_ops.invoice_text(flag, supplier_name, "english"),
+            facts=facts, record_if_capped=True, reply_to=message.message_id)
+    except Exception:
+        logger.exception("staff ops: upload check failed (receipt %s)", stored.get("id"))
+
+
+# --- /draft <OUTLET> --------------------------------------------------------------
+
+def _draft_text(code, today) -> str:
+    codes = staff_chat.data_codes(code)
+    due = today + timedelta(days=1)
+    rows = (supabase.table("order_drafts").select("item, qty, pack, supplier, outlet, due_date")
+            .in_("outlet", codes).eq("due_date", due.isoformat()).execute().data or [])
+    saved = bool(rows)
+    if not rows:
+        rows = _unsaved_order_items(today).get_codes(codes)
+    if not rows:
+        return f"No order draft for {_outlet_label(code)} for {due.isoformat()}."
+    by_supplier: dict = {}
+    for r in rows:
+        by_supplier.setdefault(r.get("supplier") or "—", []).append(r)
+    lines = [f"🧾 Order draft — {_outlet_label(code)} for {due.isoformat()}"
+             + ("" if saved else " (not saved yet)"), ""]
+    for sup in sorted(by_supplier):
+        lines.append(f"{sup}:")
+        for r in by_supplier[sup]:
+            qty = staff_chat.fmt_qty(r.get("qty"), None) or r.get("qty")
+            pack = f" {r['pack']}" if r.get("pack") else ""
+            lines.append(f"  • {r.get('item')} {qty}{pack}")
+    return "\n".join(lines)
+
+
+async def draft_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Director-only: /draft SEK20 — one outlet's full order draft."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    cashier_names.refresh()
+    known = sorted(set(cashier_names.group_chats().values()))
+    code = (context.args[0].strip().upper() if context.args else "")
+    if code not in known:
+        await message.reply_text("Usage: /draft <outlet>\n" + ", ".join(known))
+        return
+    try:
+        text = await asyncio.to_thread(_draft_text, code, _my_today())
+    except Exception:
+        logger.exception("/draft failed for %s", code)
+        await message.reply_text("Couldn't read the draft — see logs.")
+        return
+    await _send_chunked_to(context.application, message.chat_id, text)
+
+
 async def post_staff_morning_summary(application: Application) -> None:
     """08:30: the director's daily replies line per live outlet, what went
     unanswered, and the problems staff reported — last 24 hours."""
@@ -6049,7 +6483,19 @@ async def post_staff_morning_summary(application: Application) -> None:
     except Exception:
         logger.exception("staff morning summary: read failed")
         return
-    text = staff_live.format_morning_summary(threads)
+    text = staff_live.format_morning_summary(threads, _outlet_label)
+    if text and datetime.now(MALAYSIA_TZ).weekday() == 0:
+        week_since = (datetime.now(MALAYSIA_TZ) - timedelta(days=7)).isoformat()
+        try:
+            week = await asyncio.to_thread(
+                lambda: supabase.table(staff_live.TABLE).select("*")
+                .eq("slot", "minimarket").gte("created_at", week_since)
+                .execute().data or []
+            )
+            text += "\n".join([""] + staff_ops.weekly_minimarket(week, _outlet_label)) \
+                if week else ""
+        except Exception:
+            logger.exception("staff morning summary: weekly mini market read failed")
     if text:
         await _send_chunked_to(application, ALERT_CHAT_ID, text)
 
@@ -7244,6 +7690,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("lang", lang_command))
     app.add_handler(CommandHandler("staff_preview", staff_preview_command))
     app.add_handler(CommandHandler("staff_samples", staff_samples_command))
+    app.add_handler(CommandHandler("draft", draft_command))
     app.add_handler(CommandHandler("form_chase_now", form_chase_now_command))
     app.add_handler(CommandHandler("scoreboard_now", scoreboard_now_command))
     app.add_handler(CommandHandler("order_drafts_now", order_drafts_now_command))
@@ -7611,6 +8058,23 @@ async def run_bot() -> None:
             args=[app, _slot],
             id=f"staff_chat_{_slot}",
             replace_existing=True,
+        )
+
+    # Staff questions v2 (staff_ops): leftover, sales note, wastage,
+    # afternoon taste check / tip, Monday praise. Off per slot via
+    # STAFF_CHAT_SLOTS; only live outlets.
+    for _slot, _cron in (("leftover", {"hour": 3, "minute": 0}),
+                         ("sales", {"hour": 9, "minute": 0}),
+                         ("wastage", {"hour": 10, "minute": 30}),
+                         ("afternoon", {"hour": 16, "minute": 0}),
+                         ("praise", {"day_of_week": "mon", "hour": 11, "minute": 5})):
+        scheduler.add_job(
+            run_staff_ops,
+            trigger="cron",
+            args=[app, _slot],
+            id=f"staff_ops_{_slot}",
+            replace_existing=True,
+            **_cron,
         )
 
     # Live staff chat: reminders / no-reply / next question every 10 minutes,
