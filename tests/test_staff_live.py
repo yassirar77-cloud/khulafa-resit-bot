@@ -39,11 +39,15 @@ class SettingsTests(unittest.TestCase):
 
 class PlanTests(unittest.TestCase):
     def test_fresh_question_waits(self):
-        self.assertEqual(sl.plan_tick([_t("open", 30)], NOW), [])
+        self.assertEqual(sl.plan_tick([_t("open", 20)], NOW), [])
 
-    def test_reminder_after_one_hour_once(self):
-        self.assertEqual([a for a, _ in sl.plan_tick([_t("open", 65)], NOW)], ["remind"])
-        self.assertEqual(sl.plan_tick([_t("reminded", 90)], NOW), [])
+    def test_reminder_after_thirty_minutes_once(self):
+        self.assertEqual([a for a, _ in sl.plan_tick([_t("open", 35)], NOW)], ["remind"])
+        self.assertEqual(sl.plan_tick([_t("reminded", 50)], NOW), [])
+
+    def test_expires_after_one_hour(self):
+        self.assertEqual([a for a, _ in sl.plan_tick([_t("reminded", 61)], NOW)], ["expire"])
+        self.assertEqual([a for a, _ in sl.plan_tick([_t("open", 61)], NOW)], ["expire"])
 
     def test_no_reply_after_two_hours_then_next_question_released(self):
         threads = [_t("reminded", 125, tid=1), _t("queued", tid=2, slot="cook")]
@@ -66,9 +70,9 @@ class PlanTests(unittest.TestCase):
     def test_no_reminders_after_midnight(self):
         late = datetime(2026, 9, 25, 0, 10, tzinfo=MY)
         t = _t("open", shift="night", shift_date="2026-09-24")
-        t["asked_at"] = (late - timedelta(minutes=70)).isoformat()
+        t["asked_at"] = (late - timedelta(minutes=40)).isoformat()
         self.assertEqual(sl.plan_tick([t], late), [])
-        t["asked_at"] = (late - timedelta(minutes=130)).isoformat()
+        t["asked_at"] = (late - timedelta(minutes=70)).isoformat()
         self.assertEqual([a for a, _ in sl.plan_tick([t], late)], ["expire"])
 
     def test_groups_are_independent(self):
@@ -223,6 +227,106 @@ class HonestyTests(unittest.TestCase):
             for claim in ("I am a person", "saya orang", "manusia", "real person"):
                 self.assertNotIn(claim, text)
 
+
+
+class SlotSettingTests(unittest.TestCase):
+    def test_only_listed_check_ins_run(self):
+        with mock.patch.dict("os.environ", {"STAFF_CHAT_SLOTS": "order, Bills"}):
+            self.assertEqual(sl.enabled_slots(), {"order", "bills"})
+            self.assertTrue(sl.slot_enabled("order"))
+            for slot in ("open", "stock", "cook", "lunch", "night"):
+                self.assertFalse(sl.slot_enabled(slot), slot)
+
+    def test_unset_means_all(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(sl.enabled_slots(), set(sl.staff_chat.SLOTS))
+
+
+class ButtonTests(unittest.TestCase):
+    def test_button_sets_per_check_in(self):
+        self.assertEqual(sl.button_set("order", {"items": [1]}), "order")
+        self.assertIsNone(sl.button_set("order", {"ask": True}))   # must be typed
+        self.assertEqual(sl.button_set("open", {}), "status")
+        self.assertEqual(sl.button_set("night", {}), "status")
+        self.assertEqual(sl.button_set("bills", {}), "bills")
+        self.assertEqual(sl.button_set("lunch", {}), "lunch")
+
+    def test_keyboard_in_cashier_language(self):
+        rows = sl.keyboard(42, "order", "tamil")
+        self.assertEqual(rows, [[("✅ சரி", "sc:42:ok"), ("✏️ மாத்தணும்", "sc:42:change")]])
+        bills = sl.keyboard(7, "bills", "bengali")
+        self.assertEqual([r[0][1] for r in bills], ["sc:7:upload", "sc:7:gave", "sc:7:nobill"])
+        self.assertEqual(bills[1][0][0], "📦 Boss ke diyechi")
+        self.assertEqual(sl.keyboard(7, "status", "bm")[0][0][0], "✅ Semua OK")
+        self.assertEqual(sl.keyboard(7, "lunch", "english")[0][1][0], "⚠️ Something ran out")
+        self.assertEqual(sl.keyboard(7, "status", "bm_tamil")[0][0][0], "✅ Semua OK")
+        self.assertEqual(sl.keyboard(None, "order", "bm"), [])
+        self.assertEqual(sl.keyboard(7, None, "bm"), [])
+
+    def test_every_label_fits_telegram(self):
+        for lang, labels in sl._LABELS.items():
+            self.assertEqual(set(labels), set(sl.CHOICES), lang)
+            for code in sl.CHOICES:
+                self.assertLessEqual(len(f"sc:999999999:{code}".encode()), 64)
+
+    def test_parse_callback(self):
+        self.assertEqual(sl.parse_callback("sc:42:gave"), (42, "gave"))
+        for bad in ("sc:x:ok", "sc:42:hack", "review:1:save", None, "sc:1"):
+            self.assertIsNone(sl.parse_callback(bad), bad)
+
+    def test_tap_counts_as_answer(self):
+        now = NOW
+        self.assertEqual(sl.tap_outcome(_t("open", 5), "ok", now), "answer")
+        self.assertEqual(sl.tap_outcome(_t("reminded", 45), "ok", now), "answer")
+        self.assertEqual(sl.tap_outcome(_t("no_reply", 120), "ok", now), "answer")   # late tap
+        self.assertEqual(sl.tap_outcome(_t("no_reply", 60 * 13), "ok", now), "stale")
+        self.assertEqual(sl.tap_outcome(_t("answered", 5), "ok", now), "already")
+        fields = sl.tap_fields("gave", "📦 Dah bagi bos", now)
+        self.assertEqual(fields["status"], sl.ANSWERED)
+        self.assertEqual(fields["reply_status"], sl.HANDED_IN)
+        self.assertEqual(fields["answer_source"], "button")
+        self.assertFalse(fields["awaiting_detail"])
+        self.assertTrue(sl.tap_fields("change", "x", now)["awaiting_detail"])
+
+    def test_details_after_change_tap(self):
+        now = NOW
+        thread = dict(_t("answered", 5), answered_at=(now - timedelta(minutes=5)).isoformat(),
+                      awaiting_detail=True, reply_text="[button] ✏️ Tukar",
+                      reply_en="Wants to change it")
+        self.assertTrue(sl.awaiting_detail(thread, now))
+        self.assertFalse(sl.awaiting_detail(dict(thread, awaiting_detail=False), now))
+        self.assertFalse(sl.awaiting_detail(
+            dict(thread, answered_at=(now - timedelta(minutes=70)).isoformat()), now))
+        fields = sl.detail_fields(thread, "ayam 60kg", "Chicken 60kg instead")
+        self.assertEqual(fields["reply_en"], "Wants to change it: Chicken 60kg instead")
+        self.assertIn("ayam 60kg", fields["reply_text"])
+        self.assertFalse(fields["awaiting_detail"])
+        self.assertIn("type", sl.detail_prompt("change", "english").lower())
+        self.assertIn("\n", sl.detail_prompt("problem", "bm_tamil"))
+        self.assertIsNone(sl.detail_prompt("ok", "bm"))
+
+
+class HandInTests(unittest.TestCase):
+    FACTS = {"supplier": "Bestari Farm", "days": "12", "last": "12/09",
+             "supplier_full": "BESTARI FARM (M) SDN BHD", "last_iso": "2026-09-12"}
+
+    def test_handin_row(self):
+        thread = dict(_t("answered", 5, slot="bills", cashier="Kalai"), facts=self.FACTS)
+        self.assertEqual(sl.handin_row(thread), {
+            "outlet_code": "BISTRO7", "supplier": "BESTARI FARM (M) SDN BHD",
+            "last_bill": "2026-09-12", "days_missing": 12, "cashier": "Kalai",
+            "thread_id": 1})
+        self.assertIsNone(sl.handin_row(dict(thread, slot="order")))
+
+    def test_summary_lists_handed_in_bills(self):
+        threads = [dict(_t("answered", slot="bills", cashier="Kalai"),
+                        asked_at="2026-09-24T22:10:00+08:00",
+                        answered_at="2026-09-24T22:18:00+08:00",
+                        reply_status=sl.HANDED_IN, facts=self.FACTS)]
+        text = sl.format_morning_summary(threads)
+        self.assertIn("📦 Bills handed in, not uploaded — please check the paper bills:", text)
+        self.assertIn("• BISTRO7: Bestari Farm (last upload 12/09) — Kalai, 22:18", text)
+        self.assertIn("handed_in", sl.REPLY_PROMPT)
 
 if __name__ == "__main__":
     unittest.main()

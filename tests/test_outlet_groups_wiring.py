@@ -119,6 +119,24 @@ class StaffLiveWiring(unittest.TestCase):
         self.assertLess(body.index("asks_if_bot(message.text)"),
                         body.index("_active_thread"))
 
+    def test_buttons_wired(self):
+        self.assertIn('CallbackQueryHandler(handle_staff_button, pattern=r"^sc:\\d+:\\w+$")',
+                      self.src)
+        send = _block(self.src, "async def _live_send_or_queue(")
+        self.assertIn("reply_markup=_markup(thread_id", send)
+        # The question still open is closed, never queued behind.
+        self.assertIn('{"status": staff_live.NO_REPLY}', send)
+        tap = _block(self.src, "async def handle_staff_button(")
+        self.assertIn("staff_live.tap_outcome(", tap)
+        self.assertIn("_record_handin", tap)
+
+    def test_paused_check_ins_do_not_run(self):
+        self.assertIn("staff_live.slot_enabled(slot)",
+                      _block(self.src, "async def run_staff_preview("))
+
+    def test_handed_in_bills_not_re_asked(self):
+        self.assertIn("_recent_handins(today)", _block(self.src, "def _build_staff_preview("))
+
     def test_sales_poll_has_its_own_client(self):
         self.assertIn("run_ingest_once, _sales_supabase()",
                       _block(self.src, "async def poll_sales_emails("))
