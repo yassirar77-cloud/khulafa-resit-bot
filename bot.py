@@ -1582,6 +1582,24 @@ def build_review_edit_conversation() -> ConversationHandler:
     )
 
 
+# In the outlet groups a bill is confirmed with a reaction on the photo, not
+# a text reply: 👀 while it is being read, 👌 once saved (Telegram doesn't
+# allow ✅ as a bot reaction). Text only when something needs the staff:
+# unreadable, sent for review, price rise, mini market / unusual invoice.
+RECEIPT_READING, RECEIPT_SAVED = "👀", "👌"
+
+
+async def _react(bot, message, emoji) -> bool:
+    """Set (or with ``None`` clear) the bot's reaction on a message."""
+    try:
+        await bot.set_message_reaction(
+            chat_id=message.chat_id, message_id=message.message_id, reaction=emoji)
+        return True
+    except Exception:
+        logger.warning("reaction %s failed in chat %s", emoji, message.chat_id, exc_info=True)
+        return False
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message or not message.photo:
@@ -1598,7 +1616,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         ZAI_OCR_PROVIDER,
     )
 
-    await message.reply_text("Processing receipt…")
+    # An outlet group gets reactions instead of confirmation texts.
+    quiet = cashier_names.outlet_for_chat(message.chat_id) is not None
+    if not (quiet and await _react(context.bot, message, RECEIPT_READING)):
+        await message.reply_text("Processing receipt…")
 
     photo = message.photo[-1]
     photo_file_id = photo.file_id
@@ -1642,6 +1663,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             # Receipt won't be saved, so the archive isn't needed — let the
             # background upload finish quietly rather than orphaning the task.
             image_upload_task.cancel()
+            if quiet:
+                await _react(context.bot, message, None)
             await message.reply_text("Failed to read receipt. Try a clearer photo.")
             return
         ocr_latency = time.monotonic() - ocr_start
@@ -1742,8 +1765,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if verify_prefix:
         user_alert = f"{verify_prefix}\n\n{user_alert}"
     ops_alert = format_alert(stored, parsed, outlet=outlet)
+    # Outlet group: a 👌 on the photo is the confirmation (the full list stays
+    # in the director's summaries). A failed save already got its text above.
+    # If the reaction can't be set, fall back to the text reply.
+    saved_quietly = (quiet and stored.get("id") is not None
+                     and await _react(context.bot, message, RECEIPT_SAVED))
     try:
-        await _reply_chunked(message, user_alert)
+        if not saved_quietly:
+            await _reply_chunked(message, user_alert)
     except Exception:
         # The receipt is already stored — never let a reply failure abort the
         # downstream routing (side tables, price aggregation, audit checks).
@@ -1878,8 +1907,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.warning("Price aggregation failed (non-critical): %s", e)
     # === End price aggregation ===
 
-    # Staff questions v2: invoice far above the outlet's usual -> "why?";
-    # a normal one gets a 👌 (staff_ops.invoice_flag).
+    # Staff questions v2: invoice far above the outlet's usual (or a rarely
+    # bought item) -> "why?" (staff_ops.invoice_flag).
     if not staff_ops.is_minimarket(stored.get("merchant")):
         await staff_ops_on_upload(context.application, stored, message, supplier=True)
 
@@ -6385,7 +6414,8 @@ async def staff_ops_on_upload(application, stored: dict, message, *, supplier: b
     """After a bill is saved in a live outlet group: a mini market receipt
     gets "why from the mini market?"; a supplier invoice far above the
     outlet's usual (or a rarely bought item) gets "why?"; a normal supplier
-    invoice gets a 👌. Never breaks the receipt pipeline."""
+    invoice needs nothing more (handle_photo already reacted 👌). Never
+    breaks the receipt pipeline."""
     try:
         code = cashier_names.outlet_for_chat(message.chat_id)
         receipt_id = stored.get("id")
@@ -6425,10 +6455,7 @@ async def staff_ops_on_upload(application, stored: dict, message, *, supplier: b
         flag = staff_ops.invoice_flag(lines, history, receipt_date=stored.get("receipt_date"),
                                       merchant=merchant, outlet_days=outlet_days)
         if not flag:
-            with contextlib.suppress(Exception):
-                await application.bot.set_message_reaction(
-                    chat_id=message.chat_id, message_id=message.message_id, reaction="👌")
-            return
+            return      # the 👌 on the photo (handle_photo) already confirms it
         import order_items
         supplier_name = staff_chat._short_supplier(merchant) or str(merchant or "").title()
         language = _cashier_language(code)
