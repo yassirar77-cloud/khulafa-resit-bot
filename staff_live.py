@@ -36,6 +36,7 @@ from datetime import datetime, timedelta
 
 import cashier_names
 import staff_chat
+import staff_ops
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,7 @@ TABLE = "staff_chat_thread"
 
 QUEUED, OPEN, REMINDED = "queued", "open", "reminded"
 ANSWERED, NO_REPLY, DROPPED = "answered", "no_reply", "dropped"
+INFO = "info"            # sent, no reply expected (staff_ops sales note, tip, praise)
 ACTIVE = (OPEN, REMINDED)
 
 # A question gets one reminder after 30 minutes and expires after an hour,
@@ -72,7 +74,7 @@ def enabled_slots() -> set[str]:
     Unset or empty = all of them."""
     raw = os.environ.get("STAFF_CHAT_SLOTS") or ""
     chosen = {s.strip().lower() for s in raw.split(",") if s.strip()}
-    return chosen or set(staff_chat.SLOTS)
+    return chosen or set(staff_chat.SLOTS) | set(staff_ops.OPS_SLOTS)
 
 
 def slot_enabled(slot) -> bool:
@@ -393,6 +395,15 @@ _THANKS = {"english": "Noted, thank you 🙏", "bm": "Baik, terima kasih 🙏",
            "indonesian": "Oke, terima kasih 🙏"}
 
 
+# Staff questions v2 (staff_ops): invoice, mini market, taste, leftover and
+# wastage buttons share the same tap handling.
+CHOICES.update(staff_ops.CHOICES)
+BUTTON_SETS.update(staff_ops.BUTTON_SETS)
+for _l, _labels in staff_ops.LABELS.items():
+    _LABELS[_l].update(_labels)
+_DETAIL_PROMPT.update(staff_ops.DETAIL_PROMPTS)
+
+
 def _lang(language: str) -> str:
     """Buttons are short: BM+Tamil cashiers get the BM labels."""
     return language if language in _LABELS else "bm"
@@ -401,6 +412,8 @@ def _lang(language: str) -> str:
 def button_set(slot: str, facts: dict | None) -> str | None:
     """Which buttons a question gets. The open "what do you need tomorrow?"
     order question has none — the answer has to be typed."""
+    if slot in staff_ops.OPS_SLOTS:
+        return staff_ops.button_set(slot, facts)
     if slot == "order":
         return None if (facts or {}).get("ask") else "order"
     if slot in ("open", "night"):
@@ -415,7 +428,9 @@ def keyboard(thread_id, set_key: str | None, language: str) -> list[list[tuple[s
         return []
     labels = _LABELS[_lang(language)]
     buttons = [(labels[c], f"sc:{thread_id}:{c}") for c in BUTTON_SETS[set_key]]
-    # Three bill buttons stack; two sit side by side.
+    # Two sit side by side, four make a 2x2 grid, three stack.
+    if len(buttons) == 4:
+        return [buttons[:2], buttons[2:]]
     return [[b] for b in buttons] if len(buttons) > 2 else [buttons]
 
 
@@ -578,11 +593,14 @@ def _by_slot(threads: list[dict]) -> list[str]:
             c = counts.setdefault(t.get("slot"), [0, 0])
             c[1] += 1
             c[0] += t.get("status") == ANSWERED
-    order = list(staff_chat.SLOTS)
+    order = sorted(set(staff_chat.SLOTS) | set(staff_ops.SLOT_TIMES),
+                   key=lambda s: (staff_chat.SLOTS[s][1] if s in staff_chat.SLOTS
+                                  else staff_ops.SLOT_TIMES[s]))
     rows = []
     for slot in sorted(counts, key=lambda s: order.index(s) if s in order else 99):
         answered, sent = counts[slot]
-        time_ = staff_chat.SLOTS[slot][1] if slot in staff_chat.SLOTS else "?"
+        time_ = (staff_chat.SLOTS[slot][1] if slot in staff_chat.SLOTS
+                 else staff_ops.SLOT_TIMES.get(slot, "?"))
         rows.append(f"{time_} {slot}: {answered}/{sent} answered")
     return rows
 
@@ -619,6 +637,7 @@ def format_morning_summary(threads: list[dict], label_for=None) -> str:
                 f" — {t.get('cashier') or 'cashier'}, {_local_hhmm(t.get('answered_at'))}"
             )
     issues = [t for t in threads if t.get("status") == ANSWERED
+              and t.get("slot") not in staff_ops.OPS_SLOTS
               and t.get("reply_status") in ("short", "finished", "problem")]
     if issues:
         lines += ["", "What they reported:"]
@@ -627,4 +646,5 @@ def format_morning_summary(threads: list[dict], label_for=None) -> str:
                 f"• {label(t.get('outlet_code'))} {_local_hhmm(t.get('answered_at'))} "
                 f"{t.get('slot')}: {t.get('reply_en') or t.get('reply_text')}"
             )
+    lines += staff_ops.summary_sections(threads, label)
     return "\n".join(lines)

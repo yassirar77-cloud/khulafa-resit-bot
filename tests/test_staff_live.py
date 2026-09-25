@@ -239,7 +239,8 @@ class SlotSettingTests(unittest.TestCase):
 
     def test_unset_means_all(self):
         with mock.patch.dict("os.environ", {}, clear=True):
-            self.assertEqual(sl.enabled_slots(), set(sl.staff_chat.SLOTS))
+            self.assertEqual(sl.enabled_slots(),
+                             set(sl.staff_chat.SLOTS) | set(sl.staff_ops.OPS_SLOTS))
 
 
 class ButtonTests(unittest.TestCase):
