@@ -943,7 +943,8 @@ def _check_new_supplier(chat_id: int, merchant: str, total: float, current_id) -
     )
 
 
-def _check_suspicious_items(chat_id: int, merchant: str, items: list) -> str | None:
+def _check_suspicious_items(chat_id: int, merchant: str, items: list,
+                            found: list | None = None) -> str | None:
     if not merchant or not isinstance(items, list) or not items:
         return None
     since = (
@@ -980,6 +981,8 @@ def _check_suspicious_items(chat_id: int, merchant: str, items: list) -> str | N
         avg = sum(prev_prices) / len(prev_prices)
         if avg > 0 and price > SUSPICIOUS_PRICE_RATIO * avg:
             flagged.append(f"{name} (RM{price:.2f} vs avg RM{avg:.2f})")
+            if found is not None:
+                found.append(name)
 
     if not flagged:
         return None
@@ -1033,7 +1036,10 @@ def should_skip_audit(receipt_data):
     return None
 
 
-def run_audit_checks(stored: dict, parsed: dict) -> list[tuple[str, str]]:
+def run_audit_checks(stored: dict, parsed: dict,
+                     details: dict | None = None) -> list[tuple[str, str]]:
+    """The receipt audit findings ``[(type, question)]``. ``details`` (when
+    given) also gets ``{"suspicious_item": <first item name>}``."""
     receipt_data = {
         "merchant": stored.get("merchant"),
         "items": parsed.get("items"),
@@ -1074,8 +1080,11 @@ def run_audit_checks(stored: dict, parsed: dict) -> list[tuple[str, str]]:
         logger.exception("big_purchase check failed")
 
     try:
-        if (q := _check_suspicious_items(chat_id, merchant, items)):
+        names: list = []
+        if (q := _check_suspicious_items(chat_id, merchant, items, names)):
             findings.append(("suspicious_item", q))
+            if details is not None and names:
+                details["suspicious_item"] = names[0]
     except Exception:
         logger.exception("suspicious_item check failed")
 
@@ -1346,9 +1355,7 @@ async def route_to_review(
         recent = []
     if is_duplicate_review(recent, parsed):
         logger.info("Skipping duplicate review DM (already pending within 24h)")
-        await message.reply_text(
-            "🔎 This receipt is already in the review queue from earlier — not re-sending."
-        )
+        await message.reply_text(_receipt_text(message.chat_id, "review_dup"))
         return
     ocr_conflict = total_conflicts_with_item_sum(
         _to_float(parsed.get("total")), parsed.get("items")
@@ -1376,23 +1383,18 @@ async def route_to_review(
         # the insert — treat it exactly like the pre-checked duplicate.
         if "duplicate" in str(exc).lower() or "unique" in str(exc).lower():
             logger.info("Duplicate review insert blocked by unique index")
-            await message.reply_text(
-                "🔎 This receipt is already in the review queue from earlier — not re-sending."
-            )
+            await message.reply_text(_receipt_text(message.chat_id, "review_dup"))
             return
         logger.exception("Failed to queue receipt for manual review")
-        await message.reply_text(
-            "Couldn't queue this receipt for review — please try resending."
-        )
+        await message.reply_text(_receipt_text(message.chat_id, "review_failed"))
         return
     logger.info(
         "Receipt queued for review: pending_id=%s confidence=%s reason=%s",
         stored.get("id"), confidence, reason,
     )
-    await message.reply_text(
-        f"🔎 Receipt flagged for review (confidence {confidence if confidence is not None else '—'}). "
-        "A reviewer will confirm it shortly."
-    )
+    await message.reply_text(_receipt_text(
+        message.chat_id, "review_flagged",
+        confidence=confidence if confidence is not None else "—"))
     await _dm_reviewers(context, stored)
 
 
@@ -1588,6 +1590,75 @@ def build_review_edit_conversation() -> ConversationHandler:
 # unreadable, sent for review, price rise, mini market / unusual invoice.
 RECEIPT_READING, RECEIPT_SAVED = "👀", "👌"
 
+# The few bill texts staff still see, in the cashier's language (outlet
+# groups); every other chat keeps the English wording.
+_RECEIPT_TEXTS = {
+    "reading": {
+        "english": "Processing receipt…", "bm": "Sedang baca bil…",
+        "tamil": "Bill-ஐ படிக்கிறேன்…", "bengali": "Bill porchi…",
+        "indonesian": "Sedang membaca nota…",
+    },
+    "read_failed": {
+        "english": "Failed to read receipt. Try a clearer photo.",
+        "bm": "Bil tak dapat dibaca. Tolong hantar gambar yang lebih jelas 🙏",
+        "tamil": "Bill-ஐ படிக்க முடியல. கொஞ்சம் தெளிவா photo எடுத்து அனுப்புங்க 🙏",
+        "bengali": "Bill porte parlam na. Aro porishkar chobi pathan 🙏",
+        "indonesian": "Nota tidak terbaca. Tolong kirim foto yang lebih jelas 🙏",
+    },
+    "save_failed": {
+        "english": "Saved OCR locally but database write failed.",
+        "bm": "Bil diterima tapi tak dapat disimpan. Pejabat akan semak.",
+        "tamil": "Bill வந்துச்சு, ஆனா save ஆகல. Office பாத்துக்கும்.",
+        "bengali": "Bill peyechi, kintu save hoy nai. Office dekhbe.",
+        "indonesian": "Nota diterima tapi tidak bisa disimpan. Kantor akan cek.",
+    },
+    "review_dup": {
+        "english": "🔎 This receipt is already in the review queue from earlier — not re-sending.",
+        "bm": "🔎 Bil ini sudah dalam semakan pejabat.",
+        "tamil": "🔎 இந்த bill ஏற்கனவே office check-ல இருக்கு.",
+        "bengali": "🔎 Ei bill age thekei office-er check-e ache.",
+        "indonesian": "🔎 Nota ini sudah dalam pengecekan kantor.",
+    },
+    "review_failed": {
+        "english": "Couldn't queue this receipt for review — please try resending.",
+        "bm": "Bil tak dapat dihantar untuk semakan — tolong hantar gambar sekali lagi.",
+        "tamil": "Bill-ஐ check-க்கு அனுப்ப முடியல — photo-வை மறுபடி அனுப்புங்க.",
+        "bengali": "Bill check-e pathano gelo na — chobi abar pathan.",
+        "indonesian": "Nota tidak bisa dikirim untuk dicek — tolong kirim fotonya lagi.",
+    },
+    "review_flagged": {
+        "english": "🔎 Receipt flagged for review (confidence {confidence}). "
+                   "A reviewer will confirm it shortly.",
+        "bm": "🔎 Bil ini kurang jelas — pejabat akan semak dulu.",
+        "tamil": "🔎 இந்த bill கொஞ்சம் தெளிவா இல்ல — office முதல்ல check பண்ணும்.",
+        "bengali": "🔎 Ei bill ektu osposhto — office age dekhbe.",
+        "indonesian": "🔎 Nota ini kurang jelas — kantor akan cek dulu.",
+    },
+    "advance_noname": {
+        "english": "💰 Advance recorded, but the staff name couldn't be read. "
+                   "Reply /advances to update the name.",
+        "bm": "💰 Advance dicatat, tapi nama staff tak jelas pada resit. "
+              "Guna /advances untuk kemas kini nama.",
+        "tamil": "💰 Advance பதிவு ஆச்சு, ஆனா staff பெயர் தெரியல. "
+                 "/advances-ல பெயரை போடுங்க.",
+        "bengali": "💰 Advance likha holo, kintu staff-er naam bojha jay nai. "
+                   "/advances diye naam din.",
+        "indonesian": "💰 Advance dicatat, tapi nama staff tidak terbaca. "
+                      "Pakai /advances untuk memperbarui nama.",
+    },
+}
+
+
+def _receipt_text(chat_id, key: str, **values) -> str:
+    """A bill text for ``chat_id``: the cashier's language in an outlet
+    group, English anywhere else."""
+    table = _RECEIPT_TEXTS[key]
+    if cashier_names.is_outlet_group(chat_id):
+        text = cashier_names.pick(table, cashier_names.language_for_chat(chat_id))
+    else:
+        text = table["english"]
+    return text.format(**values) if values else text
+
 
 async def _react(bot, message, emoji) -> bool:
     """Set (or with ``None`` clear) the bot's reaction on a message."""
@@ -1618,8 +1689,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     # An outlet group gets reactions instead of confirmation texts.
     quiet = cashier_names.outlet_for_chat(message.chat_id) is not None
+    # A live outlet group gets at most ONE question per bill, from the staff
+    # question system (buttons, cashier's language, daily limit) — the old
+    # Tamil price-spike note, the anomaly text and the audit questions only
+    # feed it (staff_ops.upload_question).
+    ops_group = (quiet and staff_live.is_live(cashier_names.outlet_for_chat(message.chat_id))
+                 and staff_chat.style() != staff_chat.CLASSIC)
+    ops_candidates: dict = {}
     if not (quiet and await _react(context.bot, message, RECEIPT_READING)):
-        await message.reply_text("Processing receipt…")
+        await message.reply_text(_receipt_text(message.chat_id, "reading"))
 
     photo = message.photo[-1]
     photo_file_id = photo.file_id
@@ -1665,7 +1743,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             image_upload_task.cancel()
             if quiet:
                 await _react(context.bot, message, None)
-            await message.reply_text("Failed to read receipt. Try a clearer photo.")
+            await message.reply_text(_receipt_text(message.chat_id, "read_failed"))
             return
         ocr_latency = time.monotonic() - ocr_start
         logger.info(
@@ -1758,7 +1836,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         stored = await asyncio.to_thread(store_receipt, record)
     except Exception:
         logger.exception("Supabase insert failed")
-        await message.reply_text("Saved OCR locally but database write failed.")
+        await message.reply_text(_receipt_text(message.chat_id, "save_failed"))
         stored = record
 
     user_alert = format_alert(stored, parsed)
@@ -1814,10 +1892,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 receipt_id, classification.extracted_staff_name, stored.get("total"),
             )
             if not classification.extracted_staff_name:
-                await message.reply_text(
-                    "💰 Advance dicatat tapi nama staff tak dapat extract. "
-                    "Reply /advances untuk update nama."
-                )
+                await message.reply_text(_receipt_text(message.chat_id, "advance_noname"))
         except Exception:
             logger.exception("Failed to store staff advance")
         return
@@ -1907,11 +1982,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.warning("Price aggregation failed (non-critical): %s", e)
     # === End price aggregation ===
 
-    # Staff questions v2: invoice far above the outlet's usual (or a rarely
-    # bought item) -> "why?" (staff_ops.invoice_flag).
-    if not staff_ops.is_minimarket(stored.get("merchant")):
-        await staff_ops_on_upload(context.application, stored, message, supplier=True)
-
     # === Price spike detection (PR #25) ===
     # Compare each just-saved item against historical averages (merchant
     # scoped first, global fallback). Send Style A alert per spike to
@@ -1951,7 +2021,21 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     logger.exception(
                         "Failed to send spike alert to ALERT_CHAT_ID"
                     )
-            if spikes:
+            if spikes and ops_group:
+                # Live group: the price rise becomes the bill's one question
+                # (buttons, cashier's language) instead of the Tamil note.
+                top = max(spikes, key=lambda sp: float(sp.get("percent_increase") or 0))
+                canonical = str(top.get("canonical_item") or "")
+                variant = str(top.get("shop_variant") or "").strip()
+                import order_items
+                ops_candidates["pricerise"] = {
+                    "item": canonical,
+                    "label": variant.title() if variant else order_items.display_name(canonical),
+                    "percent": round(float(top.get("percent_increase") or 0)),
+                }
+                logger.info("Price spikes: %d for receipt %s (staff question)",
+                            len(spikes), receipt_id)
+            elif spikes:
                 logger.info(
                     "Price spikes alerted: %d for receipt %s",
                     len(spikes),
@@ -2056,7 +2140,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             anomaly = detect_anomaly(
                 outlet_code, canonical_category, total_for_anomaly
             )
-            if anomaly.get("is_anomaly"):
+            if anomaly.get("is_anomaly") and ops_group:
+                ops_candidates.setdefault("bigbuy", {})
+                logger.info("Anomaly (staff question): outlet=%s category=%s amount=%s",
+                            outlet_code, canonical_category, total_for_anomaly)
+            elif anomaly.get("is_anomaly"):
                 anomaly_text = (
                     anomaly["message_short"] + "\n\n" + anomaly["message_detail"]
                 )
@@ -2075,14 +2163,34 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.warning("Anomaly detection failed (non-critical): %s", e)
     # === End intelligence layer ===
 
+    details: dict = {}
     try:
-        findings = await asyncio.to_thread(run_audit_checks, stored, parsed)
+        findings = await asyncio.to_thread(run_audit_checks, stored, parsed, details)
     except Exception:
         logger.exception("Audit checks failed")
         findings = []
 
-    if findings:
-        await ask_audit_questions(context, stored, findings)
+    if not ops_group:
+        if findings:
+            await ask_audit_questions(context, stored, findings)
+        return
+
+    # Live group: the audit findings, the price rise and the anomaly feed the
+    # bill's ONE staff question (the most useful one, within the daily limit).
+    for question_type, _text in findings:
+        if question_type == "duplicate_receipt":
+            ops_candidates["dupbill"] = {}
+        elif question_type == "new_supplier":
+            ops_candidates["newsupplier"] = {}
+        elif question_type == "big_purchase":
+            ops_candidates.setdefault("bigbuy", {})
+        elif question_type == "suspicious_item" and "pricerise" not in ops_candidates:
+            name = details.get("suspicious_item")
+            if name:
+                ops_candidates["pricerise"] = {"item": "", "label": staff_ops.pos_item_label(name)}
+    if not staff_ops.is_minimarket(stored.get("merchant")):
+        await staff_ops_on_upload(context.application, stored, message, supplier=True,
+                                  candidates=ops_candidates)
 
 
 def _manager_name_for_chat(chat_id):
@@ -2127,7 +2235,12 @@ async def handle_audit_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
             name = await asyncio.to_thread(
                 _manager_name_for_chat, message.chat_id
             )
-            await message.reply_text(human_touch.ack(name, message.chat_id))
+            if cashier_names.is_outlet_group(message.chat_id):
+                # Outlet group: a short thanks in the cashier's language.
+                await message.reply_text(staff_live.thanks_text(
+                    cashier_names.language_for_chat(message.chat_id)))
+            else:
+                await message.reply_text(human_touch.ack(name, message.chat_id))
         except Exception:
             logger.exception("Failed to ack audit reply")
         note = supervisor.format_owner_reply_note(saved, message.text)
@@ -5323,6 +5436,10 @@ async def post_question_reminders(application: Application, *,
         logger.exception("question reminders: read failed")
         due = []
 
+    # Live outlet groups: their questions live in the staff question system,
+    # which reminds once, combined — no separate 17:00 nudge there.
+    due = [q for q in due
+           if not _staff_live_now(cashier_names.outlet_for_chat(q.get("chat_id")))]
     nudged = 0
     for q in due:
         # Single attempt only: allow_sending_without_reply already covers a
@@ -5970,17 +6087,29 @@ async def staff_live_tick(application: Application) -> None:
         if t.get("outlet_code") not in live and t.get("status") == staff_live.QUEUED:
             await asyncio.to_thread(_thread_update, t["id"], {"status": staff_live.DROPPED})
     threads = [t for t in threads if t.get("outlet_code") in live]
-    for action, t in staff_live.plan_tick(threads, now):
+    actions = staff_live.plan_tick(threads, now)
+    # One reminder message per group, however many questions are waiting.
+    for chat_id, due in staff_live.group_reminders(actions).items():
+        latest = max(due, key=lambda t: str(t.get("asked_at") or ""))
         try:
-            if action == "remind":
-                await application.bot.send_message(
-                    chat_id=t["chat_id"], text=staff_live.reminder_text(t.get("language")),
-                    reply_to_message_id=t.get("message_id"),
-                    allow_sending_without_reply=True,
-                )
+            await application.bot.send_message(
+                chat_id=chat_id,
+                text=staff_live.reminder_text(latest.get("language"), len(due)),
+                reply_to_message_id=latest.get("message_id"),
+                allow_sending_without_reply=True,
+            )
+            for t in due:
                 await asyncio.to_thread(_thread_update, t["id"], {
                     "status": staff_live.REMINDED, "reminded_at": now.isoformat()})
-            elif action == "expire":
+            logger.info("staff live: reminded %s (%d question(s))",
+                        latest.get("outlet_code"), len(due))
+        except Exception:
+            logger.exception("staff live tick: reminder failed (chat %s)", chat_id)
+    for action, t in actions:
+        if action == "remind":
+            continue
+        try:
+            if action == "expire":
                 await asyncio.to_thread(_thread_update, t["id"], {"status": staff_live.NO_REPLY})
             elif action == "drop":
                 await asyncio.to_thread(_thread_update, t["id"], {"status": staff_live.DROPPED})
@@ -6410,7 +6539,8 @@ def _fresh_receipt(receipt_date, days: int = 3) -> bool:
     return (_my_today() - d).days <= days
 
 
-async def staff_ops_on_upload(application, stored: dict, message, *, supplier: bool) -> None:
+async def staff_ops_on_upload(application, stored: dict, message, *, supplier: bool,
+                              candidates: dict | None = None) -> None:
     """After a bill is saved in a live outlet group: a mini market receipt
     gets "why from the mini market?"; a supplier invoice far above the
     outlet's usual (or a rarely bought item) gets "why?"; a normal supplier
@@ -6450,20 +6580,24 @@ async def staff_ops_on_upload(application, stored: dict, message, *, supplier: b
             return
         lines, history, outlet_days = await asyncio.to_thread(
             _invoice_inputs, db, receipt_id, message.chat_id, stored.get("receipt_date"))
-        if not lines:
-            return
-        flag = staff_ops.invoice_flag(lines, history, receipt_date=stored.get("receipt_date"),
-                                      merchant=merchant, outlet_days=outlet_days)
+        flag = (staff_ops.invoice_flag(lines, history, receipt_date=stored.get("receipt_date"),
+                                       merchant=merchant, outlet_days=outlet_days)
+                if lines else None)
+        flag = staff_ops.upload_question(flag, candidates)
         if not flag:
             return      # the 👌 on the photo (handle_photo) already confirms it
         import order_items
         supplier_name = staff_chat._short_supplier(merchant) or str(merchant or "").title()
         language = _cashier_language(code)
-        facts = {"receipt_id": receipt_id, "kind": flag["kind"], "item": flag["item"],
-                 "item_label": order_items.display_name(flag["item"]),
-                 "qty_text": staff_ops.qty_text(flag["qty"], flag["item"]),
-                 "usual_text": staff_ops.qty_text(flag.get("usual") or 0, flag["item"]),
+        item = flag.get("item") or ""
+        facts = {"receipt_id": receipt_id, "kind": flag["kind"], "item": item,
+                 "item_label": flag.get("label") or (order_items.display_name(item) if item else ""),
                  "supplier": supplier_name}
+        if flag["kind"] in ("high", "rare"):
+            facts.update(qty_text=staff_ops.qty_text(flag["qty"], item),
+                         usual_text=staff_ops.qty_text(flag.get("usual") or 0, item))
+        if flag.get("percent"):
+            facts["percent"] = flag["percent"]
         await _ops_send(
             application, db, code=code, chat_id=message.chat_id, slot="invoice",
             text=staff_ops.invoice_text(flag, supplier_name, language),
@@ -6902,6 +7036,9 @@ async def post_slow_item_checks(application: Application, *,
             mgr.get("chat_id") if mgr else None,
             ALERT_CHAT_ID,
         )
+        # A live outlet gets the 16:00 taste check (staff_ops) instead.
+        if _staff_live_now(cashier_names.outlet_for_chat(decision.target_chat_id)):
+            continue
         text = human_touch.personalise(
             supervisor.with_reply_footer(text),
             mgr.get("manager_name") if mgr else None,
@@ -7032,6 +7169,9 @@ async def post_cook_plans(application: Application, *,
             mgr.get("chat_id") if mgr else None,
             ALERT_CHAT_ID,
         )
+        # A live outlet gets the 16:00 taste check (staff_ops) instead.
+        if _staff_live_now(cashier_names.outlet_for_chat(decision.target_chat_id)):
+            continue
         text = human_touch.personalise(
             supervisor.with_reply_footer(text),
             mgr.get("manager_name") if mgr else None,

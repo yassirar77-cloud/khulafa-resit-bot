@@ -30,33 +30,36 @@ class Greetings(unittest.TestCase):
     def test_greets_by_first_name_and_varies_by_day(self):
         g1 = greeting("Ravi Kumar", -100, D1)
         g2 = greeting("Ravi Kumar", -100, D2)
-        self.assertIn("Ravi boss", g1)
-        self.assertIn("Ravi boss", g2)
+        self.assertIn("Ravi", g1)
+        self.assertIn("Ravi", g2)
+        self.assertNotIn("boss", g1.lower() + g2.lower())   # staff are never "boss"
         self.assertNotEqual(g1, g2)          # a new line the next day
         self.assertEqual(g1, greeting("Ravi Kumar", -100, D1))  # deterministic
 
-    def test_no_registered_name_falls_back_to_boss(self):
-        self.assertIn("boss", greeting(None, -100, D1))
-        self.assertIn("boss", greeting("   ", -100, D1))
+    def test_no_registered_name_is_a_plain_greeting(self):
+        self.assertEqual(greeting(None, -100, D1), "வணக்கம் 🙏")
+        self.assertEqual(greeting("   ", -100, D1), "வணக்கம் 🙏")
 
     def test_personalise_prepends_and_keeps_empty_empty(self):
         out = personalise("விலை ஏறிடுச்சு!", "Ravi", -100, D1)
         self.assertTrue(out.endswith("விலை ஏறிடுச்சு!"))
-        self.assertIn("Ravi boss", out.split("\n")[0])
+        self.assertIn("Ravi", out.split("\n")[0])
+        self.assertNotIn("boss", out.split("\n")[0].lower())
         self.assertEqual(personalise("", "Ravi", -100, D1), "")
         self.assertEqual(personalise(None, "Ravi", -100, D1), "")
 
 
 class Acks(unittest.TestCase):
 
-    def test_ack_is_named_varied_and_always_mentions_boss(self):
+    def test_ack_is_named_varied_and_reports_upward(self):
         a1 = ack("Ravi", -100, D1)
         a2 = ack("Ravi", -100, D2)
-        self.assertIn("Ravi boss", a1)
+        self.assertIn("Ravi", a1)
         self.assertNotEqual(a1, a2)
-        # Every variant truthfully reports the upward step.
+        # Every variant truthfully reports the upward step, never "boss".
         for d in (D1, D2, date(2026, 8, 9)):
-            self.assertIn("Boss", ack("Ravi", -100, d))
+            self.assertIn("Office", ack("Ravi", -100, d))
+            self.assertNotIn("boss", ack("Ravi", -100, d).lower())
 
     def test_ack_never_raises(self):
         try:
@@ -111,9 +114,10 @@ class PraiseAndScoreboard(unittest.TestCase):
         none_asked = {"chat_id": -300, "asked": 0, "answered": 0,
                       "avg_response_minutes": None}
         out = praise_message(full)
-        self.assertIn("🌟 இந்த வாரம் சூப்பர்!", out)
+        self.assertIn("🌟 இந்த வாரம் சூப்பர்", out)
         self.assertIn("4 கேள்விக்கும் பதில்", out)
-        self.assertIn("Boss-க்கும் தெரியும்", out)
+        self.assertIn("Office-க்கும் தெரியும்", out)
+        self.assertNotIn("!", out)
         self.assertEqual(praise_message(partial), "")
         self.assertEqual(praise_message(none_asked), "")
 
@@ -160,14 +164,14 @@ class OutletGroups(unittest.TestCase):
         self.assertEqual(greeting("Syed / Ismath", self.GROUP), "")
         self.assertEqual(personalise("Soalan", "Syed / Ismath", self.GROUP), "Soalan")
 
-    def test_group_ack_has_no_name_but_still_mentions_boss(self):
+    def test_group_ack_has_no_name_and_no_boss(self):
         for day in range(1, 8):
             text = ack("Syed / Ismath", self.GROUP, date(2026, 9, day))
             self.assertNotIn("Syed", text)
-            self.assertIn("Boss", text)
+            self.assertNotIn("boss", text.lower())
 
     def test_dm_manager_still_greeted_by_name(self):
-        self.assertIn("Ravi boss", greeting("Ravi", 4242, date(2026, 9, 1)))
+        self.assertIn("Ravi", greeting("Ravi", 4242, date(2026, 9, 1)))
 
 
 if __name__ == "__main__":

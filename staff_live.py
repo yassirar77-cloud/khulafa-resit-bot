@@ -189,8 +189,32 @@ def _in_language(table: dict, language: str) -> str:
     return table.get(language) or table["bm"]
 
 
-def reminder_text(language: str) -> str:
+_REMIND_MANY = {
+    "bm": "Ada {n} soalan tadi belum dijawab — boleh tekan butang pada soalan tu? 🙏",
+    "tamil": "முன்னாடி கேட்ட {n} கேள்விக்கு இன்னும் பதில் வரல — அந்த கேள்வியில இருக்கற button-அ தட்டுங்க 🙏",
+    "english": "{n} earlier questions still need an answer — a quick tap on their buttons please 🙏",
+    "indonesian": "Ada {n} pertanyaan tadi yang belum dijawab — tolong tekan tombol di pertanyaan itu ya 🙏",
+    "bengali": "Age-r {n}-ta proshner uttor ekhono ashe nai — proshner button-e ektu tap korun 🙏",
+}
+
+
+def reminder_text(language: str, count: int = 1) -> str:
+    """One reminder per group: several unanswered questions share one
+    message instead of one each."""
+    if count > 1:
+        table = {k: v.format(n=count) for k, v in _REMIND_MANY.items()}
+        return _in_language(table, language)
     return _in_language(_REMIND, language)
+
+
+def group_reminders(actions: list[tuple[str, dict]]) -> dict:
+    """``{chat_id: [threads]}`` due for their one reminder, from plan_tick's
+    actions — sent as one message per group."""
+    out: dict = {}
+    for action, t in actions:
+        if action == "remind":
+            out.setdefault(t.get("chat_id"), []).append(t)
+    return out
 
 
 def clarify_text(language: str) -> str:

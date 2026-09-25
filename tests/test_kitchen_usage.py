@@ -683,7 +683,7 @@ def test_hantar_replies_error_when_claim_raises_unexpectedly(monkeypatch):
     asyncio.run(ku.handle_kitchen_callback(update, context))
 
     assert fake.rows("kitchen_daily_usage") == []
-    assert any("Gagal simpan" in r for r in replies)  # worker told, not silent
+    assert any("Tak dapat simpan" in r for r in replies)  # worker told, not silent
     assert fake.rows("kitchen_log_session")[0]["status"] == "open"  # retryable
 
 
@@ -879,9 +879,13 @@ def test_bulk_parse_rempah_bistro_only():
 
 def test_form_text_says_tap_to_keyin_not_typing():
     t = ku.form_text("cooked", "2026-06-24", "SEK-20", {}, "SEK20")
-    assert "Tap untuk key-in" in t
+    assert "Tekan item untuk isi (0/" in t
     assert "Balas SATU mesej" not in t   # bulk-typing instruction removed
-    assert "தமிழ்" in t                   # Tamil line present
+    # The cashier's language decides the wording (BM+Tamil: both lines).
+    both = ku.form_text("cooked", "2026-06-24", "SEK-20", {}, "SEK20", "bm_tamil")
+    assert "Tekan item untuk isi" in both and "எண் போடுங்க" in both
+    bengali = ku.form_text("left", "2026-06-24", "SEK-20", {}, "SEK20", "bengali")
+    assert "Baki Record" in bengali and "Tekan" not in bengali
 
 
 def test_build_item_keyboard_has_one_button_per_item_plus_hantar():
@@ -2262,7 +2266,7 @@ def test_stage2_job_posts_comparison_when_pos_complete(monkeypatch):
     assert "Ringkasan Guna vs POS" in text and "🔴" in text  # real comparison
     pandari_chat, pandari_text = bot.sent[1]
     assert pandari_chat == -100
-    assert "பண்டாரி" in pandari_text and "wastage" in pandari_text
+    assert "Untuk tukang masak" in pandari_text and "wastage" in pandari_text
     # persisted
     assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is True
 
@@ -2293,7 +2297,7 @@ def test_stage2_defers_when_only_day_shift_in_then_posts_after_overnight(monkeyp
     assert len(bot2.sent) == 2
     _, text2 = bot2.sent[0]
     assert "Ringkasan Guna vs POS" in text2
-    assert "பண்டாரி" in bot2.sent[1][1]
+    assert "Untuk tukang masak" in bot2.sent[1][1]
     assert ku.comparison_already_posted(fake, "SEK20", "2026-06-24") is True
 
 
@@ -2416,7 +2420,7 @@ def test_stage2_user_scenario_26jun_missing_day_shift(monkeypatch):
                        now=datetime(2026, 6, 26, 14, 0, tzinfo=MY))
     texts2 = [t for _, t in bot2.sent]
     assert any("Ringkasan Guna vs POS" in t and "2026-06-24" in t for t in texts2)
-    gap = next(t for t in texts2 if "hilang" in t)
+    gap = next(t for t in texts2 if "tidak masuk" in t)
     assert "2026-06-25" in gap and "siang" in gap  # the missing DAY shift named
     assert "🔴" not in gap
 
@@ -2697,8 +2701,8 @@ def test_render_pos_only_summary_wording():
          "flag": None, "source": "pos"},
     ]
     text = ku.render_pos_only_summary("SEK-20", "2026-06-24", evals)
-    assert "POS punya jualan" in text and "SEK-20" in text and "2026-06-24" in text
-    assert "tak boleh banding" in text
+    assert "Jualan POS" in text and "SEK-20" in text and "2026-06-24" in text
+    assert "tak dapat dibanding" in text
     assert "Ayam Goreng: POS jual 96 pcs" in text
     assert "Kambing: POS jual 1.8 kg" in text
     assert "🔴" not in text and "LEAK" not in text  # never a fabricated flag
@@ -2713,7 +2717,7 @@ def test_missing_pos_shifts_and_alert_wording():
     # day missing -> 'siang'; never flags
     cov = {"has_day": False, "has_overnight": True, "summary_present": True, "shift_count": 1}
     text = ku.render_pos_missing_shift("SEK-20", "2026-06-25", cov)
-    assert "hilang" in text and "siang" in text and "2026-06-25" in text
+    assert "tidak masuk" in text and "siang" in text and "2026-06-25" in text
     assert "🔴" not in text
     # overnight missing -> 'malam'
     cov2 = {"has_day": True, "has_overnight": False, "summary_present": True, "shift_count": 1}
@@ -2844,9 +2848,11 @@ def test_leak_items_keeps_only_leak_flags():
 def test_render_pandari_wastage_tamil_content():
     leaks = [_leak_ev(used=100, pos=80)]
     out = ku.render_pandari_wastage("SEK-20", "2026-08-06", leaks)
-    assert "👨‍🍳 பண்டாரி கவனிக்கணும் — SEK-20 • 2026-08-06" in out
-    assert "Ayam Goreng: guna 100 pcs, POS jual 80 pcs மட்டும் — 20 pcs அதிகம்" in out
-    assert "wastage" in out and "அளவா masak பண்ணுங்க" in out
+    assert "👨‍🍳 Untuk tukang masak — SEK-20 • 2026-08-06" in out
+    assert "Ayam Goreng: guna 100 pcs, POS jual 80 pcs — lebih 20 pcs" in out
+    assert "!" not in out
+    tamil = ku.render_pandari_wastage("SEK-20", "2026-08-06", leaks, "tamil")
+    assert "சமையல்காரருக்கு" in tamil and "20 pcs அதிகம்" in tamil and "wastage" in tamil
     # empty input -> no message at all
     assert ku.render_pandari_wastage("SEK-20", "2026-08-06", []) == ""
 
@@ -2855,7 +2861,7 @@ def test_render_wastage_kg_and_purchase_wording():
     leaks = [_leak_ev(label="Telur Ikan", used=1.5, pos=0.4, unit="kg",
                       source="purchase")]
     out = ku.render_pandari_wastage("SEK-20", "2026-08-06", leaks)
-    assert "guna 1.5 kg, beli 0.4 kg மட்டும் — 1.1 kg அதிகம்" in out
+    assert "guna 1.5 kg, beli 0.4 kg — lebih 1.1 kg" in out
     assert "POS jual" not in out
 
 
@@ -3003,19 +3009,20 @@ def test_filled_but_unsent_form_gets_the_hantar_nudge():
     forms = ku.find_unsubmitted_forms(fake, now=now)
     assert forms[0]["all_filled"] is True
     text = ku.render_form_reminder("SEK-20", forms[0])
-    assert "'Hantar' தட்டுங்க" in text
-    assert "belum Hantar" in text
+    assert "Cuma tekan Hantar" in text
+    assert "Hantar மட்டும் தட்டுங்க" in ku.render_form_reminder("SEK-20", forms[0], "tamil")
 
 
 def test_reminder_text_is_simple_and_bilingual():
     form = {"phase": ku.PHASE_LEFT, "business_date": "2026-08-06",
             "filled": 0, "total": 11, "all_filled": False, "age_hours": 12.0}
     text = ku.render_form_reminder("Bistro", form)
-    assert "⏰ Form இன்னும் fill ஆகல!" in text
+    assert "⏰ Borang belum siap" in text and "!" not in text
     assert "Rekod Baki" in text and "Bistro" in text
-    assert "11 item-ல 11 இன்னும் காலி" in text
-    assert "reminder நின்னுடும்" in text
-    assert "Form belum isi lagi" in text
+    assert "11 daripada 11 item belum diisi" in text
+    tamil = ku.render_form_reminder("Bistro", form, "tamil")
+    assert "11 item-ல 11 இன்னும் காலி" in tamil and "!" not in tamil
+    assert "Boss" not in tamil and "boss" not in tamil
 
 
 def test_owner_escalation_lists_state_and_age():
@@ -3061,7 +3068,7 @@ def test_form_chase_job_reminds_group_and_escalates_once(monkeypatch):
     bot = _run(datetime(2026, 8, 7, 6, 45, tzinfo=MY))
     chats = [c for c, _ in bot.sent]
     assert chats == [-100]
-    assert "Form இன்னும் fill ஆகல" in bot.sent[0][1]
+    assert "Borang belum siap" in bot.sent[0][1]
 
     # 10:45 (age ~8.75h, inside the [8,10) bucket): group nagged AND owner told.
     bot2 = _run(datetime(2026, 8, 7, 10, 45, tzinfo=MY))
@@ -3121,7 +3128,7 @@ def test_coverage_incomplete_when_summaries_cover_only_the_day_shift():
     assert cov["complete"] is False                     # never compare a half-day
     assert ku.pos_complete_for_outlet(fake, "SEK20", "2026-06-24") is False
     text = ku.render_pos_incomplete("SEK-20", "2026-06-24", cov)
-    assert "POS belum lengkap" in text and "sebahagian shift" in text
+    assert "POS belum lengkap" in text and "sebahagian" in text
 
 
 def test_coverage_complete_once_both_daily_closes_land():
@@ -3186,10 +3193,10 @@ def test_group_reminder_combines_open_forms_in_one_message():
     ]
     text = ku.render_group_reminder("SEK-20", forms)
     assert text.count("⏰") == 1
-    assert "2 form இன்னும் முடியல — SEK-20" in text
-    assert "11 item-ல 8 இன்னும் காலி" in text
-    assert "'Hantar' மட்டும்" in text
-    assert "tekan Hantar" in text
+    assert "2 borang belum siap — SEK-20" in text
+    assert "2 form இன்னும் முடியல — SEK-20" in ku.render_group_reminder("SEK-20", forms, "tamil")
+    assert "8/11 item belum diisi" in text
+    assert "tekan Hantar sahaja" in text
     # One form keeps the detailed single-form wording.
     assert ku.render_group_reminder("SEK-20", forms[:1]) == ku.render_form_reminder("SEK-20", forms[0])
     assert ku.render_group_reminder("SEK-20", []) == ""
@@ -3219,4 +3226,4 @@ def test_form_chase_job_sends_one_message_per_group(monkeypatch):
     asyncio.run(ku.post_form_reminders(types.SimpleNamespace(bot=bot)))
     group_msgs = [t for c, t in bot.sent if c == -100]
     assert len(group_msgs) == 1
-    assert "2 form இன்னும் முடியல" in group_msgs[0]
+    assert "2 borang belum siap" in group_msgs[0]
