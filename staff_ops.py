@@ -18,9 +18,11 @@ docs/staff_questions_v2_review.md):
   on upload  minimarket a mini market / kedai runcit receipt   [buttons]
   Mon 11:05  praise     weekly praise in every group (info)
 
-Max 5 staff messages per group per day (reminders and reactions on bills don't
-count): the tip and the sales note are skipped first, then extra
-invoice/mini-market questions (those still reach the director's summary).
+Max 5 staff messages per group per day, bills included (see may_send;
+reactions on bills and reminders don't count). Only the bills, mini market
+and invoice questions get a 30-minute reminder; the rest just expire and
+show as "no reply" in the director's summary. Questions skipped by the
+limit still reach that summary.
 
 Everything here is pure: detection rules, texts in the cashier's language,
 button sets. Telegram and database glue live in bot.py. The texts are the

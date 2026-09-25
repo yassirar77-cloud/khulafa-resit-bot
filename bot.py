@@ -5951,7 +5951,7 @@ def _detail_thread(chat_id):
 
 
 async def staff_live_tick(application: Application) -> None:
-    """Every 10 min: 1-hour reminders, 2-hour no-reply, drop stale queued
+    """Every 10 min: 30-minute reminders (money questions only), 1-hour no-reply, drop stale queued
     questions, release the next queued question in a quiet group."""
     if staff_chat.style() == staff_chat.CLASSIC or not staff_live.live_outlets():
         return

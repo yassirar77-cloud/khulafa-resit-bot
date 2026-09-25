@@ -8,7 +8,7 @@ One question at a time, per group. Each check-in is a *thread* in
 
   queued    waiting because another question is still open in that group
   open      sent, waiting for an answer
-  reminded  sent + one gentle reminder after 1 hour
+  reminded  sent + one reminder after 30 minutes (money questions only)
   answered  a reply was understood (and saved)
   no_reply  2 hours without an answer — goes in the director's morning
             summary, and the group's next queued question is released
@@ -47,13 +47,17 @@ ANSWERED, NO_REPLY, DROPPED = "answered", "no_reply", "dropped"
 INFO = "info"            # sent, no reply expected (staff_ops sales note, tip, praise)
 ACTIVE = (OPEN, REMINDED)
 
-# A question gets one reminder after 30 minutes and expires after an hour,
+# A money question gets one reminder after 30 minutes; every question expires after an hour,
 # so it never holds the next check-in back (nothing drifts past midnight).
 REMIND_AFTER = timedelta(minutes=30)
 EXPIRE_AFTER = timedelta(hours=1)
 LATE_TAP_WINDOW = timedelta(hours=12)   # a button tap on an expired question still counts
 DETAIL_WINDOW = timedelta(hours=1)      # typed details after "Change" / "Problem"
 QUIET_START_HOUR, QUIET_END_HOUR = 0, 6
+# Only the money questions get the 30-minute reminder. Wastage, leftover,
+# taste check, sales note (and the paused check-ins) just expire and show as
+# "no reply" in the director's morning summary.
+REMIND_SLOTS = ("bills", "minimarket", "invoice")
 SLOW_REPLY_MINUTES = 30
 
 REPLY_STATUSES = ("ok", "short", "finished", "problem", "order", "handed_in", "other")
@@ -117,7 +121,8 @@ def plan_tick(threads: list[dict], now: datetime) -> list[tuple[str, dict]]:
             age = now - asked
             if age >= EXPIRE_AFTER:
                 actions.append(("expire", t))
-            elif t.get("status") == OPEN and age >= REMIND_AFTER and not _quiet(now):
+            elif (t.get("status") == OPEN and age >= REMIND_AFTER and not _quiet(now)
+                  and t.get("slot") in REMIND_SLOTS):
                 actions.append(("remind", t))
                 still_active = True
             else:
