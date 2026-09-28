@@ -6549,6 +6549,11 @@ async def handle_staff_voice(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not code or not staff_live.is_live(code):
         return
     language = _cashier_language(code)
+    # Transcription language: the shift's /lang setting as given; when none
+    # is set, no language is sent and Whisper detects it (lang=auto). The
+    # wording of replies still uses the outlet default.
+    shift, _day = cashier_names.shift_at(datetime.now(MALAYSIA_TZ))
+    stt_language = cashier_names.language_for(code, shift, default=None)
     thread = await asyncio.to_thread(_active_thread, message.chat_id,
                                      message.reply_to_message.message_id
                                      if message.reply_to_message else None)
@@ -6562,7 +6567,7 @@ async def handle_staff_voice(update: Update, context: ContextTypes.DEFAULT_TYPE)
             logger.warning("staff voice: download failed (%s): %s", code, exc)
             transcript = staff_voice.failed("download_error", str(exc)[:200], language)
         else:
-            transcript = await asyncio.to_thread(staff_voice.transcribe, audio, language)
+            transcript = await asyncio.to_thread(staff_voice.transcribe, audio, stt_language)
     text = staff_voice.accept(transcript)
     await asyncio.to_thread(_insert_staff_logs, [staff_voice.log_row(
         thread, outlet_code=code, chat_id=message.chat_id, language=language,
@@ -6576,9 +6581,12 @@ async def handle_staff_voice(update: Update, context: ContextTypes.DEFAULT_TYPE)
         log = logger.warning if why["level"] == "warning" else logger.info
         log("staff voice: %s asked to type — %s%s (lang=%s, %ss)", code, why["reason"],
             f" {why['detail']}" if why["detail"] else "",
-            staff_voice.language_code(language), voice.duration)
+            (transcript or {}).get("language") or ("auto" if stt_language is None
+                                                   else staff_voice.language_code(language)),
+            voice.duration)
         return
-    logger.info("staff voice: %s transcribed %d chars", code, len(text))
+    logger.info("staff voice: %s transcribed %d chars (lang=%s)", code, len(text),
+                (transcript or {}).get("language"))
     await _handle_staff_text(message, context, text, code)
 
 
@@ -6620,6 +6628,14 @@ async def _handle_staff_text(message, context, text: str, code: str) -> None:
     thread = await asyncio.to_thread(
         _active_thread, message.chat_id, reply_to.message_id if reply_to else None)
     if not thread:
+        # Nothing is being asked in this group: say so once per
+        # NOTHING_OPEN_EVERY so the cashier knows they were heard (a voice
+        # note still shows its transcript), then stop — nothing to parse.
+        if _prompt_due("nothing_open", message.chat_id, now):
+            language = _cashier_language(code)
+            await message.reply_text(staff_ack.nothing_open(
+                language, transcript=text if getattr(message, "voice", None) else None))
+            logger.info("staff live: %s message with no open question", code)
         return
     is_reply = bool(reply_to and reply_to.message_id == thread.get("message_id"))
     parsed = await asyncio.to_thread(
@@ -6639,7 +6655,7 @@ async def _handle_staff_text(message, context, text: str, code: str) -> None:
         # The reader says this is not an answer to the open question: say so
         # and ask which question it is for (at most once per group per
         # UNMATCHED_EVERY, so staff talking among themselves are not pestered).
-        if parsed is not None and not parsed.get("is_answer") and _unmatched_due(message.chat_id, now):
+        if parsed is not None and not parsed.get("is_answer") and _prompt_due("unmatched", message.chat_id, now):
             open_threads = await asyncio.to_thread(_open_threads, message.chat_id)
             await message.reply_text(staff_ack.unmatched(thread.get("language"), open_threads))
             logger.info("staff live: %s message not matched to a question", code)
@@ -6669,16 +6685,23 @@ async def _handle_staff_text(message, context, text: str, code: str) -> None:
     await staff_live_tick(context.application)
 
 
-UNMATCHED_EVERY = timedelta(minutes=10)
-_unmatched_last: dict = {}
+# "Which question is that for?" and "nothing is being asked right now" go to a
+# group at most once per window each, so staff chatter is not answered
+# message by message.
+UNMATCHED_EVERY = NOTHING_OPEN_EVERY = timedelta(minutes=10)
+_prompt_last: dict = {}
 
 
-def _unmatched_due(chat_id, now) -> bool:
-    last = _unmatched_last.get(chat_id)
+def _prompt_due(kind: str, chat_id, now) -> bool:
+    last = _prompt_last.get((kind, chat_id))
     if last is not None and now - last < UNMATCHED_EVERY:
         return False
-    _unmatched_last[chat_id] = now
+    _prompt_last[(kind, chat_id)] = now
     return True
+
+
+def _unmatched_due(chat_id, now) -> bool:      # kept for older call sites / tests
+    return _prompt_due("unmatched", chat_id, now)
 
 
 def _open_threads(chat_id) -> list[dict]:

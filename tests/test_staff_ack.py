@@ -109,6 +109,25 @@ class UnmatchedTests(unittest.TestCase):
             self.assertLessEqual(ack.unmatched(lang, threads).count("\n"), 1, lang)
 
 
+class NothingOpenTests(unittest.TestCase):
+    def test_one_line_in_every_language(self):
+        self.assertEqual(ack.nothing_open("english"), "✅ Noted — nothing is being asked right now.")
+        self.assertEqual(ack.nothing_open("bm"), "✅ Noted — tak ada soalan sekarang.")
+        self.assertEqual(ack.nothing_open("bm_tamil"), "✅ Noted — tak ada soalan sekarang.")
+        for lang in LANGS:
+            text = ack.nothing_open(lang)
+            self.assertTrue(text.startswith("✅ Noted"), lang)
+            self.assertEqual(text.count("\n"), 0, lang)
+
+    def test_voice_note_keeps_its_transcript(self):
+        text = ack.nothing_open("tamil", transcript="காடிசியா மேவாட்டார் எப்பாவுக்குனான்")
+        lines = text.split("\n")
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[0], "✅ Noted — இப்போ எந்த கேள்வியும் இல்ல.")
+        self.assertEqual(lines[1], "🎤 நீங்க சொன்னது: “காடிசியா மேவாட்டார் எப்பாவுக்குனான்”")
+        self.assertTrue(ack.nothing_open("english", transcript="x " * 200).split("\n")[1].endswith("…”"))
+
+
 import unittest.mock  # noqa: E402
 
 if __name__ == "__main__":

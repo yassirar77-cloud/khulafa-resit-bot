@@ -280,7 +280,9 @@ def _failure(reason: str, code: str, *, status=None, message: str = "") -> dict:
 def transcribe(audio_bytes: bytes, *, language, mime: str = "audio/ogg",
                filename: str = "voice.ogg") -> dict:
     """Speech to text for a staff voice note. ``language`` is the cashier's
-    /lang setting (or already a Whisper code); it is ALWAYS sent.
+    /lang setting (or already a Whisper code) and is sent as given; None
+    means the shift has no /lang set, so no language parameter is sent and
+    Whisper detects it (logged and reported as lang=auto).
 
     Success: ``{"ok": True, "text", "confidence", "provider", "model",
     "language", "duration"}``. Failure: ``{"ok": False, "reason", "status",
@@ -290,8 +292,13 @@ def transcribe(audio_bytes: bytes, *, language, mime: str = "audio/ogg",
     (the model heard nothing). API errors are logged at WARNING. Never
     raises."""
     name = voice_provider()
-    code = (language if language in VOICE_LANGUAGE_CODES.values()
-            else voice_language_code(language))
+    # None = the cashier on shift has no /lang: let Whisper detect the
+    # language for this one call. Anything else is always mapped to a code.
+    if language is None:
+        code = "auto"
+    else:
+        code = (language if language in VOICE_LANGUAGE_CODES.values()
+                else voice_language_code(language))
     if name not in _VOICE_PROVIDERS:
         logger.warning("staff ai: voice provider %r not available", name)
         return _failure("unknown_provider", code, message=name)
@@ -305,14 +312,12 @@ def transcribe(audio_bytes: bytes, *, language, mime: str = "audio/ogg",
         return _failure("no_key", code)
     if not audio_bytes:
         return _failure("no_audio", code)
+    kwargs = dict(model=voice_model(), file=(filename, audio_bytes, mime),
+                  response_format="verbose_json", temperature=0)
+    if code != "auto":
+        kwargs["language"] = code
     try:
-        resp = client.audio.transcriptions.create(
-            model=voice_model(),
-            file=(filename, audio_bytes, mime),
-            language=code,
-            response_format="verbose_json",
-            temperature=0,
-        )
+        resp = client.audio.transcriptions.create(**kwargs)
     except Exception as exc:
         status = getattr(exc, "status_code", None)
         message = getattr(exc, "message", None) or str(exc)
@@ -328,6 +333,7 @@ def transcribe(audio_bytes: bytes, *, language, mime: str = "audio/ogg",
         duration = round(float(duration), 1) if duration is not None else None
     except (TypeError, ValueError):
         duration = None
+    logger.info("staff ai: transcribed %d chars (lang=%s, %ss)", len(text), code, duration)
     return {
         "ok": True,
         "text": text,
