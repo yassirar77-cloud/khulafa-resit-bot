@@ -65,7 +65,8 @@ QUIET_START_HOUR, QUIET_END_HOUR = 0, 6
 REMIND_SLOTS = ("bills", "minimarket", "invoice")
 SLOW_REPLY_MINUTES = 30
 
-REPLY_STATUSES = ("ok", "short", "finished", "problem", "order", "handed_in", "other")
+REPLY_STATUSES = ("ok", "short", "finished", "problem", "order", "handed_in",
+                  "mismatch_explained", "other")
 HANDED_IN = "handed_in"
 
 
@@ -253,7 +254,11 @@ REPLY_PROMPT = (
     "finished (something sold out / finished), problem (broken, issue), "
     "order (they gave order items/quantities), handed_in (for a bill "
     "question: they gave the paper bill to the boss / office instead of "
-    "uploading it), other.\n"
+    "uploading it), mismatch_explained (for a bill-vs-order question: they "
+    "explain why the bill differs from the order — supplier short, sent "
+    "extra, price went up, ordered more by phone ...), other.\n"
+    "- explanation_en: for a bill-vs-order question only, their explanation "
+    "in one short English sentence; otherwise empty.\n"
     "- items: ONLY when they list things to order with quantities, each "
     "{item, qty, unit}: item = the usual Malay name in English letters "
     "(ayam, ikan, sotong, udang, kambing, daging, telur, santan, roti, gas "
@@ -274,7 +279,8 @@ REPLY_PROMPT = (
     "water, flood, injury, robbery, theft, police. Do NOT report as an issue "
     "an item merely sold out, a normal order, or a reply that all is fine.\n"
     'Reply with JSON only: {"is_answer": true|false, "clear": true|false, '
-    '"summary_en": "...", "status": "ok|short|finished|problem|order|other", '
+    '"summary_en": "...", "status": "ok|short|finished|problem|order|'
+    'mismatch_explained|other", "explanation_en": "", '
     '"items": [], "asks_if_bot": false, '
     '"issue": {"type": "equipment|staff|supplier|customer|cash|other|none", '
     '"summary_en": "...", "urgent": false}}'
@@ -305,6 +311,7 @@ def parse_reply(question_en, question_text, reply_text, complete) -> dict | None
         "items": items if isinstance(items, list) else [],
         "asks_if_bot": data.get("asks_if_bot") is True,
         "issue": data.get("issue") if isinstance(data.get("issue"), dict) else None,
+        "explanation_en": str(data.get("explanation_en") or "").strip(),
     }
 
 

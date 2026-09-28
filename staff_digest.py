@@ -4,7 +4,8 @@ Everything the outlets told us — or didn't — today, in one message ordered
 by how much it needs the director's attention:
 
   1. outlets that never replied to a check-in (and the unanswered ones)
-  2. supplier bills asked about and still not uploaded
+  2. supplier bills asked about and still not uploaded, and bills that
+     differed from the order with no explanation after the nudges
   3. orders the cashier changed from the draft
   4. anything flagged as an issue in a reply (staff_issues)
   5. one line per outlet where everything was normal
@@ -24,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 
+import po_mismatch
 import staff_ai
 import staff_chat
 import staff_live
@@ -76,7 +78,8 @@ def gather(threads: list[dict], outlets: dict, issues: list[dict] | None = None,
                                   "said": t.get("reply_en") or t.get("reply_text") or ""})
     silent, normal = [], []
     flagged = ({b["outlet"] for b in bills_open} | {o["outlet"] for o in orders_changed}
-               | {i.get("outlet") for i in (issues or [])} | {a["outlet"] for a in other_answers})
+               | {i.get("outlet") for i in (issues or [])} | {a["outlet"] for a in other_answers}
+               | {p["outlet"] for p in po_mismatch.digest_lines(threads, label)})
     for code in sorted(per, key=lambda c: (-per[c]["unanswered"], label(c))):
         s = per[code]
         if not s["asked"]:
@@ -91,6 +94,7 @@ def gather(threads: list[dict], outlets: dict, issues: list[dict] | None = None,
         "day": day.isoformat() if day else None,
         "silent": silent,
         "bills_open": bills_open,
+        "po_unexplained": po_mismatch.digest_lines(threads, label),
         "orders_changed": orders_changed,
         "issues": [{"outlet": i.get("outlet"), "type": i.get("type") or "other",
                     "summary": i.get("summary_en") or "", "urgent": bool(i.get("urgent"))}
@@ -112,6 +116,9 @@ def plain(facts: dict) -> str:
     for b in facts.get("bills_open") or []:
         days = f" ({b['days']} days)" if b.get("days") else ""
         lines.append(f"🧾 {b['outlet']}: {b['supplier']} bill still not uploaded{days} — {b['answer']}")
+    for p in facts.get("po_unexplained") or []:
+        lines.append(f"🧾 {p['outlet']}: {p['supplier']} bill differs from the order "
+                     f"({p['lines']} lines) — no explanation")
     for o in facts.get("orders_changed") or []:
         lines.append(f"✏️ {o['outlet']}: order changed — {o['change']}")
     for i in facts.get("issues") or []:
@@ -135,7 +142,8 @@ SYSTEM_PROMPT = (
     "- At most 12 lines, one point per line, no headers, no bullets other "
     "than a leading emoji, no bold.\n"
     "- Order by concern: first outlets that never replied, then supplier "
-    "bills still not uploaded, then orders changed from the draft, then "
+    "bills still not uploaded or differing from the order, then orders "
+    "changed from the draft, then "
     "issues flagged, then one line per outlet where everything was normal.\n"
     "- Use ONLY the facts given. Every outlet name, number, item and supplier "
     "must appear in the facts exactly as given; never add totals, money, "

@@ -43,6 +43,7 @@ CHECKIN_NAMES = {
     "lunch": "lunch crowd", "order": "tomorrow's order", "bills": "supplier bill",
     "night": "night check", "invoice": "supplier invoice", "minimarket": "mini market buy",
     "leftover": "leftover food", "wastage": "wastage", "afternoon": "taste check",
+    "po_mismatch": "bill vs order",
 }
 
 
@@ -61,7 +62,7 @@ def slots() -> set[str]:
     default every scheduled check-in plus the money questions."""
     raw = os.environ.get("NUDGE_SLOTS") or ""
     chosen = {s.strip().lower() for s in raw.split(",") if s.strip()}
-    return chosen or set(staff_chat.SLOTS) | {"invoice", "minimarket"}
+    return chosen or set(staff_chat.SLOTS) | {"invoice", "minimarket", "po_mismatch"}
 
 
 def in_window(now: datetime) -> bool:
@@ -127,19 +128,19 @@ _CHECKIN_WORDS = {
     "bm": {"open": "kedai buka", "stock": "stok", "cook": "masak hari ni", "lunch": "lunch",
            "order": "order esok", "bills": "bil supplier", "night": "malam ni",
            "invoice": "invois", "minimarket": "mini market", "leftover": "baki makanan",
-           "wastage": "buangan", "afternoon": "rasa lauk"},
+           "wastage": "buangan", "afternoon": "rasa lauk", "po_mismatch": "bil vs order"},
     "tamil": {"open": "கடை திறப்பு", "stock": "stock", "cook": "இன்னைக்கு சமையல்", "lunch": "lunch",
               "order": "நாளைய order", "bills": "supplier bill", "night": "ராத்திரி",
               "invoice": "invoice", "minimarket": "mini market", "leftover": "மீதி சாப்பாடு",
-              "wastage": "wastage", "afternoon": "ருசி"},
+              "wastage": "wastage", "afternoon": "ருசி", "po_mismatch": "bill vs order"},
     "indonesian": {"open": "toko buka", "stock": "stok", "cook": "masak hari ini", "lunch": "makan siang",
                    "order": "order besok", "bills": "nota supplier", "night": "malam ini",
                    "invoice": "nota", "minimarket": "mini market", "leftover": "sisa makanan",
-                   "wastage": "buangan", "afternoon": "rasa lauk"},
+                   "wastage": "buangan", "afternoon": "rasa lauk", "po_mismatch": "nota vs order"},
     "bengali": {"open": "dokan khola", "stock": "stock", "cook": "aajker ranna", "lunch": "lunch",
                 "order": "kalker order", "bills": "supplier bill", "night": "raat",
                 "invoice": "invoice", "minimarket": "mini market", "leftover": "baki khabar",
-                "wastage": "wastage", "afternoon": "swad"},
+                "wastage": "wastage", "afternoon": "swad", "po_mismatch": "bill vs order"},
 }
 
 

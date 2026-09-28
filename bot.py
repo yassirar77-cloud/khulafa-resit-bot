@@ -127,6 +127,7 @@ import overbuy_watch
 import supervisor
 import order_generator
 import order_proposal
+import po_mismatch
 import order_sanity
 import reconciliation_service
 import sales_analytics
@@ -6410,6 +6411,8 @@ async def handle_staff_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # drafts learn what this outlet really buys (staff_orders).
     if thread.get("slot") == "order":
         await _save_order_answer(thread, parsed, message.text)
+    if thread.get("slot") == po_mismatch.SLOT:
+        await _save_po_explanation(thread, parsed, message.text)
     await _flag_issue(context.application, thread, parsed, message.text)
     # One question at a time: the group's next queued check-in goes now.
     await staff_live_tick(context.application)
@@ -6842,6 +6845,80 @@ def _invoice_inputs(db, receipt_id, chat_id, receipt_date):
     return ([{"canonical_item": k, "qty": v} for k, v in lines.items()], history, len(days))
 
 
+def _po_lines(code, day) -> list[dict]:
+    """The purchase order for ``day``: what the cashier confirmed for it
+    (staff_order_items), else the saved order draft. ``[{item, qty, unit}]``."""
+    codes = staff_chat.data_codes(code)
+    rows = (supabase.table(staff_orders.TABLE).select("canonical_item, qty, unit, created_at")
+            .in_("outlet_code", codes).eq("order_for", day.isoformat())
+            .not_.is_("canonical_item", "null").order("created_at").execute().data or [])
+    if rows:
+        latest: dict = {}
+        for r in rows:
+            latest[str(r["canonical_item"]).lower()] = r
+        return [{"item": item, "qty": r.get("qty"), "unit": r.get("unit") or ""}
+                for item, r in latest.items()]
+    drafts = (supabase.table("order_drafts").select("item, qty, pack")
+              .in_("outlet", codes).eq("due_date", day.isoformat())
+              .neq("status", "cancelled").execute().data or [])
+    return [{"item": str(d["item"]).lower(), "qty": d.get("qty"), "unit": d.get("pack") or ""}
+            for d in drafts if d.get("item") and d.get("qty")]
+
+
+def _usual_prices(code, merchant, day, items) -> dict:
+    """``{item: usual unit price}`` this outlet paid the same supplier over 8
+    weeks (median), for the items on the bill."""
+    if not items:
+        return {}
+    codes = staff_chat.data_codes(code)
+    rows = (supabase.table("item_prices").select("canonical_item, unit_price, merchant")
+            .in_("outlet_code", codes).in_("canonical_item", list(items))
+            .gte("receipt_date", (day - timedelta(weeks=8)).isoformat())
+            .lt("receipt_date", day.isoformat()).limit(2000).execute().data or [])
+    same = [r for r in rows if str(r.get("merchant") or "").upper() == str(merchant or "").upper()]
+    use = same or rows
+    per: dict = {}
+    for r in use:
+        try:
+            price = float(r.get("unit_price"))
+        except (TypeError, ValueError):
+            continue
+        if price > 0:
+            per.setdefault(str(r["canonical_item"]).lower(), []).append(price)
+    import statistics
+    return {item: statistics.median(v) for item, v in per.items() if len(v) >= 2}
+
+
+def _po_mismatches(code, stored) -> list[dict]:
+    """The bill's lines against the order for its date. ``[]`` when there is
+    no order for that day or nothing differs."""
+    try:
+        day = date.fromisoformat(str(stored.get("receipt_date"))[:10])
+    except (TypeError, ValueError):
+        return []
+    order = _po_lines(code, day)
+    if not order:
+        return []
+    bill = po_mismatch.receipt_lines(stored.get("items"))
+    usual = _usual_prices(code, stored.get("merchant"), day, [b["item"] for b in bill])
+    return po_mismatch.compare(bill, order, usual)
+
+
+async def _save_po_explanation(thread, parsed, text) -> None:
+    """The cashier's answer to a bill-vs-order question, on the receipt row."""
+    receipt_id = (thread.get("facts") or {}).get("receipt_id")
+    if receipt_id is None:
+        return
+    fields = {"po_explanation": po_mismatch.explanation(parsed, text),
+              "po_explained_at": datetime.now(MALAYSIA_TZ).isoformat()}
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table(RECEIPTS_TABLE).update(fields).eq("id", receipt_id).execute())
+        logger.info("po mismatch: explanation saved for receipt %s", receipt_id)
+    except Exception:
+        logger.exception("po mismatch: explanation save failed (migrations/0053 applied?)")
+
+
 def _already_asked(db, receipt_id) -> bool:
     rows = (db.table(staff_live.TABLE).select("id")
             .eq("facts->>receipt_id", str(receipt_id)).limit(1).execute().data or [])
@@ -6891,9 +6968,30 @@ async def staff_ops_on_upload(application, stored: dict, message, *, supplier: b
                 facts={"receipt_id": receipt_id, "shop": shop, "items": items},
                 record_if_capped=True, reply_to=message.message_id)
             return
-        if not supplier or not staff_live.slot_enabled("invoice"):
+        if not supplier:
             return
         if await asyncio.to_thread(_already_asked, db, receipt_id):
+            return
+        # The bill against the order for that day (po_mismatch): the lines
+        # that differ are the bill's one question, ahead of the invoice checks.
+        if staff_live.slot_enabled(po_mismatch.SLOT):
+            mismatches = await asyncio.to_thread(_po_mismatches, code, stored)
+            if mismatches:
+                supplier_name = (staff_chat._short_supplier(merchant)
+                                 or str(merchant or "").title() or "supplier")
+                language = _cashier_language(code)
+                po_facts = po_mismatch.facts(receipt_id, supplier_name, mismatches)
+                await _ops_send(
+                    application, db, code=code, chat_id=message.chat_id, slot=po_mismatch.SLOT,
+                    text=po_mismatch.question(mismatches, supplier_name, language),
+                    question_en=po_mismatch.question(mismatches, supplier_name, "english"),
+                    facts=po_facts, record_if_capped=True, reply_to=message.message_id)
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(
+                        lambda: db.table(RECEIPTS_TABLE).update({"po_mismatch": mismatches})
+                        .eq("id", receipt_id).execute())
+                return
+        if not staff_live.slot_enabled("invoice"):
             return
         lines, history, outlet_days = await asyncio.to_thread(
             _invoice_inputs, db, receipt_id, message.chat_id, stored.get("receipt_date"))
