@@ -128,6 +128,16 @@ class StaffLiveWiring(unittest.TestCase):
         self.assertIn('.eq("kind", staff_voice.KIND)', stats)
         self.assertIn("staff_voice.format_stats(rows, _outlet_label, since=week)", stats)
         body = _block(self.src, "async def _handle_staff_text(")
+        # Every saved answer is acknowledged; an unmatched message is asked
+        # which question it is for (rate-limited per group).
+        self.assertIn("await _acknowledge(message, thread, parsed, text)", body)
+        self.assertIn("staff_ack.unmatched(thread.get(\"language\"), open_threads)", body)
+        self.assertIn("_unmatched_due(message.chat_id, now)", body)
+        ackfn = _block(self.src, "async def _acknowledge(")
+        self.assertIn('transcript=text if getattr(message, "voice", None) else None', ackfn)
+        self.assertIn("vocabulary=staff_chat.item_vocabulary()", ackfn)
+        detail = _block(self.src, "async def _save_detail(")
+        self.assertIn("await _acknowledge(message, thread, parsed, text)", detail)
         self.assertIn("staff_live.asks_if_bot(text)", body)
         self.assertIn('parsed.get("asks_if_bot")', body)
         self.assertIn("await _save_order_answer(thread, parsed, text)", body)

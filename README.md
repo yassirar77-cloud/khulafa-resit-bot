@@ -29,6 +29,7 @@ answered and today's token spend.
 | --- | --- | --- | --- |
 | Check-ins (08:00 open, 10:35 stock, 11:05 cook, 15:00 lunch, 20:05 order, 21:05 bills, 23:00 night) | `staff_chat.py`, `staff_live.py` | Words the question in the cashier's language; back-translates and judges Tamil | `staff_chat_log`, `staff_chat_thread` |
 | Reply reading | `staff_live.py` | Reads the cashier's reply: answer or chatter, status, English summary, order items, "are you a bot?", issue, explanation | `staff_chat_thread`, `staff_order_items` |
+| Acknowledgement | `staff_ack.py` | None (plain template, fact-checked): one line back saying what was understood ("Noted: 12 ayam, 5 kg bawang"), the transcript for a voice note, or "which question is that for?" when the reply matched none | — |
 | Follow-up nudges | `staff_nudge.py` | Rephrases the two reminders (outlet, check-in, minutes elapsed are the only facts); `NUDGE_AFTER_MIN`, 07:00–23:30, none for `/closed` outlets | `staff_chat_log` (`kind='nudge'`, `nudge_no`), `outlet_closed_days` |
 | Nightly director digest (23:30) | `staff_digest.py` | Writes the day's replies and non-replies in plain English, max 12 lines, ordered by concern; each line fact-checked, plain list as fallback | `staff_chat_log` (`kind='digest'`) |
 | Issue flagging | `staff_issues.py` | Classifies a problem in a reply (equipment / staff / supplier / customer / cash), urgent ones forwarded to the director; keyword fallback; `/issues`, `/resolve <id>` | `staff_issues` |

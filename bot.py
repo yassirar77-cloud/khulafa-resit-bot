@@ -109,6 +109,7 @@ import food_cost_analytics
 import kitchen_usage
 import manager_registration
 import staff_chat
+import staff_ack
 import staff_ai
 import staff_anomaly
 import staff_digest
@@ -6635,6 +6636,13 @@ async def _handle_staff_text(message, context, text: str, code: str) -> None:
         await asyncio.to_thread(_thread_update, thread["id"], {"clarify_sent_at": now.isoformat()})
         return
     if action != "answer":
+        # The reader says this is not an answer to the open question: say so
+        # and ask which question it is for (at most once per group per
+        # UNMATCHED_EVERY, so staff talking among themselves are not pestered).
+        if parsed is not None and not parsed.get("is_answer") and _unmatched_due(message.chat_id, now):
+            open_threads = await asyncio.to_thread(_open_threads, message.chat_id)
+            await message.reply_text(staff_ack.unmatched(thread.get("language"), open_threads))
+            logger.info("staff live: %s message not matched to a question", code)
         return
     await asyncio.to_thread(_thread_update, thread["id"], {
         "status": staff_live.ANSWERED,
@@ -6656,8 +6664,42 @@ async def _handle_staff_text(message, context, text: str, code: str) -> None:
     if thread.get("slot") == po_mismatch.SLOT:
         await _save_po_explanation(thread, parsed, text)
     await _flag_issue(context.application, thread, parsed, text)
+    await _acknowledge(message, thread, parsed, text)
     # One question at a time: the group's next queued check-in goes now.
     await staff_live_tick(context.application)
+
+
+UNMATCHED_EVERY = timedelta(minutes=10)
+_unmatched_last: dict = {}
+
+
+def _unmatched_due(chat_id, now) -> bool:
+    last = _unmatched_last.get(chat_id)
+    if last is not None and now - last < UNMATCHED_EVERY:
+        return False
+    _unmatched_last[chat_id] = now
+    return True
+
+
+def _open_threads(chat_id) -> list[dict]:
+    """The questions still open in a group, oldest first."""
+    return (_thread_select(chat_id=chat_id).in_("status", list(staff_live.ACTIVE))
+            .order("asked_at").limit(5).execute().data or [])
+
+
+async def _acknowledge(message, thread, parsed, text) -> None:
+    """One line back in the cashier's language saying what was understood
+    (staff_ack); a voice note also gets its transcript so it can be
+    corrected. Never breaks the reply flow."""
+    try:
+        ack = staff_ack.acknowledgement(
+            parsed, thread.get("language"), slot=thread.get("slot"),
+            transcript=text if getattr(message, "voice", None) else None,
+            vocabulary=staff_chat.item_vocabulary(),
+        )
+        await message.reply_text(ack)
+    except Exception:
+        logger.exception("staff ack: failed (thread %s)", thread.get("id"))
 
 
 async def _save_detail(thread, message, code, text=None) -> None:
@@ -6674,6 +6716,7 @@ async def _save_detail(thread, message, code, text=None) -> None:
         await _save_order_answer(thread, parsed, text, details=True)
     await _flag_issue(context.application, thread, parsed, text,
                       force=thread.get("reply_status") == "problem")
+    await _acknowledge(message, thread, parsed, text)
     logger.info("staff live: details for %s %s", code, thread.get("slot"))
 
 
