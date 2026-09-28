@@ -52,7 +52,11 @@ cashier's `/lang` setting is sent as the language on every call (ta, ms,
 bn, en, id; the Malay+Tamil mix as ms) — never auto-detect. Confidence is
 derived from Whisper's per-segment log-probabilities; below
 `VOICE_MIN_CONFIDENCE` (0.6) or on any API error the bot asks the cashier
-to type instead. Notes longer than two minutes are not transcribed.
+to type instead. Notes longer than two minutes are not transcribed. Every
+bounce is logged with its reason — `api_error` (with the HTTP status and
+message, at WARNING), `empty_text`, `low_confidence` (with the score),
+`no_key`, `too_long`, `download_error` — and kept on the log row, so
+`/voice_stats` can show transcribed vs bounced per outlet with the reasons.
 
 ## Migrations added with the DeepSeek roadmap
 
@@ -69,6 +73,6 @@ to type instead. Notes longer than two minutes are not transcribed.
 
 ## Director commands added
 
-`/closed <OUTLET> [YYYY-MM-DD] [reason]`, `/nudge_off <OUTLET> today` (no nudges for the rest of the day, outlet not closed), `/staff_digest_now`, `/issues`,
+`/closed <OUTLET> [YYYY-MM-DD] [reason]`, `/nudge_off <OUTLET> today` (no nudges for the rest of the day, outlet not closed), `/voice_stats` (voice notes this week per outlet: transcribed vs bounced, with reasons), `/staff_digest_now`, `/issues`,
 `/resolve <id>`, `/order <OUTLET>`, `/phrasing_now`. Existing: `/lang`,
 `/draft`, `/staff_preview`, `/staff_samples`.

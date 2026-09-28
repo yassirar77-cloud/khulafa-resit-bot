@@ -6551,14 +6551,17 @@ async def handle_staff_voice(update: Update, context: ContextTypes.DEFAULT_TYPE)
     thread = await asyncio.to_thread(_active_thread, message.chat_id,
                                      message.reply_to_message.message_id
                                      if message.reply_to_message else None)
-    transcript = None
-    if not staff_voice.too_long(voice.duration):
+    if staff_voice.too_long(voice.duration):
+        transcript = staff_voice.failed("too_long", f"{voice.duration}s", language)
+    else:
         try:
             tg_file = await context.bot.get_file(voice.file_id)
             audio = bytes(await tg_file.download_as_bytearray())
+        except Exception as exc:
+            logger.warning("staff voice: download failed (%s): %s", code, exc)
+            transcript = staff_voice.failed("download_error", str(exc)[:200], language)
+        else:
             transcript = await asyncio.to_thread(staff_voice.transcribe, audio, language)
-        except Exception:
-            logger.exception("staff voice: download / transcription failed")
     text = staff_voice.accept(transcript)
     await asyncio.to_thread(_insert_staff_logs, [staff_voice.log_row(
         thread, outlet_code=code, chat_id=message.chat_id, language=language,
@@ -6568,10 +6571,36 @@ async def handle_staff_voice(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not text:
         if thread:
             await message.reply_text(staff_voice.type_instead_text(language))
-        logger.info("staff voice: %s asked to type (no transcript)", code)
+        why = staff_voice.bounce(transcript) or {"reason": "unknown", "detail": "", "level": "info"}
+        log = logger.warning if why["level"] == "warning" else logger.info
+        log("staff voice: %s asked to type — %s%s (lang=%s, %ss)", code, why["reason"],
+            f" {why['detail']}" if why["detail"] else "",
+            staff_voice.language_code(language), voice.duration)
         return
     logger.info("staff voice: %s transcribed %d chars", code, len(text))
     await _handle_staff_text(message, context, text, code)
+
+
+async def voice_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Director-only: /voice_stats — voice notes this week per outlet:
+    transcribed vs bounced, with the bounce reasons."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    today = _my_today()
+    week = today - timedelta(days=today.weekday())
+    since = datetime.combine(week, datetime.min.time(), MALAYSIA_TZ).isoformat()
+    try:
+        rows = await asyncio.to_thread(lambda: fetch_all_pages(
+            lambda: supabase.table(staff_chat.LOG_TABLE)
+            .select("outlet_code, source, facts, problems, created_at")
+            .eq("kind", staff_voice.KIND).gte("created_at", since).order("id")))
+    except Exception:
+        logger.exception("/voice_stats failed")
+        await message.reply_text("Couldn't read the voice log — see logs.")
+        return
+    await _send_chunked_to(context.application, message.chat_id,
+                           staff_voice.format_stats(rows, _outlet_label, since=week))
 
 
 async def _handle_staff_text(message, context, text: str, code: str) -> None:
@@ -8603,6 +8632,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("order", order_command))
     app.add_handler(CommandHandler("closed", closed_command))
     app.add_handler(CommandHandler("nudge_off", nudge_off_command))
+    app.add_handler(CommandHandler("voice_stats", voice_stats_command))
     app.add_handler(CommandHandler("staff_digest_now", staff_digest_now_command))
     app.add_handler(CommandHandler("issues", issues_command))
     app.add_handler(CommandHandler("phrasing_now", phrasing_now_command))
