@@ -10,7 +10,7 @@ SELECT. The hard rules live HERE, in code, not in the prompt:
   * comments are stripped before the checks, so nothing hides in them;
   * ``LIMIT 200`` is enforced (added, or lowered when larger);
   * it runs through ``director_sql(q)`` (migrations/0055): a SECURITY
-    DEFINER function that switches to a role with SELECT only, sets the
+    DEFINER function owned by a role with SELECT only, which also sets the
     transaction read-only and a 5-second statement timeout;
   * every question, SQL and row count is logged (``director_sql_log``).
 

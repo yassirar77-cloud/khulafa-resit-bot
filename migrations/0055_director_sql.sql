@@ -3,11 +3,13 @@
 -- 1. director_readonly: a role that can only SELECT from public tables
 --    (and any table created later).
 -- 2. director_sql(q text): the ONLY way the bot runs free SQL. SECURITY
---    DEFINER, but it immediately drops to director_readonly, marks the
---    transaction read-only and caps the statement at 5 seconds, then runs
---    the query wrapped in a jsonb_agg. It refuses anything that does not
---    start with SELECT or that carries a semicolon — the Python guard has
---    already checked much more; this is the belt to its braces.
+--    DEFINER and OWNED BY director_readonly, so its body runs with SELECT
+--    rights only (Postgres forbids SET ROLE inside a security-definer
+--    function); it also marks the transaction read-only and caps the
+--    statement at 5 seconds, then runs the query wrapped in a jsonb_agg. It
+--    refuses anything that does not start with SELECT or that carries a
+--    semicolon — the Python guard has already checked much more; this is the
+--    belt to its braces.
 -- 3. director_sql_log: every question, the SQL that ran, row count, time.
 --
 -- Apply once in Supabase SQL editor or via psql (as the postgres role):
@@ -42,16 +44,22 @@ BEGIN
     END IF;
     SET LOCAL statement_timeout = '5s';
     SET LOCAL transaction_read_only = on;
-    SET LOCAL ROLE director_readonly;
     EXECUTE format('SELECT coalesce(jsonb_agg(t), ''[]''::jsonb) FROM (%s) AS t', q)
         INTO result;
     RETURN result;
 END $$;
 
+-- The read-only role owns the function, so the body runs as that role.
+-- Ownership needs CREATE on the schema for a moment; it is taken back at once.
+GRANT CREATE ON SCHEMA public TO director_readonly;
+ALTER FUNCTION public.director_sql(text) OWNER TO director_readonly;
+REVOKE CREATE ON SCHEMA public FROM director_readonly;
+
 -- Only the service role (the bot) may call it; never the anon key.
 REVOKE ALL ON FUNCTION public.director_sql(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.director_sql(text) FROM anon;
 GRANT EXECUTE ON FUNCTION public.director_sql(text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.director_sql(text) TO postgres;
 
 CREATE TABLE IF NOT EXISTS public.director_sql_log (
     id          bigserial PRIMARY KEY,
