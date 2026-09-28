@@ -333,7 +333,14 @@ flask_app = Flask(__name__)
 @flask_app.get("/")
 @flask_app.get("/health")
 def health():
-    return jsonify(status="ok", service="khulafa-resit-bot")
+    # The AI wording provider's line: when DeepSeek last answered and what
+    # today's calls have cost in tokens (staff_ai.status; in-memory, per
+    # process, reset each Malaysian day).
+    try:
+        ai = staff_ai.status()
+    except Exception:
+        ai = {"error": "status unavailable"}
+    return jsonify(status="ok", service="khulafa-resit-bot", staff_ai=ai)
 
 
 @flask_app.get("/webapp")
