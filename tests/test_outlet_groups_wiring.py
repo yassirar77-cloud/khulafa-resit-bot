@@ -113,7 +113,11 @@ class StaffLiveWiring(unittest.TestCase):
         body = _block(self.src, "async def handle_staff_reply(")
         self.assertIn("staff_live.asks_if_bot(message.text)", body)
         self.assertIn('parsed.get("asks_if_bot")', body)
-        self.assertIn("staff_orders.rows_for_reply(thread, parsed[\"items\"]", body)
+        self.assertIn("await _save_order_answer(thread, parsed, message.text)", body)
+        saver = _block(self.src, "async def _save_order_answer(")
+        self.assertIn("staff_orders.rows_for_reply(thread, items, text)", saver)
+        self.assertIn("order_proposal.apply_edits(proposal, items)", saver)
+        self.assertIn("order_proposal.order_rows(thread, lines, text, confirmed=True)", saver)
         # The honesty check comes before the open-question lookup, so it
         # works when nothing was asked.
         self.assertLess(body.index("asks_if_bot(message.text)"),

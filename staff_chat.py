@@ -277,6 +277,12 @@ _MORE = {
     "more_bm": " (+{n} lagi)", "more_ta": " (+{n})", "more_en": " (+{n} more)",
     "more_id": " (+{n} lagi)", "more_bn": " (+{n} aro)",
 }
+# A proposed line with too little history (order_proposal): the cashier is
+# asked to confirm that quantity.
+_CONFIRM = {
+    "bm": " (sahkan)", "tamil": " (confirm பண்ணுங்க)", "english": " (confirm qty)",
+    "indonesian": " (konfirmasi)", "bengali": " (confirm korun)",
+}
 
 
 def _qty_pack(qty, pack) -> str:
@@ -303,9 +309,13 @@ def render_template(slot: str, language: str, facts: dict, variant: int = 0) -> 
         facts = facts or {}
         values = dict(facts)
         items = facts.get("items") or []
-        values["list"] = ", ".join(
-            f"{i['item']} {_qty_pack(i['qty'], i['pack'])}" for i in items
-        )
+
+        def item_list(lang):
+            return ", ".join(
+                f"{i['item']} {_qty_pack(i['qty'], i['pack'])}"
+                + (_CONFIRM[lang] if i.get("confirm") else "")
+                for i in items
+            )
         more = int(facts.get("more") or 0)
         for key, fmt in _MORE.items():
             values[key] = fmt.format(n=more) if more else ""
@@ -318,7 +328,7 @@ def render_template(slot: str, language: str, facts: dict, variant: int = 0) -> 
             options = _T[lang][key]
             if isinstance(options, str):
                 options = [options]
-            return options[variant % len(options)].format(**values)
+            return options[variant % len(options)].format(**dict(values, list=item_list(lang)))
 
         if language == BM_TAMIL:
             return f"{one('bm')}\n{one('tamil')}"
@@ -402,7 +412,8 @@ def order_facts(draft_rows, top: int = 3) -> dict | None:
     facts = {
         "items": [
             {"item": item_label(r["item"]), "qty": fmt_qty(r["qty"], r.get("pack")),
-             "pack": str(r.get("pack") or "")}
+             "pack": str(r.get("pack") or ""),
+             **({"confirm": True} if r.get("confirm") else {})}
             for r in shown
         ],
         "more": max(0, len(rows) - len(shown)),
@@ -702,10 +713,15 @@ def _purpose(slot, facts) -> str:
         return ("ask what they need to order for tomorrow (there is no draft "
                 "to show; ask them to list items and quantities)")
     if slot == "order" and (facts or {}).get("partial"):
-        return ("show the main items of tomorrow's order draft (listed); make "
+        base = ("show the main items of tomorrow's order draft (listed); make "
                 "clear these are only the main items, NOT the full order, and "
                 "ask them to tell anything else they need")
-    return SLOTS[slot][2]
+    else:
+        base = SLOTS[slot][2]
+    if slot == "order" and any(i.get("confirm") for i in (facts or {}).get("items") or []):
+        base += ("; the items marked confirm have little history, so ask them to "
+                 "confirm those quantities in particular")
+    return base
 
 
 def build_user_prompt(slot, language, facts, reference, seed, avoid=()) -> str:

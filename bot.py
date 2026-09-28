@@ -125,6 +125,7 @@ import human_touch
 import overbuy_watch
 import supervisor
 import order_generator
+import order_proposal
 import order_sanity
 import reconciliation_service
 import sales_analytics
@@ -5666,29 +5667,40 @@ def _staff_slot_facts(slot, registry_code, chat_id, today, bills_by_chat):
     if slot not in staff_chat.DATA_SLOTS:
         return {}
     codes = staff_chat.data_codes(registry_code)
-    if slot in ("stock", "order"):
-        due = today if slot == "stock" else today + timedelta(days=1)
+    if slot == "order":
+        # Tomorrow's proposed order: the median of the last 4 same-weekday
+        # buys (order_proposal). Thin history -> ask what to order instead.
+        lines = order_proposal.build(_order_history_rows(codes, today),
+                                     target_day=today + timedelta(days=1))
+        verdict = order_sanity.assess(
+            order_sanity.fetch_history(supabase, codes, today), order_proposal.draft_lines(lines)
+        )
+        if not verdict["ok"]:
+            logger.info("staff chat order %s: proposal not used (%s)",
+                        registry_code, verdict["reason"])
+            return {"ask": True}
+        kept = {ln["item"] for ln in verdict["lines"]}
+        lines = [ln for ln in lines if ln["item"] in kept]
+        facts = staff_chat.order_facts(order_proposal.draft_lines(lines))
+        facts["_proposal"] = lines
+        return facts
+    if slot == "stock":
         rows = (
             supabase.table("order_drafts")
             .select("item, qty, pack, supplier, outlet, due_date")
-            .in_("outlet", codes).eq("due_date", due.isoformat())
+            .in_("outlet", codes).eq("due_date", today.isoformat())
             .execute().data or []
         )
-        if not rows and slot == "order":
-            # Tomorrow's drafts are only saved by the 20:00 job; earlier in
-            # the day (an on-demand preview) compute them without saving.
-            rows = _unsaved_order_items(today).get_codes(codes)
-        # Thin buying history -> no draft numbers at all (order_sanity): the
-        # order check-in asks what to order instead; stock has nothing to ask.
+        # Thin buying history -> no draft numbers at all (order_sanity):
+        # nothing to ask about stock.
         verdict = order_sanity.assess(
             order_sanity.fetch_history(supabase, codes, today), rows
         )
         if not verdict["ok"]:
-            logger.info("staff chat %s %s: draft not used (%s)",
-                        slot, registry_code, verdict["reason"])
-            return {"ask": True} if slot == "order" else None
-        rows = verdict["lines"]
-        return (staff_chat.stock_facts if slot == "stock" else staff_chat.order_facts)(rows)
+            logger.info("staff chat stock %s: draft not used (%s)",
+                        registry_code, verdict["reason"])
+            return None
+        return staff_chat.stock_facts(verdict["lines"])
     if slot == "cook":
         rows = (
             supabase.table("kitchen_demand_forecast")
@@ -5700,6 +5712,41 @@ def _staff_slot_facts(slot, registry_code, chat_id, today, bills_by_chat):
     if slot == "bills":
         return staff_chat.bills_facts(bills_by_chat.get(chat_id) or [])
     return None
+
+
+def _order_history_rows(codes, today) -> list[dict]:
+    """Receipts plus what cashiers ordered (staff_order_items) for these
+    outlet codes over the proposal window — the rows order_proposal reads."""
+    lookback = order_proposal.WEEKS * 7 + 1
+    try:
+        receipts = fetch_all_pages(
+            lambda: supabase.table("item_prices")
+            .select("outlet_code, canonical_item, qty, receipt_date, created_at")
+            .in_("outlet_code", list(codes))
+            .gte("receipt_date", (today - timedelta(days=lookback)).isoformat())
+            .lte("receipt_date", today.isoformat())
+            .order("id")
+        )
+    except Exception:
+        logger.exception("order proposal: item_prices read failed")
+        receipts = []
+    staff = [r for r in staff_orders.fetch_history_rows(
+        supabase, today=today, lookback=lookback, codes=codes)
+        if str(r.get("receipt_date") or "")[:10] <= today.isoformat()]
+    return staff_orders.merge(receipts, staff)
+
+
+def _order_proposal_lines(registry_code, today) -> list[dict]:
+    """Tomorrow's proposal for one outlet, sanity-gated like the check-in."""
+    codes = staff_chat.data_codes(registry_code)
+    lines = order_proposal.build(_order_history_rows(codes, today),
+                                 target_day=today + timedelta(days=1))
+    verdict = order_sanity.assess(order_sanity.fetch_history(supabase, codes, today),
+                                  order_proposal.draft_lines(lines))
+    if not verdict["ok"]:
+        return []
+    kept = {ln["item"] for ln in verdict["lines"]}
+    return [ln for ln in lines if ln["item"] in kept]
 
 
 class _DraftItems(dict):
@@ -5793,6 +5840,7 @@ def _build_staff_preview(slot, today):
             row["skip"] = _NO_DATA.get(slot, "nothing to ask")
             rows.append(row)
             continue
+        proposal = facts.pop("_proposal", None) if isinstance(facts, dict) else None
         if live and earlier.get(code):
             # What they told us earlier today, so the question can refer to it.
             facts = dict(facts, earlier_today=earlier[code][-3:])
@@ -5805,6 +5853,8 @@ def _build_staff_preview(slot, today):
         )
         row["result"] = result
         row["facts"] = facts
+        if proposal:
+            row["thread_facts"] = {**facts, "proposal": proposal}
         if slot == "bills":
             row["thread_facts"] = {**facts, **staff_chat.bills_detail(
                 bills_by_chat.get(chat_id) or [])}
@@ -6053,6 +6103,8 @@ async def handle_staff_button(update: Update, context: ContextTypes.DEFAULT_TYPE
                 thread.get("slot"), code)
     if fields["reply_status"] == staff_live.HANDED_IN:
         await asyncio.to_thread(_record_handin, thread)
+    if thread.get("slot") == "order" and code == "ok":
+        await _save_order_answer(thread, {"status": "ok", "items": []}, fields["reply_text"])
     with contextlib.suppress(Exception):
         await query.answer(staff_live.thanks_text(language))
         await query.edit_message_reply_markup(reply_markup=None)
@@ -6270,10 +6322,8 @@ async def handle_staff_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 (parsed or {}).get("status"))
     # Order answers with items + quantities become order history, so the
     # drafts learn what this outlet really buys (staff_orders).
-    if thread.get("slot") == "order" and (parsed or {}).get("items"):
-        rows = staff_orders.rows_for_reply(thread, parsed["items"], message.text)
-        saved = await asyncio.to_thread(staff_orders.save, supabase, rows)
-        logger.info("staff live: saved %d order items for %s", saved, code)
+    if thread.get("slot") == "order":
+        await _save_order_answer(thread, parsed, message.text)
     await _flag_issue(context.application, thread, parsed, message.text)
     # One question at a time: the group's next queued check-in goes now.
     await staff_live_tick(context.application)
@@ -6288,13 +6338,37 @@ async def _save_detail(thread, message, code) -> None:
     )
     await asyncio.to_thread(_thread_update, thread["id"], staff_live.detail_fields(
         thread, message.text, (parsed or {}).get("summary_en")))
-    if thread.get("slot") == "order" and (parsed or {}).get("items"):
-        rows = staff_orders.rows_for_reply(thread, parsed["items"], message.text)
-        saved = await asyncio.to_thread(staff_orders.save, supabase, rows)
-        logger.info("staff live: saved %d order items for %s", saved, code)
+    if thread.get("slot") == "order":
+        await _save_order_answer(thread, parsed, message.text, details=True)
     await _flag_issue(context.application, thread, parsed, message.text,
                       force=thread.get("reply_status") == "problem")
     logger.info("staff live: details for %s %s", code, thread.get("slot"))
+
+
+async def _save_order_answer(thread, parsed, text, *, details: bool = False) -> None:
+    """What an order reply means for tomorrow's order. With a proposal in
+    the thread (order_proposal): "ok" saves every line as confirmed; items
+    in the reply are applied as edits and the whole order is saved. Without
+    one (the open "what do you need?" question) only the items are saved."""
+    code = thread.get("outlet_code")
+    items = (parsed or {}).get("items") or []
+    proposal = (thread.get("facts") or {}).get("proposal") or []
+    status = (parsed or {}).get("status")
+    if not proposal:
+        if items:
+            rows = staff_orders.rows_for_reply(thread, items, text)
+            saved = await asyncio.to_thread(staff_orders.save, supabase, rows)
+            logger.info("staff live: saved %d order items for %s", saved, code)
+        return
+    lines, changed = order_proposal.apply_edits(proposal, items)
+    confirmed = status == "ok" or bool(items) or (details and bool(changed))
+    if not confirmed:
+        return
+    rows = order_proposal.order_rows(thread, lines, text, confirmed=True)
+    saved = await asyncio.to_thread(staff_orders.save, supabase, rows)
+    logger.info("staff live: order %s for %s saved (%d lines, %d changed: %s)",
+                "corrected" if changed else "confirmed", code, saved, len(changed),
+                ", ".join(changed) or "-")
 
 
 async def _flag_issue(application, thread, parsed, text, *, force: bool = False) -> None:
@@ -6790,6 +6864,29 @@ def _draft_text(code, today) -> str:
     return "\n".join(lines)
 
 
+async def order_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Director-only: /order SEK20 — tomorrow's proposed order for one outlet
+    (median of the last 4 same-weekday buys, order_proposal)."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    cashier_names.refresh()
+    known = sorted(set(cashier_names.group_chats().values()))
+    code = (context.args[0].strip().upper() if context.args else "")
+    if code not in known:
+        await message.reply_text("Usage: /order <outlet>\n" + ", ".join(known))
+        return
+    today = _my_today()
+    try:
+        lines = await asyncio.to_thread(_order_proposal_lines, code, today)
+    except Exception:
+        logger.exception("/order failed for %s", code)
+        await message.reply_text("Couldn't build the proposal — see logs.")
+        return
+    await _send_chunked_to(context.application, message.chat_id, order_proposal.format_director(
+        _outlet_label(code), today + timedelta(days=1), lines))
+
+
 async def draft_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Director-only: /draft SEK20 — one outlet's full order draft."""
     message = update.effective_message
@@ -6931,6 +7028,7 @@ def _build_tamil_samples(n, today, slot=None, languages=("tamil",)):
             continue
         if facts is None:
             continue
+        facts.pop("_proposal", None)
         cashier = cashier_names.name_for(code, staff_chat.SLOTS[slot][0])
         own = {p.strip() for p in cashier.split("/")}
         language = languages[len(rows) % len(languages)]
@@ -8104,6 +8202,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("staff_preview", staff_preview_command))
     app.add_handler(CommandHandler("staff_samples", staff_samples_command))
     app.add_handler(CommandHandler("draft", draft_command))
+    app.add_handler(CommandHandler("order", order_command))
     app.add_handler(CommandHandler("closed", closed_command))
     app.add_handler(CommandHandler("staff_digest_now", staff_digest_now_command))
     app.add_handler(CommandHandler("issues", issues_command))
