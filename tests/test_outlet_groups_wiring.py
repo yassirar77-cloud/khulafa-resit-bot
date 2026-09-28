@@ -110,17 +110,24 @@ class StaffLiveWiring(unittest.TestCase):
                       _block(self.src, "async def post_key_stock_checks("))
 
     def test_honest_answer_and_order_learning_wired(self):
-        body = _block(self.src, "async def handle_staff_reply(")
-        self.assertIn("staff_live.asks_if_bot(message.text)", body)
+        entry = _block(self.src, "async def handle_staff_reply(")
+        self.assertIn("await _handle_staff_text(message, context, message.text, code)", entry)
+        # Voice notes go through the same flow once transcribed.
+        voice = _block(self.src, "async def handle_staff_voice(")
+        self.assertIn("staff_voice.accept(transcript)", voice)
+        self.assertIn("await _handle_staff_text(message, context, text, code)", voice)
+        self.assertIn("staff_voice.type_instead_text(language)", voice)
+        body = _block(self.src, "async def _handle_staff_text(")
+        self.assertIn("staff_live.asks_if_bot(text)", body)
         self.assertIn('parsed.get("asks_if_bot")', body)
-        self.assertIn("await _save_order_answer(thread, parsed, message.text)", body)
+        self.assertIn("await _save_order_answer(thread, parsed, text)", body)
         saver = _block(self.src, "async def _save_order_answer(")
         self.assertIn("staff_orders.rows_for_reply(thread, items, text)", saver)
         self.assertIn("order_proposal.apply_edits(proposal, items)", saver)
         self.assertIn("order_proposal.order_rows(thread, lines, text, confirmed=True)", saver)
         # The honesty check comes before the open-question lookup, so it
         # works when nothing was asked.
-        self.assertLess(body.index("asks_if_bot(message.text)"),
+        self.assertLess(body.index("asks_if_bot(text)"),
                         body.index("_active_thread"))
 
     def test_buttons_wired(self):

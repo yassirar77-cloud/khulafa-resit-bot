@@ -116,6 +116,7 @@ import staff_live
 import staff_nudge
 import staff_ops
 import staff_orders
+import staff_voice
 from outlet_group_bot import OutletGroupBot
 import key_stock_daily
 import item_sales_watch
@@ -5956,7 +5957,8 @@ def _build_staff_preview(slot, today):
 
 # Columns later migrations add to staff_chat_log (0046 meaning check, 0050
 # kind / nudge_no). A log insert that fails is retried without them.
-_OPTIONAL_LOG_COLUMNS = ("back_translation", "meaning_ok", "kind", "nudge_no")
+_OPTIONAL_LOG_COLUMNS = ("back_translation", "meaning_ok", "kind", "nudge_no",
+                         "voice_file_id", "transcript")
 
 
 def _insert_staff_logs(logs: list[dict], tag: str) -> None:
@@ -6364,15 +6366,59 @@ async def handle_staff_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     code = cashier_names.outlet_for_chat(message.chat_id)
     if not code or not staff_live.is_live(code):
         return
+    await _handle_staff_text(message, context, message.text, code)
+
+
+async def handle_staff_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A voice note in a LIVE outlet group: transcribe it (staff_voice) and
+    read it exactly like a typed reply; when that isn't possible, ask the
+    cashier to type it. The note is kept in staff_chat_log (kind = 'voice')."""
+    message = update.effective_message
+    voice = message.voice if message else None
+    if not message or not voice or staff_chat.style() == staff_chat.CLASSIC:
+        return
+    if message.from_user and message.from_user.is_bot:
+        return
+    code = cashier_names.outlet_for_chat(message.chat_id)
+    if not code or not staff_live.is_live(code):
+        return
+    language = _cashier_language(code)
+    thread = await asyncio.to_thread(_active_thread, message.chat_id,
+                                     message.reply_to_message.message_id
+                                     if message.reply_to_message else None)
+    transcript = None
+    if not staff_voice.too_long(voice.duration):
+        try:
+            tg_file = await context.bot.get_file(voice.file_id)
+            audio = bytes(await tg_file.download_as_bytearray())
+            transcript = await asyncio.to_thread(staff_voice.transcribe, audio, language)
+        except Exception:
+            logger.exception("staff voice: download / transcription failed")
+    text = staff_voice.accept(transcript)
+    await asyncio.to_thread(_insert_staff_logs, [staff_voice.log_row(
+        thread, outlet_code=code, chat_id=message.chat_id, language=language,
+        file_id=voice.file_id, transcript=transcript, text=text or "", accepted=bool(text))],
+        "staff voice")
+    if not text:
+        if thread:
+            await message.reply_text(staff_voice.type_instead_text(language))
+        logger.info("staff voice: %s asked to type (no transcript)", code)
+        return
+    logger.info("staff voice: %s transcribed %d chars", code, len(text))
+    await _handle_staff_text(message, context, text, code)
+
+
+async def _handle_staff_text(message, context, text: str, code: str) -> None:
+    """The reply flow for a staff message's words — typed or transcribed."""
     # Honesty: "am I talking to a person?" always gets the true answer —
     # with or without an open question, and it is never taken as an answer.
-    if staff_live.asks_if_bot(message.text):
+    if staff_live.asks_if_bot(text):
         await _answer_honestly(message, code)
         return
     now = datetime.now(MALAYSIA_TZ)
     waiting = await asyncio.to_thread(_detail_thread, message.chat_id)
     if staff_live.awaiting_detail(waiting, now):
-        await _save_detail(waiting, message, code)
+        await _save_detail(waiting, message, code, text)
         return
     reply_to = message.reply_to_message
     thread = await asyncio.to_thread(
@@ -6382,7 +6428,7 @@ async def handle_staff_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     is_reply = bool(reply_to and reply_to.message_id == thread.get("message_id"))
     parsed = await asyncio.to_thread(
         staff_live.parse_reply, thread.get("question_en"), thread.get("question_text"),
-        message.text, staff_ai.complete_json,
+        text, staff_ai.complete_json,
     )
     if parsed and parsed.get("asks_if_bot"):
         await _answer_honestly(message, code)
@@ -6398,10 +6444,11 @@ async def handle_staff_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await asyncio.to_thread(_thread_update, thread["id"], {
         "status": staff_live.ANSWERED,
         "answered_at": now.isoformat(),
-        "reply_text": message.text,
+        "reply_text": text,
         "reply_en": (parsed or {}).get("summary_en") or None,
         "reply_status": (parsed or {}).get("status") or "other",
-        "answer_source": "text",
+        "reply_clear": bool(parsed and parsed.get("clear")),
+        "answer_source": "voice" if message.voice else "text",
     })
     if (parsed or {}).get("status") == staff_live.HANDED_IN:
         await asyncio.to_thread(_record_handin, thread)
@@ -6410,26 +6457,27 @@ async def handle_staff_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Order answers with items + quantities become order history, so the
     # drafts learn what this outlet really buys (staff_orders).
     if thread.get("slot") == "order":
-        await _save_order_answer(thread, parsed, message.text)
+        await _save_order_answer(thread, parsed, text)
     if thread.get("slot") == po_mismatch.SLOT:
-        await _save_po_explanation(thread, parsed, message.text)
-    await _flag_issue(context.application, thread, parsed, message.text)
+        await _save_po_explanation(thread, parsed, text)
+    await _flag_issue(context.application, thread, parsed, text)
     # One question at a time: the group's next queued check-in goes now.
     await staff_live_tick(context.application)
 
 
-async def _save_detail(thread, message, code) -> None:
-    """Typed details after a "Change" / "Problem" tap: read them, add them to
-    that answer, and learn any order items."""
+async def _save_detail(thread, message, code, text=None) -> None:
+    """Typed (or spoken) details after a "Change" / "Problem" tap: read them,
+    add them to that answer, and learn any order items."""
+    text = text if text is not None else message.text
     parsed = await asyncio.to_thread(
         staff_live.parse_reply, thread.get("question_en"), thread.get("question_text"),
-        message.text, staff_ai.complete_json,
+        text, staff_ai.complete_json,
     )
     await asyncio.to_thread(_thread_update, thread["id"], staff_live.detail_fields(
-        thread, message.text, (parsed or {}).get("summary_en")))
+        thread, text, (parsed or {}).get("summary_en")))
     if thread.get("slot") == "order":
-        await _save_order_answer(thread, parsed, message.text, details=True)
-    await _flag_issue(context.application, thread, parsed, message.text,
+        await _save_order_answer(thread, parsed, text, details=True)
+    await _flag_issue(context.application, thread, parsed, text,
                       force=thread.get("reply_status") == "problem")
     logger.info("staff live: details for %s %s", code, thread.get("slot"))
 
@@ -8438,6 +8486,10 @@ async def run_bot() -> None:
                        handle_staff_reply),
         group=1,
     )
+    # Voice notes in live outlet groups: transcribed (when a speech-to-text
+    # provider is configured) and read like a typed reply.
+    app.add_handler(MessageHandler(filters.VOICE & filters.ChatType.GROUPS, handle_staff_voice),
+                    group=1)
     # Tap-to-answer buttons on live check-ins ("sc:<thread>:<choice>").
     app.add_handler(CallbackQueryHandler(handle_staff_button, pattern=r"^sc:\d+:\w+$"))
 

@@ -13,6 +13,14 @@ Settings (Render env):
 
 ``complete_json`` never raises: any failure (no key, timeout, bad JSON)
 returns ``None`` and the caller sends the plain template instead.
+
+``transcribe`` is the speech-to-text slot for voice notes (staff_voice).
+``STAFF_VOICE_AI`` names the provider; none is wired yet, so it returns
+``None`` and the cashier is asked to type instead. When a provider is
+chosen it goes here and nowhere else.
+
+``status`` reports the last successful call and today's token spend for
+/health.
 """
 from __future__ import annotations
 
@@ -32,6 +40,11 @@ TIMEOUT_SECONDS = 20.0
 MAX_TOKENS = 800
 
 _clients: dict = {}
+
+# For /health: when the provider last answered, and today's token spend.
+_status: dict = {"last_ok_at": None, "tokens_in_today": 0, "tokens_out_today": 0,
+                 "calls_today": 0, "failures_today": 0, "day": None}
+_VOICE_PROVIDERS: tuple = ()      # none wired yet — see transcribe()
 
 
 def provider() -> str:
@@ -118,6 +131,8 @@ def complete_json(system: str, user: str, *, attempts: int = 2) -> dict | None:
             data = _parse(choice.message.content)
             usage = getattr(resp, "usage", None)
             if data is not None:
+                _record(getattr(usage, "prompt_tokens", None),
+                        getattr(usage, "completion_tokens", None))
                 return {
                     "data": data,
                     "provider": name,
@@ -137,4 +152,75 @@ def complete_json(system: str, user: str, *, attempts: int = 2) -> dict | None:
                 "staff ai: completion failed (provider=%s, attempt %d/%d)",
                 name, attempt, attempts,
             )
+    _record(None, None, ok=False)
     return None
+
+
+# --- health -----------------------------------------------------------------------
+
+def _today() -> str:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("Asia/Kuala_Lumpur")).date().isoformat()
+
+
+def _record(tokens_in, tokens_out, *, ok: bool = True) -> None:
+    """Count one call for /health; the counters reset each Malaysian day."""
+    from datetime import datetime, timezone
+    day = _today()
+    if _status["day"] != day:
+        _status.update(day=day, tokens_in_today=0, tokens_out_today=0, calls_today=0,
+                       failures_today=0)
+    if ok:
+        _status["last_ok_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        _status["calls_today"] += 1
+        _status["tokens_in_today"] += int(tokens_in or 0)
+        _status["tokens_out_today"] += int(tokens_out or 0)
+    else:
+        _status["failures_today"] += 1
+
+
+def status() -> dict:
+    """``{provider, model, last_ok_at, tokens_today, tokens_in_today,
+    tokens_out_today, calls_today, failures_today}`` for /health."""
+    if _status["day"] != _today():
+        _record(None, None, ok=False)
+        _status["failures_today"] -= 1
+    return {
+        "provider": provider(), "model": model(), "configured": _deepseek_client() is not None
+        if provider() == DEEPSEEK else False,
+        "last_ok_at": _status["last_ok_at"],
+        "tokens_today": _status["tokens_in_today"] + _status["tokens_out_today"],
+        "tokens_in_today": _status["tokens_in_today"],
+        "tokens_out_today": _status["tokens_out_today"],
+        "calls_today": _status["calls_today"],
+        "failures_today": _status["failures_today"],
+    }
+
+
+def reset_status() -> None:
+    """Tests only."""
+    _status.update(last_ok_at=None, tokens_in_today=0, tokens_out_today=0, calls_today=0,
+                   failures_today=0, day=None)
+
+
+# --- speech to text ------------------------------------------------------------------
+
+def voice_provider() -> str:
+    return (os.environ.get("STAFF_VOICE_AI") or "").strip().lower()
+
+
+def transcribe(audio_bytes: bytes, *, mime: str = "audio/ogg", languages=()) -> dict | None:
+    """Speech to text for a staff voice note: ``{"text", "confidence",
+    "provider", "model"}`` or None. No provider is wired yet: the choice
+    (cheapest service that runs on Render and covers Tamil, Malay, Bengali,
+    Indonesian) is the director's — see docs. Until then every voice note
+    gets "please type it". Never raises."""
+    name = voice_provider()
+    if not name:
+        return None
+    if name not in _VOICE_PROVIDERS:
+        logger.warning("staff ai: voice provider %r not available (none wired yet)", name)
+        return None
+    return None
+
