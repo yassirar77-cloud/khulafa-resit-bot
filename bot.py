@@ -113,6 +113,7 @@ import staff_ai
 import staff_anomaly
 import staff_digest
 import staff_issues
+import staff_learning
 import staff_live
 import staff_nudge
 import staff_ops
@@ -5904,6 +5905,77 @@ def _recent_staff_texts(slot, today, days: int = 3) -> dict:
     return out
 
 
+def _phrasing_examples() -> list[dict]:
+    """The latest week's fast-reply wordings (staff_learning). ``[]`` until
+    the Monday job has run or when the table is missing."""
+    try:
+        rows = (supabase.table(staff_learning.TABLE).select("*")
+                .order("week_start", desc=True).order("rank").limit(300).execute().data or [])
+    except Exception:
+        logger.info("staff learning: examples read failed (migrations/0056 applied?)")
+        return []
+    if not rows:
+        return []
+    latest = rows[0]["week_start"]
+    return [r for r in rows if r.get("week_start") == latest]
+
+
+def _avg_prompt_tokens(slot) -> float | None:
+    """The average prompt size of recent check-ins for this slot, so the
+    examples never push it past that average plus 30%."""
+    since = (datetime.now(MALAYSIA_TZ) - timedelta(days=14)).isoformat()
+    try:
+        rows = (supabase.table(staff_chat.LOG_TABLE).select("tokens_in")
+                .eq("slot", slot).gte("created_at", since).not_.is_("tokens_in", "null")
+                .order("created_at", desc=True).limit(200).execute().data or [])
+    except Exception:
+        return None
+    values = [float(r["tokens_in"]) for r in rows if r.get("tokens_in")]
+    return sum(values) / len(values) if values else None
+
+
+async def post_phrasing_examples(application: Application, *, notify: bool = False) -> None:
+    """Monday 08:00: keep the three wordings per language and check-in that
+    got the fastest replies last week (staff_learning)."""
+    if staff_chat.style() == staff_chat.CLASSIC or not staff_live.live_outlets():
+        return
+    today = _my_today()
+    week = staff_learning.week_start(today - timedelta(days=7))
+    since = datetime.combine(week, datetime.min.time(), MALAYSIA_TZ).isoformat()
+    until = datetime.combine(week + timedelta(days=7), datetime.min.time(), MALAYSIA_TZ).isoformat()
+    try:
+        threads = await asyncio.to_thread(lambda: fetch_all_pages(
+            lambda: supabase.table(staff_live.TABLE)
+            .select("language, slot, question_text, status, asked_at, answered_at, reply_clear")
+            .eq("status", staff_live.ANSWERED).gte("asked_at", since).lt("asked_at", until)
+            .order("id")))
+    except Exception:
+        logger.exception("staff learning: thread read failed")
+        return
+    rows = staff_learning.pick(threads, week=week)
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table(staff_learning.TABLE).delete()
+            .eq("week_start", week.isoformat()).execute())
+        if rows:
+            await asyncio.to_thread(
+                lambda: supabase.table(staff_learning.TABLE).insert(rows).execute())
+    except Exception:
+        logger.exception("staff learning: write failed (migrations/0056 applied?)")
+        return
+    logger.info("staff learning: %d phrasing example(s) for week %s", len(rows), week)
+    if notify:
+        await _send_chunked_to(application, ALERT_CHAT_ID, staff_learning.format_report(rows))
+
+
+async def phrasing_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Director-only: /phrasing_now — rebuild last week's examples and show them."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    await post_phrasing_examples(context.application, notify=True)
+
+
 def _build_staff_preview(slot, today):
     """All outlets' messages for one check-in, plus the log rows."""
     cashier_names.refresh()
@@ -5923,6 +5995,8 @@ def _build_staff_preview(slot, today):
     recent = _recent_staff_texts(slot, today)
     earlier = _answers_today(today) if staff_live.live_outlets() else {}
     asked_anomalies = _anomalies_asked_today(today)
+    examples = _phrasing_examples()
+    token_budget = staff_learning.budget(_avg_prompt_tokens(slot))
     rows, logs = [], []
     for chat_id, code in groups:
         cashier = cashier_names.name_for(code, shift)
@@ -5965,6 +6039,7 @@ def _build_staff_preview(slot, today):
             seed=staff_chat.seed_for(slot, code, today),
             vocabulary=vocabulary, other_names=sorted(names - own),
             avoid=recent.get(code, []),
+            examples=staff_learning.select(examples, language, slot, token_budget),
         )
         row["result"] = result
         row["facts"] = facts
@@ -8466,6 +8541,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("closed", closed_command))
     app.add_handler(CommandHandler("staff_digest_now", staff_digest_now_command))
     app.add_handler(CommandHandler("issues", issues_command))
+    app.add_handler(CommandHandler("phrasing_now", phrasing_now_command))
     app.add_handler(CommandHandler("resolve", resolve_command))
     app.add_handler(CommandHandler("form_chase_now", form_chase_now_command))
     app.add_handler(CommandHandler("scoreboard_now", scoreboard_now_command))
@@ -8874,6 +8950,18 @@ async def run_bot() -> None:
         minute=30,
         args=[app],
         id="staff_morning_summary",
+        replace_existing=True,
+    )
+    # Learning loop — Monday 08:00 MY: the wordings that got the fastest
+    # replies last week become the rephrase prompt's examples (staff_learning).
+    scheduler.add_job(
+        post_phrasing_examples,
+        trigger="cron",
+        day_of_week="mon",
+        hour=8,
+        minute=0,
+        args=[app],
+        id="phrasing_examples",
         replace_existing=True,
     )
     # Nightly director digest — 23:30 MY: every reply and non-reply of the

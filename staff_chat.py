@@ -651,6 +651,8 @@ SYSTEM_PROMPT = (
     "- Say the same thing as the reference message, in your own words. Vary "
     "it: different opening, different phrasing from the recent messages "
     "listed (never repeat them), so it never feels automatic.\n"
+    "- When examples of wording that got fast replies are given, match their "
+    "tone and shape — but with today's facts only, never their items or numbers.\n"
     "- Write in the language asked for.\n"
     'Reply with JSON only: {"text": "<the message>", "english": "<the same '
     'message in plain English, for the director to read>"}'
@@ -746,20 +748,23 @@ def _purpose(slot, facts) -> str:
     return base
 
 
-def build_user_prompt(slot, language, facts, reference, seed, avoid=()) -> str:
-    return json.dumps(
-        {
-            "purpose": _purpose(slot, facts),
-            "language": _LANG_PROMPT.get(language, _LANG_PROMPT[DEFAULT_LANGUAGE]),
-            "facts": facts or {},
-            "reference_message": reference,
-            "variation_seed": seed,
-            # What this outlet got for this check-in on recent days: say it
-            # differently so it never reads copy-pasted.
-            "recent_messages_do_not_repeat": [a for a in avoid if a][:3],
-        },
-        ensure_ascii=False,
-    )
+def build_user_prompt(slot, language, facts, reference, seed, avoid=(), examples=()) -> str:
+    prompt = {
+        "purpose": _purpose(slot, facts),
+        "language": _LANG_PROMPT.get(language, _LANG_PROMPT[DEFAULT_LANGUAGE]),
+        "facts": facts or {},
+        "reference_message": reference,
+        "variation_seed": seed,
+        # What this outlet got for this check-in on recent days: say it
+        # differently so it never reads copy-pasted.
+        "recent_messages_do_not_repeat": [a for a in avoid if a][:3],
+    }
+    examples = [e for e in examples if e]
+    if examples:
+        # Wordings that got the fastest replies (staff_learning): the tone
+        # and shape to aim for, with THESE facts, never their numbers.
+        prompt["examples_of_wording_that_got_fast_replies"] = examples[:3]
+    return json.dumps(prompt, ensure_ascii=False)
 
 
 def variant_for(seed: str) -> int:
@@ -768,7 +773,7 @@ def variant_for(seed: str) -> int:
 
 
 def build_message(slot, language, facts, *, seed="", complete=None,
-                  vocabulary=None, other_names=(), avoid=()) -> dict:
+                  vocabulary=None, other_names=(), avoid=(), examples=()) -> dict:
     """Word one check-in. Returns ``{text, english, source, problems,
     template, ai_text, provider, model, tokens_in, tokens_out}`` where
     ``source`` is "ai" when the AI wording passed the fact check, otherwise
@@ -788,7 +793,7 @@ def build_message(slot, language, facts, *, seed="", complete=None,
     try:
         result = complete(
             SYSTEM_PROMPT,
-            build_user_prompt(slot, language, facts, template, seed, avoid),
+            build_user_prompt(slot, language, facts, template, seed, avoid, examples),
         )
     except Exception:
         logger.exception("staff chat: provider call failed")
