@@ -8,10 +8,14 @@ One question at a time, per group. Each check-in is a *thread* in
 
   queued    waiting because another question is still open in that group
   open      sent, waiting for an answer
-  reminded  sent + one reminder after 30 minutes (money questions only)
+  reminded  sent + a follow-up: up to two AI-worded nudges per check-in
+            (staff_nudge, NUDGE_AFTER_MIN apart, 07:00-23:30 only, none for
+            an outlet marked closed with /closed), or the plain 30-minute
+            reminder for the other money questions
   answered  a reply was understood (and saved)
-  no_reply  2 hours without an answer — goes in the director's morning
-            summary, and the group's next queued question is released
+  no_reply  no answer one nudge window after the second nudge (1 hour for
+            un-nudged questions) — goes in the director's morning summary,
+            and the group's next queued question is released
   dropped   was still queued when its shift ended (a 15:00 lunch question
             is pointless at 21:00)
 
@@ -36,6 +40,7 @@ from datetime import datetime, timedelta
 
 import cashier_names
 import staff_chat
+import staff_nudge
 import staff_ops
 
 logger = logging.getLogger(__name__)
@@ -47,8 +52,8 @@ ANSWERED, NO_REPLY, DROPPED = "answered", "no_reply", "dropped"
 INFO = "info"            # sent, no reply expected (staff_ops sales note, tip, praise)
 ACTIVE = (OPEN, REMINDED)
 
-# A money question gets one reminder after 30 minutes; every question expires after an hour,
-# so it never holds the next check-in back (nothing drifts past midnight).
+# Money questions outside the nudge list get one plain reminder after 30
+# minutes and expire after an hour (see staff_nudge.expire_after for the rest).
 REMIND_AFTER = timedelta(minutes=30)
 EXPIRE_AFTER = timedelta(hours=1)
 LATE_TAP_WINDOW = timedelta(hours=12)   # a button tap on an expired question still counts
@@ -60,7 +65,8 @@ QUIET_START_HOUR, QUIET_END_HOUR = 0, 6
 REMIND_SLOTS = ("bills", "minimarket", "invoice")
 SLOW_REPLY_MINUTES = 30
 
-REPLY_STATUSES = ("ok", "short", "finished", "problem", "order", "handed_in", "other")
+REPLY_STATUSES = ("ok", "short", "finished", "problem", "order", "handed_in",
+                  "mismatch_explained", "other")
 HANDED_IN = "handed_in"
 
 
@@ -103,14 +109,22 @@ def _quiet(now: datetime) -> bool:
 
 # --- planning ------------------------------------------------------------------
 
-def plan_tick(threads: list[dict], now: datetime) -> list[tuple[str, dict]]:
+def plan_tick(threads: list[dict], now: datetime,
+              closed: set | frozenset = frozenset()) -> list[tuple[str, dict]]:
     """What to do now, per group: ``[(action, thread)]`` with action one of
-    remind / expire / drop / release. Pure."""
+    nudge / remind / expire / drop / release. ``closed``: outlet codes marked
+    closed today — they get no nudges (their questions still expire). Pure.
+
+    A check-in in ``staff_nudge.slots()`` gets up to two AI-worded nudges,
+    one per ``NUDGE_AFTER_MIN`` window, inside 07:00–23:30, and expires one
+    window after the second. The other money questions keep the plain
+    30-minute reminder and the 1-hour expiry."""
     actions: list[tuple[str, dict]] = []
     by_chat: dict = {}
     for t in threads or []:
         by_chat.setdefault(t.get("chat_id"), []).append(t)
     shift_now = cashier_names.shift_at(now)
+    nudge_slots = staff_nudge.slots()
     for _chat, items in by_chat.items():
         active = [t for t in items if t.get("status") in ACTIVE]
         still_active = False
@@ -119,14 +133,18 @@ def plan_tick(threads: list[dict], now: datetime) -> list[tuple[str, dict]]:
             if asked is None:
                 continue
             age = now - asked
-            if age >= EXPIRE_AFTER:
+            slot = t.get("slot")
+            if age >= staff_nudge.expire_after(slot):
                 actions.append(("expire", t))
+                continue
+            still_active = True
+            if slot in nudge_slots:
+                if (t.get("outlet_code") not in closed and staff_nudge.in_window(now)
+                        and staff_nudge.due(t, now, asked=asked)):
+                    actions.append(("nudge", t))
             elif (t.get("status") == OPEN and age >= REMIND_AFTER and not _quiet(now)
-                  and t.get("slot") in REMIND_SLOTS):
+                  and slot in REMIND_SLOTS):
                 actions.append(("remind", t))
-                still_active = True
-            else:
-                still_active = True
         queued = sorted(
             (t for t in items if t.get("status") == QUEUED),
             key=lambda t: str(t.get("created_at") or ""),
@@ -236,7 +254,11 @@ REPLY_PROMPT = (
     "finished (something sold out / finished), problem (broken, issue), "
     "order (they gave order items/quantities), handed_in (for a bill "
     "question: they gave the paper bill to the boss / office instead of "
-    "uploading it), other.\n"
+    "uploading it), mismatch_explained (for a bill-vs-order question: they "
+    "explain why the bill differs from the order — supplier short, sent "
+    "extra, price went up, ordered more by phone ...), other.\n"
+    "- explanation_en: for a bill-vs-order question only, their explanation "
+    "in one short English sentence; otherwise empty.\n"
     "- items: ONLY when they list things to order with quantities, each "
     "{item, qty, unit}: item = the usual Malay name in English letters "
     "(ayam, ikan, sotong, udang, kambing, daging, telur, santan, roti, gas "
@@ -247,9 +269,21 @@ REPLY_PROMPT = (
     "invent an item or quantity they did not write. Otherwise [].\n"
     "- asks_if_bot: true if they ask whether they are talking to a person, "
     "a bot, a robot or a machine.\n"
+    "- issue: does the message report a problem the office should know about? "
+    "type = equipment (gas, fridge, aircond, stove, POS, electricity, water, "
+    "anything broken), staff (someone absent, sick, late, quit, short-handed), "
+    "supplier (goods late, missing, wrong, bad quality), customer (complaint, "
+    "refund, food poisoning), cash (cash short, wrong change, drawer), other, "
+    "or none. summary_en = one short English sentence. urgent = true only "
+    "for danger or the shop cannot run: fire, gas leak, no electricity or "
+    "water, flood, injury, robbery, theft, police. Do NOT report as an issue "
+    "an item merely sold out, a normal order, or a reply that all is fine.\n"
     'Reply with JSON only: {"is_answer": true|false, "clear": true|false, '
-    '"summary_en": "...", "status": "ok|short|finished|problem|order|other", '
-    '"items": [], "asks_if_bot": false}'
+    '"summary_en": "...", "status": "ok|short|finished|problem|order|'
+    'mismatch_explained|other", "explanation_en": "", '
+    '"items": [], "asks_if_bot": false, '
+    '"issue": {"type": "equipment|staff|supplier|customer|cash|other|none", '
+    '"summary_en": "...", "urgent": false}}'
 )
 
 
@@ -276,6 +310,8 @@ def parse_reply(question_en, question_text, reply_text, complete) -> dict | None
         "status": status if status in REPLY_STATUSES else "other",
         "items": items if isinstance(items, list) else [],
         "asks_if_bot": data.get("asks_if_bot") is True,
+        "issue": data.get("issue") if isinstance(data.get("issue"), dict) else None,
+        "explanation_en": str(data.get("explanation_en") or "").strip(),
     }
 
 
@@ -441,6 +477,8 @@ def _lang(language: str) -> str:
 def button_set(slot: str, facts: dict | None) -> str | None:
     """Which buttons a question gets. The open "what do you need tomorrow?"
     order question has none — the answer has to be typed."""
+    if (facts or {}).get("anomaly"):
+        return None         # "why is it so different?" has to be typed
     if slot in staff_ops.OPS_SLOTS:
         return staff_ops.button_set(slot, facts)
     if slot == "order":

@@ -133,6 +133,7 @@ _REQUIRED_FACTS = {
     "stock": ("item", "qty", "supplier"),
     "cook": ("item", "cook"),
     "bills": ("supplier", "days"),
+    "anomaly": ("item", "today", "usual"),
 }
 
 
@@ -205,6 +206,8 @@ _T: dict[str, dict[str, str]] = {
                   "{supplier} punya bil belum masuk, dah {days} hari (last {last}). Kalau ada, tolong upload 🙏"],
         "night": ["Malam ni ok? Ada barang rosak atau habis?",
                   "Malam ni semua ok? Ada yang rosak atau dah habis?"],
+        "anomaly": ["{item} {metric_bm} hari ni {today}, biasa {usual}. Kenapa lain sangat?",
+                    "Hari ni {item} {metric_bm} {today}, selalunya {usual}. Ada sebab ke?"],
     },
     "tamil": {
         "open": ["காலை வணக்கம் 👋 கடை ரெடியா? இன்னைக்கு ஏதாவது சாமான் குறைவா?",
@@ -227,6 +230,8 @@ _T: dict[str, dict[str, str]] = {
                   "{supplier} bill இன்னும் வரல, {days} நாள் ஆச்சு (கடைசி {last}). இருந்தா photo போடுங்க 🙏"],
         "night": ["இன்னைக்கு ராத்திரி எல்லாம் சரியா? ஏதாவது உடைஞ்சதா, தீர்ந்ததா?",
                   "ராத்திரி எப்படி போகுது? ஏதாவது பிரச்சனை, தீர்ந்த சாமான் இருக்கா?"],
+        "anomaly": ["இன்னைக்கு {item} {metric_ta} {today}, வழக்கமா {usual}. ஏன் இவ்வளவு வித்தியாசம்னு சொல்லுங்க?",
+                    "{item} {metric_ta} இன்னைக்கு {today}, சாதாரணமா {usual}. ஏதாவது காரணம் இருக்கா?"],
     },
     "english": {
         "open": "Morning 👋 Shop ready? Anything short today?",
@@ -239,6 +244,7 @@ _T: dict[str, dict[str, str]] = {
         "order": "Tomorrow's order: {list}{more_en}. OK or change?",
         "bills": "{supplier} bill not in for {days} days (last {last}). Got it? Please upload 🙏",
         "night": "All OK tonight? Anything broken or finished?",
+        "anomaly": "{item} {metric_en} today: {today}, usually {usual}. Why the difference?",
     },
     "indonesian": {
         "open": "Pagi 👋 Toko sudah siap? Ada barang yang kurang hari ini?",
@@ -251,6 +257,7 @@ _T: dict[str, dict[str, str]] = {
         "order": "Order besok: {list}{more_id}. Oke atau mau ganti?",
         "bills": "Nota {supplier} sudah {days} hari belum masuk (terakhir {last}). Ada notanya? Tolong upload 🙏",
         "night": "Malam ini aman? Ada barang rusak atau habis?",
+        "anomaly": "{item} {metric_id} hari ini {today}, biasanya {usual}. Kenapa beda ya?",
     },
     "bengali": {
         "open": "Suprobhat 👋 Dokan ready? Aaj kichu kom ache?",
@@ -263,7 +270,18 @@ _T: dict[str, dict[str, str]] = {
         "order": "Kalker order: {list}{more_bn}. Thik ache, na bodlaben?",
         "bills": "{supplier} er bill {days} din ashe nai (shesh {last}). Bill ache? Upload korun 🙏",
         "night": "Aaj raate shob thik? Kichu bhengeche ba shesh hoyeche?",
+        "anomaly": "Aaj {item} {metric_bn} {today}, shadharonto {usual}. Keno alada, bolben?",
     },
+}
+
+# The word for the number an anomaly question is about (staff_anomaly).
+_METRIC_WORDS = {
+    "sales": {"metric_bm": "jual", "metric_ta": "விற்பனை", "metric_en": "sold",
+              "metric_id": "terjual", "metric_bn": "bikri"},
+    "wastage": {"metric_bm": "buang", "metric_ta": "wastage", "metric_en": "thrown",
+                "metric_id": "dibuang", "metric_bn": "fela"},
+    "order": {"metric_bm": "order", "metric_ta": "order", "metric_en": "ordered",
+              "metric_id": "order", "metric_bn": "order"},
 }
 
 _USUAL = {
@@ -276,6 +294,12 @@ _USUAL = {
 _MORE = {
     "more_bm": " (+{n} lagi)", "more_ta": " (+{n})", "more_en": " (+{n} more)",
     "more_id": " (+{n} lagi)", "more_bn": " (+{n} aro)",
+}
+# A proposed line with too little history (order_proposal): the cashier is
+# asked to confirm that quantity.
+_CONFIRM = {
+    "bm": " (sahkan)", "tamil": " (confirm பண்ணுங்க)", "english": " (confirm qty)",
+    "indonesian": " (konfirmasi)", "bengali": " (confirm korun)",
 }
 
 
@@ -303,22 +327,27 @@ def render_template(slot: str, language: str, facts: dict, variant: int = 0) -> 
         facts = facts or {}
         values = dict(facts)
         items = facts.get("items") or []
-        values["list"] = ", ".join(
-            f"{i['item']} {_qty_pack(i['qty'], i['pack'])}" for i in items
-        )
+
+        def item_list(lang):
+            return ", ".join(
+                f"{i['item']} {_qty_pack(i['qty'], i['pack'])}"
+                + (_CONFIRM[lang] if i.get("confirm") else "")
+                for i in items
+            )
         more = int(facts.get("more") or 0)
         for key, fmt in _MORE.items():
             values[key] = fmt.format(n=more) if more else ""
         usual = facts.get("usual")
         for key, fmt in _USUAL.items():
             values[key] = fmt.format(usual=usual) if usual not in (None, "") else ""
+        values.update(_METRIC_WORDS.get(facts.get("metric"), _METRIC_WORDS["order"]))
         key = _template_key(slot, facts)
 
         def one(lang):
             options = _T[lang][key]
             if isinstance(options, str):
                 options = [options]
-            return options[variant % len(options)].format(**values)
+            return options[variant % len(options)].format(**dict(values, list=item_list(lang)))
 
         if language == BM_TAMIL:
             return f"{one('bm')}\n{one('tamil')}"
@@ -402,7 +431,8 @@ def order_facts(draft_rows, top: int = 3) -> dict | None:
     facts = {
         "items": [
             {"item": item_label(r["item"]), "qty": fmt_qty(r["qty"], r.get("pack")),
-             "pack": str(r.get("pack") or "")}
+             "pack": str(r.get("pack") or ""),
+             **({"confirm": True} if r.get("confirm") else {})}
             for r in shown
         ],
         "more": max(0, len(rows) - len(shown)),
@@ -621,6 +651,8 @@ SYSTEM_PROMPT = (
     "- Say the same thing as the reference message, in your own words. Vary "
     "it: different opening, different phrasing from the recent messages "
     "listed (never repeat them), so it never feels automatic.\n"
+    "- When examples of wording that got fast replies are given, match their "
+    "tone and shape — but with today's facts only, never their items or numbers.\n"
     "- Write in the language asked for.\n"
     'Reply with JSON only: {"text": "<the message>", "english": "<the same '
     'message in plain English, for the director to read>"}'
@@ -660,7 +692,7 @@ MEANING_LANGUAGES = ("tamil", BM_TAMIL)
 # no numbers/items outside the data, no "lunch/shift is over", no informal
 # Tamil. The judge was rejecting correct Tamil there over loose
 # back-translations ("finished quickly" vs "ran out").
-MEANING_SLOTS = DATA_SLOTS
+MEANING_SLOTS = DATA_SLOTS + ("anomaly",)
 
 
 def _tamil_part(text: str) -> str:
@@ -698,30 +730,41 @@ def meaning_check(text, intended_en, purpose, complete) -> dict:
 
 
 def _purpose(slot, facts) -> str:
+    if slot == "anomaly":
+        import staff_anomaly
+        return staff_anomaly.purpose(facts or {})
     if slot == "order" and (facts or {}).get("ask"):
         return ("ask what they need to order for tomorrow (there is no draft "
                 "to show; ask them to list items and quantities)")
     if slot == "order" and (facts or {}).get("partial"):
-        return ("show the main items of tomorrow's order draft (listed); make "
+        base = ("show the main items of tomorrow's order draft (listed); make "
                 "clear these are only the main items, NOT the full order, and "
                 "ask them to tell anything else they need")
-    return SLOTS[slot][2]
+    else:
+        base = SLOTS[slot][2]
+    if slot == "order" and any(i.get("confirm") for i in (facts or {}).get("items") or []):
+        base += ("; the items marked confirm have little history, so ask them to "
+                 "confirm those quantities in particular")
+    return base
 
 
-def build_user_prompt(slot, language, facts, reference, seed, avoid=()) -> str:
-    return json.dumps(
-        {
-            "purpose": _purpose(slot, facts),
-            "language": _LANG_PROMPT.get(language, _LANG_PROMPT[DEFAULT_LANGUAGE]),
-            "facts": facts or {},
-            "reference_message": reference,
-            "variation_seed": seed,
-            # What this outlet got for this check-in on recent days: say it
-            # differently so it never reads copy-pasted.
-            "recent_messages_do_not_repeat": [a for a in avoid if a][:3],
-        },
-        ensure_ascii=False,
-    )
+def build_user_prompt(slot, language, facts, reference, seed, avoid=(), examples=()) -> str:
+    prompt = {
+        "purpose": _purpose(slot, facts),
+        "language": _LANG_PROMPT.get(language, _LANG_PROMPT[DEFAULT_LANGUAGE]),
+        "facts": facts or {},
+        "reference_message": reference,
+        "variation_seed": seed,
+        # What this outlet got for this check-in on recent days: say it
+        # differently so it never reads copy-pasted.
+        "recent_messages_do_not_repeat": [a for a in avoid if a][:3],
+    }
+    examples = [e for e in examples if e]
+    if examples:
+        # Wordings that got the fastest replies (staff_learning): the tone
+        # and shape to aim for, with THESE facts, never their numbers.
+        prompt["examples_of_wording_that_got_fast_replies"] = examples[:3]
+    return json.dumps(prompt, ensure_ascii=False)
 
 
 def variant_for(seed: str) -> int:
@@ -730,7 +773,7 @@ def variant_for(seed: str) -> int:
 
 
 def build_message(slot, language, facts, *, seed="", complete=None,
-                  vocabulary=None, other_names=(), avoid=()) -> dict:
+                  vocabulary=None, other_names=(), avoid=(), examples=()) -> dict:
     """Word one check-in. Returns ``{text, english, source, problems,
     template, ai_text, provider, model, tokens_in, tokens_out}`` where
     ``source`` is "ai" when the AI wording passed the fact check, otherwise
@@ -750,7 +793,7 @@ def build_message(slot, language, facts, *, seed="", complete=None,
     try:
         result = complete(
             SYSTEM_PROMPT,
-            build_user_prompt(slot, language, facts, template, seed, avoid),
+            build_user_prompt(slot, language, facts, template, seed, avoid, examples),
         )
     except Exception:
         logger.exception("staff chat: provider call failed")

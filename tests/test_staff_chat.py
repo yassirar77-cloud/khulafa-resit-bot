@@ -490,7 +490,7 @@ class MeaningAndToneTests(unittest.TestCase):
             self.assertEqual(res["source"], "template", text)
 
     def test_data_slots_keep_the_judge(self):
-        self.assertEqual(set(sc.MEANING_SLOTS), {"stock", "cook", "order", "bills"})
+        self.assertEqual(set(sc.MEANING_SLOTS), {"stock", "cook", "order", "bills", "anomaly"})
 
     def test_judge_prompt_treats_ran_out_words_as_same(self):
         for word in ("finished", "ran out", "sold out", "habis", "தீர்ந்து"):

@@ -38,28 +38,70 @@ class SettingsTests(unittest.TestCase):
 
 
 class PlanTests(unittest.TestCase):
+    """Default nudge settings: NUDGE_AFTER_MIN=40, every scheduled check-in
+    plus the money questions get two nudges (40, 80 min) and expire at 120;
+    the ops questions (wastage, leftover ...) just expire after an hour."""
+
+    def setUp(self):
+        self._env = mock.patch.dict("os.environ", {}, clear=True)
+        self._env.start()
+
+    def tearDown(self):
+        self._env.stop()
+
     def test_fresh_question_waits(self):
         self.assertEqual(sl.plan_tick([_t("open", 20)], NOW), [])
+        self.assertEqual(sl.plan_tick([_t("open", 39)], NOW), [])
 
-    def test_reminder_after_thirty_minutes_once(self):
-        self.assertEqual([a for a, _ in sl.plan_tick([_t("open", 35)], NOW)], ["remind"])
-        self.assertEqual(sl.plan_tick([_t("reminded", 50)], NOW), [])
+    def test_two_nudges_then_expiry(self):
+        self.assertEqual([a for a, _ in sl.plan_tick([_t("open", 45)], NOW)], ["nudge"])
+        # Nudged once: nothing until the second window.
+        once = _t("reminded", 50, nudge_count=1)
+        self.assertEqual(sl.plan_tick([once], NOW), [])
+        once["asked_at"] = (NOW - timedelta(minutes=85)).isoformat()
+        self.assertEqual([a for a, _ in sl.plan_tick([once], NOW)], ["nudge"])
+        # Nudged twice: never a third; expires one window later.
+        twice = _t("reminded", 95, nudge_count=2)
+        self.assertEqual(sl.plan_tick([twice], NOW), [])
+        twice["asked_at"] = (NOW - timedelta(minutes=121)).isoformat()
+        self.assertEqual([a for a, _ in sl.plan_tick([twice], NOW)], ["expire"])
 
-    def test_reminders_only_for_money_questions(self):
-        for slot in ("bills", "minimarket", "invoice"):
-            self.assertEqual([a for a, _ in sl.plan_tick([_t("open", 35, slot=slot)], NOW)],
-                             ["remind"], slot)
-        for slot in ("wastage", "leftover", "afternoon", "sales", "order", "lunch"):
-            self.assertEqual(sl.plan_tick([_t("open", 35, slot=slot)], NOW), [], slot)
+    def test_every_scheduled_check_in_is_nudged(self):
+        for slot in ("open", "stock", "cook", "lunch", "order", "bills", "night",
+                     "invoice", "minimarket"):
+            self.assertEqual([a for a, _ in sl.plan_tick([_t("open", 45, slot=slot)], NOW)],
+                             ["nudge"], slot)
+
+    def test_ops_questions_only_expire(self):
+        for slot in ("wastage", "leftover", "afternoon", "sales"):
+            self.assertEqual(sl.plan_tick([_t("open", 45, slot=slot)], NOW), [], slot)
             self.assertEqual([a for a, _ in sl.plan_tick([_t("open", 61, slot=slot)], NOW)],
                              ["expire"], slot)
 
-    def test_expires_after_one_hour(self):
-        self.assertEqual([a for a, _ in sl.plan_tick([_t("reminded", 61)], NOW)], ["expire"])
-        self.assertEqual([a for a, _ in sl.plan_tick([_t("open", 61)], NOW)], ["expire"])
+    def test_nudge_interval_from_env(self):
+        with mock.patch.dict("os.environ", {"NUDGE_AFTER_MIN": "20"}):
+            self.assertEqual([a for a, _ in sl.plan_tick([_t("open", 25)], NOW)], ["nudge"])
+            self.assertEqual([a for a, _ in sl.plan_tick([_t("reminded", 61, nudge_count=2)], NOW)],
+                             ["expire"])
 
-    def test_no_reply_after_two_hours_then_next_question_released(self):
-        threads = [_t("reminded", 125, tid=1), _t("queued", tid=2, slot="cook")]
+    def test_nudge_slots_from_env_keep_plain_reminder_for_the_rest(self):
+        with mock.patch.dict("os.environ", {"NUDGE_SLOTS": "order"}):
+            self.assertEqual([a for a, _ in sl.plan_tick([_t("open", 45, slot="order")], NOW)],
+                             ["nudge"])
+            # bills is no longer a nudge slot: the plain 30-minute reminder, 1-hour expiry.
+            self.assertEqual([a for a, _ in sl.plan_tick([_t("open", 35, slot="bills")], NOW)],
+                             ["remind"])
+            self.assertEqual(sl.plan_tick([_t("reminded", 50, slot="bills")], NOW), [])
+            self.assertEqual([a for a, _ in sl.plan_tick([_t("open", 61, slot="bills")], NOW)],
+                             ["expire"])
+
+    def test_closed_outlet_gets_no_nudge_but_still_expires(self):
+        self.assertEqual(sl.plan_tick([_t("open", 45)], NOW, {"BISTRO7"}), [])
+        self.assertEqual([a for a, _ in sl.plan_tick([_t("open", 121)], NOW, {"BISTRO7"})],
+                         ["expire"])
+
+    def test_no_reply_then_next_question_released(self):
+        threads = [_t("reminded", 125, tid=1, nudge_count=2), _t("queued", tid=2, slot="cook")]
         self.assertEqual([(a, t["id"]) for a, t in sl.plan_tick(threads, NOW)],
                          [("expire", 1), ("release", 2)])
 
@@ -76,13 +118,20 @@ class PlanTests(unittest.TestCase):
         threads = [_t("queued", tid=4, shift="night", shift_date="2026-09-23")]
         self.assertEqual([a for a, _ in sl.plan_tick(threads, NOW)], ["drop"])
 
-    def test_no_reminders_after_midnight(self):
-        late = datetime(2026, 9, 25, 0, 10, tzinfo=MY)
+    def test_no_nudges_outside_the_window(self):
+        for late in (datetime(2026, 9, 25, 0, 10, tzinfo=MY),
+                     datetime(2026, 9, 25, 6, 50, tzinfo=MY),
+                     datetime(2026, 9, 24, 23, 40, tzinfo=MY)):
+            t = _t("open", shift="night", shift_date="2026-09-24")
+            t["asked_at"] = (late - timedelta(minutes=45)).isoformat()
+            self.assertEqual(sl.plan_tick([t], late), [], late)
+            t["asked_at"] = (late - timedelta(minutes=125)).isoformat()
+            self.assertEqual([a for a, _ in sl.plan_tick([t], late)], ["expire"], late)
+        # 23:29 is still inside the window.
+        edge = datetime(2026, 9, 24, 23, 29, tzinfo=MY)
         t = _t("open", shift="night", shift_date="2026-09-24")
-        t["asked_at"] = (late - timedelta(minutes=40)).isoformat()
-        self.assertEqual(sl.plan_tick([t], late), [])
-        t["asked_at"] = (late - timedelta(minutes=70)).isoformat()
-        self.assertEqual([a for a, _ in sl.plan_tick([t], late)], ["expire"])
+        t["asked_at"] = (edge - timedelta(minutes=45)).isoformat()
+        self.assertEqual([a for a, _ in sl.plan_tick([t], edge)], ["nudge"])
 
     def test_groups_are_independent(self):
         threads = [_t("open", 20, tid=1, chat=-1), _t("queued", tid=2, chat=-2)]
@@ -101,7 +150,8 @@ class ReplyTests(unittest.TestCase):
                                                 "status": "finished"}))
         self.assertEqual(parsed, {"is_answer": True, "clear": True,
                                   "summary_en": "Chicken finished", "status": "finished",
-                                  "items": [], "asks_if_bot": False})
+                                  "items": [], "asks_if_bot": False, "issue": None,
+                                  "explanation_en": ""})
 
     def test_parse_reply_keeps_order_items(self):
         parsed = sl.parse_reply("What to order?", "Esok nak order apa?",
