@@ -2,31 +2,38 @@
 
 A cashier may answer a check-in with a Telegram voice note. The bot
 downloads the .ogg, asks the speech-to-text provider (``staff_ai.
-transcribe``) for the words, and feeds the transcript into the SAME reply
-reader as a typed message — nothing downstream knows the difference. The
-transcript and the audio ``file_id`` are kept in ``staff_chat_log`` with
-``kind = 'voice'`` (migrations/0054).
+transcribe`` — Groq-hosted Whisper) for the words, always with the
+cashier's /lang language (ta, ms, bn, en, id; the Malay+Tamil mix as ms,
+never auto-detect), and feeds the transcript into the SAME reply reader
+as a typed message — nothing downstream knows the difference. The
+transcript, the language used, the duration and the audio ``file_id``
+are kept in ``staff_chat_log`` with ``kind = 'voice'`` (migrations/0054).
 
-When transcription is not available, fails, or is not confident enough
+When transcription fails, or is not confident enough
 (``VOICE_MIN_CONFIDENCE``, default 0.6), the bot answers in the cashier's
-language asking them to type it instead. No provider is wired yet, so
-today every voice note gets that answer.
+language asking them to type it instead.
 
 Pure: wording and decisions. bot.py downloads and dispatches.
 """
 from __future__ import annotations
 
+import logging
 import os
 
 import cashier_names
 import staff_ai
 import staff_chat
 
+logger = logging.getLogger(__name__)
+
 KIND = "voice"
 DEFAULT_MIN_CONFIDENCE = 0.6
 MAX_SECONDS = 120          # longer than this is not a reply
-LANGUAGE_HINTS = {"tamil": ("ta",), "bm": ("ms",), "bengali": ("bn",), "english": ("en",),
-                  "indonesian": ("id",), staff_chat.BM_TAMIL: ("ms", "ta")}
+
+
+def language_code(language: str) -> str:
+    """Whisper code for the cashier's /lang setting (bm_tamil -> ms)."""
+    return staff_ai.voice_language_code(language)
 
 
 def min_confidence() -> float:
@@ -56,10 +63,11 @@ def accept(transcript: dict | None) -> str | None:
 
 
 def transcribe(audio_bytes: bytes, language: str) -> dict | None:
-    """Provider call with the cashier's language as a hint. Never raises."""
+    """Provider call with the cashier's language, always given. Never raises."""
     try:
-        return staff_ai.transcribe(audio_bytes, languages=LANGUAGE_HINTS.get(language, ()))
+        return staff_ai.transcribe(audio_bytes, language=language_code(language))
     except Exception:
+        logger.exception("staff voice: transcription raised")
         return None
 
 
@@ -84,10 +92,14 @@ def too_long(duration) -> bool:
 
 
 def log_row(thread: dict | None, *, outlet_code, chat_id, language, file_id, transcript,
-            text, accepted: bool) -> dict:
-    """``staff_chat_log`` row for one voice note (kind = 'voice')."""
-    facts = {"file_id": file_id, "duration_ok": True, "accepted": accepted,
-             "confidence": (transcript or {}).get("confidence"),
+            text, accepted: bool, duration=None) -> dict:
+    """``staff_chat_log`` row for one voice note (kind = 'voice'): the
+    transcript, the language sent to the provider, the note's duration."""
+    t = transcript or {}
+    facts = {"file_id": file_id, "accepted": accepted,
+             "confidence": t.get("confidence"),
+             "stt_language": t.get("language") or language_code(language),
+             "duration_s": t.get("duration") if t.get("duration") is not None else duration,
              "slot": (thread or {}).get("slot"), "thread_id": (thread or {}).get("id")}
     return {
         "kind": KIND, "mode": "natural",
@@ -96,7 +108,7 @@ def log_row(thread: dict | None, *, outlet_code, chat_id, language, file_id, tra
         "cashier": (thread or {}).get("cashier"), "language": language,
         "facts": facts, "template_text": None, "ai_text": text, "final_text": text,
         "source": "voice" if accepted else "type_instead", "problems": [] if accepted else ["not transcribed"],
-        "provider": (transcript or {}).get("provider") or staff_ai.voice_provider() or None,
-        "model": (transcript or {}).get("model"), "tokens_in": None, "tokens_out": None,
+        "provider": t.get("provider") or staff_ai.voice_provider() or None,
+        "model": t.get("model") or staff_ai.voice_model(), "tokens_in": None, "tokens_out": None,
         "voice_file_id": file_id, "transcript": text,
     }

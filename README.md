@@ -35,7 +35,7 @@ answered and today's token spend.
 | Tomorrow's order (20:05) | `order_proposal.py` | Phrases the proposed order (median of the last 4 same-weekday buys; thin lines marked "confirm qty"); "ok" or corrections saved; `/order <outlet>` | `staff_order_items` (`source`) |
 | Anomaly questions | `staff_anomaly.py` | Phrases a targeted question when sales, wastage or an order quantity is outside `ANOMALY_PCT` of the 4-week same-weekday average | `staff_chat_log` (`kind='anomaly'`, `deviation_pct`) |
 | Receipt-vs-order mismatch | `po_mismatch.py` | Reads the cashier's explanation (`mismatch_explained`) for a bill that differs from the order; the question itself is fixed wording | `receipts.po_mismatch / po_explanation`, `staff_chat_thread` |
-| Voice replies | `staff_voice.py` | Reads the transcript like a typed reply; the speech-to-text provider slot in `staff_ai.transcribe` is empty until one is chosen | `staff_chat_log` (`kind='voice'`, `voice_file_id`, `transcript`) |
+| Voice replies | `staff_voice.py` | Voice notes are transcribed by Groq-hosted Whisper (`GROQ_API_KEY`, `GROQ_STT_MODEL`), always in the cashier's `/lang` language, then read like a typed reply; below `VOICE_MIN_CONFIDENCE` or on any error the cashier is asked to type | `staff_chat_log` (`kind='voice'`, `voice_file_id`, `transcript`, language and duration in `facts`) |
 | Director Q&A | `director_sql.py` | Turns a question in the director chat into one SELECT (guarded in code, run read-only with a 5 s timeout, `LIMIT 200`) and writes the one-line answer from the rows; `DIRECTOR_QA=on` | `director_sql_log` |
 | Learning loop (Mon 08:00) | `staff_learning.py` | Gets the three fastest-answered wordings per language and check-in as few-shot examples, capped at +30% prompt tokens | `phrasing_examples` |
 
@@ -44,16 +44,15 @@ check-in to the director chat only; the fact check runs on every AI wording;
 any provider failure falls back to the plain template silently; every call
 is logged with provider, model and tokens.
 
-### Speech-to-text (voice replies): still to decide
+### Speech-to-text (voice replies)
 
-No transcription service is wired. The cheapest options that run from Render
-and cover Tamil, Malay, Bengali and Indonesian are, roughly in cost order:
-OpenAI `gpt-4o-mini-transcribe` (about US$0.003 per minute), Groq-hosted
-Whisper large v3 turbo (about US$0.0007 per minute, generous free tier),
-or Deepgram Nova (about US$0.0043 per minute). All are OpenAI-compatible or
-REST, so wiring one is a small change inside `staff_ai.transcribe` plus
-`STAFF_VOICE_AI` and a key in Render. Until then a voice note gets a
-"please type it" reply in the cashier's language.
+Groq-hosted Whisper large v3 turbo (`whisper-large-v3-turbo`, about US$0.04
+per hour of audio) through the OpenAI-compatible audio endpoint. The
+cashier's `/lang` setting is sent as the language on every call (ta, ms,
+bn, en, id; the Malay+Tamil mix as ms) — never auto-detect. Confidence is
+derived from Whisper's per-segment log-probabilities; below
+`VOICE_MIN_CONFIDENCE` (0.6) or on any API error the bot asks the cashier
+to type instead. Notes longer than two minutes are not transcribed.
 
 ## Migrations added with the DeepSeek roadmap
 
@@ -66,9 +65,10 @@ REST, so wiring one is a small change inside `staff_ai.transcribe` plus
 | `0054_staff_voice.sql` | `staff_chat_log.voice_file_id / transcript`, `staff_chat_thread.reply_clear` |
 | `0055_director_sql.sql` | `director_readonly` role, `director_sql(q)` function, `director_sql_log` |
 | `0056_phrasing_examples.sql` | `phrasing_examples` |
+| `0057_nudge_off.sql` | `outlet_nudge_off` |
 
 ## Director commands added
 
-`/closed <OUTLET> [YYYY-MM-DD] [reason]`, `/staff_digest_now`, `/issues`,
+`/closed <OUTLET> [YYYY-MM-DD] [reason]`, `/nudge_off <OUTLET> today` (no nudges for the rest of the day, outlet not closed), `/staff_digest_now`, `/issues`,
 `/resolve <id>`, `/order <OUTLET>`, `/phrasing_now`. Existing: `/lang`,
 `/draft`, `/staff_preview`, `/staff_samples`.
