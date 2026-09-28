@@ -271,29 +271,40 @@ def _segments_confidence(segments) -> float | None:
     return round(max(0.0, min(1.0, total / weight)), 3)
 
 
+def _failure(reason: str, code: str, *, status=None, message: str = "") -> dict:
+    return {"ok": False, "text": "", "reason": reason, "status": status,
+            "message": str(message or "")[:300], "provider": voice_provider(),
+            "model": voice_model(), "language": code}
+
+
 def transcribe(audio_bytes: bytes, *, language, mime: str = "audio/ogg",
-               filename: str = "voice.ogg") -> dict | None:
+               filename: str = "voice.ogg") -> dict:
     """Speech to text for a staff voice note. ``language`` is the cashier's
-    /lang setting (or already a Whisper code); it is ALWAYS sent. Returns
-    ``{"text", "confidence", "provider", "model", "language", "duration"}``
-    or None on any failure (no key, unknown provider, API error, empty
-    text). Never raises."""
+    /lang setting (or already a Whisper code); it is ALWAYS sent.
+
+    Success: ``{"ok": True, "text", "confidence", "provider", "model",
+    "language", "duration"}``. Failure: ``{"ok": False, "reason", "status",
+    "message", ...}`` with reason one of ``no_key`` (GROQ_API_KEY unset),
+    ``unknown_provider``, ``no_audio``, ``api_error`` (status = HTTP code
+    when the client gave one, message = the error text) or ``empty_text``
+    (the model heard nothing). API errors are logged at WARNING. Never
+    raises."""
     name = voice_provider()
-    if name not in _VOICE_PROVIDERS:
-        logger.warning("staff ai: voice provider %r not available", name)
-        return None
     code = (language if language in VOICE_LANGUAGE_CODES.values()
             else voice_language_code(language))
+    if name not in _VOICE_PROVIDERS:
+        logger.warning("staff ai: voice provider %r not available", name)
+        return _failure("unknown_provider", code, message=name)
     try:
         client = _groq_client()
-    except Exception:
+    except Exception as exc:
         logger.exception("staff ai: voice client setup failed")
-        return None
+        return _failure("api_error", code, message=f"client setup: {exc}")
     if client is None:
         logger.warning("staff ai: GROQ_API_KEY not set — voice notes get 'please type it'")
-        return None
+        return _failure("no_key", code)
     if not audio_bytes:
-        return None
+        return _failure("no_audio", code)
     try:
         resp = client.audio.transcriptions.create(
             model=voice_model(),
@@ -302,19 +313,23 @@ def transcribe(audio_bytes: bytes, *, language, mime: str = "audio/ogg",
             response_format="verbose_json",
             temperature=0,
         )
-    except Exception:
-        logger.exception("staff ai: transcription failed (provider=%s, lang=%s)", name, code)
-        return None
+    except Exception as exc:
+        status = getattr(exc, "status_code", None)
+        message = getattr(exc, "message", None) or str(exc)
+        logger.warning("staff ai: transcription api_error (provider=%s, model=%s, lang=%s, "
+                       "status=%s): %s", name, voice_model(), code, status, str(message)[:300])
+        return _failure("api_error", code, status=status, message=message)
     get = resp.get if isinstance(resp, dict) else (lambda k, d=None: getattr(resp, k, d))
     text = str(get("text") or "").strip()
     if not text:
-        return None
+        return _failure("empty_text", code)
     duration = get("duration")
     try:
         duration = round(float(duration), 1) if duration is not None else None
     except (TypeError, ValueError):
         duration = None
     return {
+        "ok": True,
         "text": text,
         "confidence": _segments_confidence(get("segments")),
         "provider": name,

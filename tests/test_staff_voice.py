@@ -38,15 +38,20 @@ def _groq(resp=None, error=None):
 
 
 class GroqTranscribeTests(unittest.TestCase):
-    def test_no_key_means_type_instead(self):
+    def test_no_key_means_type_instead_with_reason(self):
         with mock.patch.dict("os.environ", {}, clear=True):
             self.assertEqual(staff_ai.voice_provider(), "groq")
-            self.assertIsNone(staff_ai.transcribe(b"ogg", language="ta"))
-            self.assertIsNone(sv.transcribe(b"ogg", "tamil"))
+            res = staff_ai.transcribe(b"ogg", language="ta")
+            self.assertEqual((res["ok"], res["reason"], res["language"]), (False, "no_key", "ta"))
+            self.assertIsNone(sv.accept(res))
+            self.assertEqual(sv.bounce(res), {"reason": "no_key", "detail": "", "level": "info"})
+            self.assertIsNone(sv.accept(sv.transcribe(b"ogg", "tamil")))
         with mock.patch.dict("os.environ", {"STAFF_VOICE_AI": "whisper", "GROQ_API_KEY": "k"},
                              clear=True):
-            self.assertIsNone(staff_ai.transcribe(b"ogg", language="ta"))   # unknown provider
+            res = staff_ai.transcribe(b"ogg", language="ta")
+            self.assertEqual(res["reason"], "unknown_provider")
         self.assertIsNone(sv.accept(None))
+        self.assertEqual(sv.bounce(None)["reason"], "no_transcript")
         self.assertIsNone(sv.accept({"text": "   "}))
 
     def test_call_shape_model_and_language_never_auto(self):
@@ -81,16 +86,39 @@ class GroqTranscribeTests(unittest.TestCase):
                 self.assertEqual(client.audio.transcriptions.create.call_args.kwargs["language"],
                                  code, lang)
 
-    def test_api_error_or_empty_text_means_type_instead(self):
+    def test_api_error_carries_status_and_message_and_logs_warning(self):
+        class ApiError(RuntimeError):
+            status_code = 429
+            message = "Rate limit reached for whisper-large-v3-turbo"
+        with mock.patch.dict("os.environ", {"GROQ_API_KEY": "k"}, clear=True), \
+                mock.patch.object(staff_ai, "_groq_client", return_value=_groq(error=ApiError("x"))), \
+                self.assertLogs("staff_ai", level="WARNING") as logs:
+            res = sv.transcribe(b"x", "bm")
+        self.assertEqual((res["ok"], res["reason"], res["status"]), (False, "api_error", 429))
+        self.assertIn("Rate limit", res["message"])
+        self.assertIsNone(sv.accept(res))
+        why = sv.bounce(res)
+        self.assertEqual((why["reason"], why["level"]), ("api_error", "warning"))
+        self.assertIn("status=429", why["detail"])
+        self.assertIn("Rate limit", why["detail"])
+        self.assertTrue(any("api_error" in line and "status=429" in line for line in logs.output))
+        # An error without a status code still says api_error.
+        with mock.patch.dict("os.environ", {"GROQ_API_KEY": "k"}, clear=True), \
+                mock.patch.object(staff_ai, "_groq_client",
+                                  return_value=_groq(error=RuntimeError("connection reset"))):
+            res = sv.transcribe(b"x", "bm")
+        self.assertEqual((res["reason"], res["status"]), ("api_error", None))
+        self.assertIn("status=? connection reset", sv.bounce(res)["detail"])
+
+    def test_empty_text_and_no_audio_reasons(self):
         with mock.patch.dict("os.environ", {"GROQ_API_KEY": "k"}, clear=True):
             with mock.patch.object(staff_ai, "_groq_client",
-                                   return_value=_groq(error=RuntimeError("429 rate limit"))):
-                self.assertIsNone(sv.transcribe(b"x", "bm"))
-            with mock.patch.object(staff_ai, "_groq_client",
                                    return_value=_groq(_groq_response(text="  "))):
-                self.assertIsNone(sv.transcribe(b"x", "bm"))
+                res = sv.transcribe(b"x", "bm")
+            self.assertEqual(res["reason"], "empty_text")
+            self.assertEqual(sv.bounce(res), {"reason": "empty_text", "detail": "", "level": "info"})
             with mock.patch.object(staff_ai, "_groq_client", return_value=_groq()):
-                self.assertIsNone(staff_ai.transcribe(b"", language="ms"))
+                self.assertEqual(staff_ai.transcribe(b"", language="ms")["reason"], "no_audio")
 
     def test_confidence_from_segments_and_the_floor(self):
         low = _groq_response(segments=[
@@ -100,6 +128,9 @@ class GroqTranscribeTests(unittest.TestCase):
             out = sv.transcribe(b"x", "bm")
         self.assertLess(out["confidence"], 0.2)
         self.assertIsNone(sv.accept(out))                 # below VOICE_MIN_CONFIDENCE
+        why = sv.bounce(out)
+        self.assertEqual((why["reason"], why["level"]), ("low_confidence", "info"))
+        self.assertIn(f"score={out['confidence']} floor=0.6", why["detail"])
         none = _groq_response(segments=[])
         with mock.patch.dict("os.environ", {"GROQ_API_KEY": "k"}, clear=True), \
                 mock.patch.object(staff_ai, "_groq_client", return_value=_groq(none)):
@@ -161,8 +192,20 @@ class SameAsTypedTests(unittest.TestCase):
         row = sv.log_row(None, outlet_code="SEK7", chat_id=-7, language="bm_tamil", file_id="x",
                          transcript=None, text="", accepted=False, duration=7)
         self.assertEqual((row["slot"], row["source"], row["problems"]),
-                         ("voice", "type_instead", ["not transcribed"]))
+                         ("voice", "type_instead", ["no_transcript"]))
         self.assertEqual((row["facts"]["stt_language"], row["facts"]["duration_s"]), ("ms", 7))
+        self.assertEqual(row["facts"]["reason"], "no_transcript")
+        # A bounce keeps its reason and detail for /voice_stats and the log.
+        api = {"ok": False, "reason": "api_error", "status": 401, "message": "Invalid API Key",
+               "language": "ta"}
+        row = sv.log_row(None, outlet_code="SEK7", chat_id=-7, language="tamil", file_id="x",
+                         transcript=api, text="", accepted=False, duration=3)
+        self.assertEqual(row["problems"], ["api_error"])
+        self.assertEqual(row["facts"]["reason"], "api_error")
+        self.assertIn("status=401 Invalid API Key", row["facts"]["reason_detail"])
+        too_long = sv.failed("too_long", "125s", "bm")
+        self.assertEqual(sv.bounce(too_long), {"reason": "too_long", "detail": "125s", "level": "info"})
+        self.assertEqual(sv.bounce(sv.failed("download_error", "timeout", "bm"))["level"], "warning")
 
 
 class HealthTests(unittest.TestCase):
@@ -195,3 +238,43 @@ class HealthTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StatsTests(unittest.TestCase):
+    @staticmethod
+    def _row(_self, code, source, reason=None, detail=None):
+        return {"outlet_code": code, "source": source,
+                "facts": {"reason": reason, "reason_detail": detail} if reason else {},
+                "problems": [] if source == "voice" else [reason or "not transcribed"]}
+
+    ROWS = [
+        _row(None, "SEK7", "voice"), _row(None, "SEK7", "voice"),
+        _row(None, "SEK7", "type_instead", "low_confidence", "score=0.41 floor=0.6"),
+        _row(None, "SEK20", "type_instead", "api_error", "status=401 Invalid API Key"),
+        _row(None, "SEK20", "type_instead", "api_error", "status=401 Invalid API Key"),
+        _row(None, "SEK20", "type_instead", "no_key"),
+        _row(None, "BISTRO7", "voice"),
+        {"outlet_code": "BISTRO7", "source": "type_instead", "facts": {}, "problems": ["not transcribed"]},
+    ]
+
+    def test_counts_per_outlet_and_reasons(self):
+        per = sv.stats(self.ROWS)
+        self.assertEqual(per["SEK7"], {"transcribed": 2, "bounced": 1, "reasons": {"low_confidence": 1}})
+        self.assertEqual(per["SEK20"], {"transcribed": 0, "bounced": 3,
+                                        "reasons": {"api_error": 2, "no_key": 1}})
+        self.assertEqual(per["BISTRO7"]["reasons"], {"unknown": 1})   # a pre-reason row
+
+    def test_format(self):
+        from datetime import date
+        text = sv.format_stats(self.ROWS, lambda c: c.title(), since=date(2026, 9, 28))
+        self.assertIn("🎤 Voice notes this week (since 2026-09-28)", text)
+        self.assertIn("3 transcribed · 5 bounced", text)
+        self.assertIn("• Sek7: 2 transcribed, 1 bounced — low_confidence ×1", text)
+        self.assertIn("• Sek20: 0 transcribed, 3 bounced — api_error ×2, no_key ×1", text)
+        self.assertIn("Bounce reasons: api_error ×2, low_confidence ×1, no_key ×1, unknown ×1", text)
+        self.assertIn("api_error = Groq refused or failed", text)
+        self.assertIn("no_key = GROQ_API_KEY", text)
+        self.assertIn("low_confidence = below VOICE_MIN_CONFIDENCE (0.6)", text)
+        # Busiest outlet first.
+        self.assertLess(text.index("• Sek7"), text.index("• Bistro7"))
+        self.assertIn("No voice notes yet.", sv.format_stats([]))
