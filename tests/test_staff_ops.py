@@ -1,5 +1,6 @@
 """Staff questions v2 (staff_ops): detection rules, texts, buttons, limits."""
 import unittest
+from unittest import mock
 from datetime import date, datetime, timedelta, timezone
 
 import staff_chat
@@ -352,6 +353,8 @@ class OldQuestionsTests(unittest.TestCase):
         self.assertIn("invoice", staff_live.REMIND_SLOTS)
 
     def test_one_combined_reminder_per_group(self):
+        """Money questions taken out of the nudge list keep the plain
+        combined reminder: one message per group after 30 minutes."""
         now = datetime(2026, 9, 25, 14, 0, tzinfo=MYT)
         asked = (now - timedelta(minutes=35)).isoformat()
         threads = [
@@ -360,9 +363,19 @@ class OldQuestionsTests(unittest.TestCase):
             {"id": 3, "chat_id": -1, "status": "open", "slot": "wastage", "asked_at": asked},
             {"id": 4, "chat_id": -2, "status": "open", "slot": "bills", "asked_at": asked},
         ]
-        grouped = staff_live.group_reminders(staff_live.plan_tick(threads, now))
+        with mock.patch.dict("os.environ", {"NUDGE_SLOTS": "order"}):
+            grouped = staff_live.group_reminders(staff_live.plan_tick(threads, now))
         self.assertEqual(sorted(t["id"] for t in grouped[-1]), [1, 2])   # wastage: none
         self.assertEqual([t["id"] for t in grouped[-2]], [4])
+        # By default they are nudge slots instead (AI-worded, 40-minute windows).
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(staff_live.plan_tick(threads, now), [])
+            later = (now - timedelta(minutes=45)).isoformat()
+            for t in threads:
+                t["asked_at"] = later
+            actions = staff_live.plan_tick(threads, now)
+            self.assertEqual(sorted((a, t["id"]) for a, t in actions),
+                             [("nudge", 1), ("nudge", 2), ("nudge", 4)])
         many = staff_live.reminder_text("tamil", 2)
         self.assertIn("2", many)
         self.assertNotEqual(many, staff_live.reminder_text("tamil"))

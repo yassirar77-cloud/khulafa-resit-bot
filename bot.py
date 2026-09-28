@@ -110,6 +110,7 @@ import manager_registration
 import staff_chat
 import staff_ai
 import staff_live
+import staff_nudge
 import staff_ops
 import staff_orders
 from outlet_group_bot import OutletGroupBot
@@ -5814,11 +5815,13 @@ def _build_staff_preview(slot, today):
     return rows
 
 
-_MEANING_COLUMNS = ("back_translation", "meaning_ok")
+# Columns later migrations add to staff_chat_log (0046 meaning check, 0050
+# kind / nudge_no). A log insert that fails is retried without them.
+_OPTIONAL_LOG_COLUMNS = ("back_translation", "meaning_ok", "kind", "nudge_no")
 
 
 def _insert_staff_logs(logs: list[dict], tag: str) -> None:
-    """Write staff_chat_log rows. Until migrations/0046 adds the meaning-check
+    """Write staff_chat_log rows. Until the later migrations add their
     columns, retry without them so the audit trail is never lost."""
     if not logs:
         return
@@ -5826,9 +5829,10 @@ def _insert_staff_logs(logs: list[dict], tag: str) -> None:
         supabase.table(staff_chat.LOG_TABLE).insert(logs).execute()
         return
     except Exception:
-        logger.warning("%s: log insert failed; retrying without meaning columns", tag)
+        logger.warning("%s: log insert failed; retrying without optional columns", tag)
     try:
-        trimmed = [{k: v for k, v in r.items() if k not in _MEANING_COLUMNS} for r in logs]
+        trimmed = [{k: v for k, v in r.items() if k not in _OPTIONAL_LOG_COLUMNS}
+                   for r in logs]
         supabase.table(staff_chat.LOG_TABLE).insert(trimmed).execute()
     except Exception:
         logger.exception("%s: log insert failed", tag)
@@ -6067,9 +6071,90 @@ def _detail_thread(chat_id):
     return rows[0] if rows else None
 
 
+CLOSED_TABLE = "outlet_closed_days"
+
+
+def _closed_outlets(day) -> set[str]:
+    """Outlets marked closed for ``day`` (/closed). A failed read closes none."""
+    try:
+        rows = (supabase.table(CLOSED_TABLE).select("outlet_code")
+                .eq("day", day.isoformat()).execute().data or [])
+    except Exception:
+        logger.exception("staff live: closed-days lookup failed")
+        return set()
+    return {str(r.get("outlet_code") or "").upper() for r in rows}
+
+
+async def _send_nudge(application, thread, now) -> None:
+    """One follow-up nudge (staff_nudge): AI-worded in the cashier's
+    language, fact-checked, plain template on any failure; the thread
+    counts it and the log keeps it (kind = 'nudge')."""
+    nudge_no = int(thread.get("nudge_count") or 0) + 1
+    own = {p.strip() for p in str(thread.get("cashier") or "").split("/")}
+    result = await asyncio.to_thread(
+        staff_nudge.build, thread, _outlet_label(thread.get("outlet_code")), now, nudge_no,
+        other_names=sorted(cashier_names.all_names() - own),
+    )
+    await application.bot.send_message(
+        chat_id=thread["chat_id"], text=result["text"],
+        reply_to_message_id=thread.get("message_id"), allow_sending_without_reply=True,
+    )
+    await asyncio.to_thread(_thread_update, thread["id"], {
+        "status": staff_live.REMINDED, "reminded_at": now.isoformat(),
+        "nudge_count": nudge_no,
+    })
+    await asyncio.to_thread(
+        _insert_staff_logs, [staff_nudge.log_row(thread, result, "natural")], "staff nudge")
+    logger.info("staff live: nudge %d %s %s (%s)", nudge_no, thread.get("outlet_code"),
+                thread.get("slot"), result["source"])
+
+
+async def closed_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Director-only: /closed SEK20 [YYYY-MM-DD] [reason] — mark an outlet
+    closed for a day (default today): no nudges go to it. /closed alone
+    lists today's closures."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    cashier_names.refresh()
+    known = sorted(set(cashier_names.group_chats().values()))
+    args = list(context.args or [])
+    today = _my_today()
+    if not args:
+        closed = await asyncio.to_thread(_closed_outlets, today)
+        await message.reply_text(
+            f"Closed today: {', '.join(sorted(closed)) or 'none'}\n"
+            "Usage: /closed <OUTLET> [YYYY-MM-DD] [reason]"
+        )
+        return
+    code = args.pop(0).strip().upper()
+    if code not in known:
+        await message.reply_text(f"Unknown outlet {code}. Known: " + ", ".join(known))
+        return
+    day = today
+    if args:
+        try:
+            day = date.fromisoformat(args[0])
+            args.pop(0)
+        except ValueError:
+            pass
+    reason = " ".join(args).strip() or None
+    row = {"outlet_code": code, "day": day.isoformat(), "reason": reason,
+           "marked_by": _command_owner_id(update)}
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table(CLOSED_TABLE).upsert(row, on_conflict="outlet_code,day").execute())
+    except Exception:
+        logger.exception("/closed failed")
+        await message.reply_text("Couldn't save that — see logs (is migrations/0050 applied?).")
+        return
+    await message.reply_text(f"✅ {code} marked closed on {day.isoformat()} — no nudges that day.")
+
+
 async def staff_live_tick(application: Application) -> None:
-    """Every 10 min: 30-minute reminders (money questions only), 1-hour no-reply, drop stale queued
-    questions, release the next queued question in a quiet group."""
+    """Every 10 min: follow-up nudges (staff_nudge) and the plain reminders,
+    no-reply expiry, drop stale queued questions, release the next queued
+    question in a quiet group."""
     if staff_chat.style() == staff_chat.CLASSIC or not staff_live.live_outlets():
         return
     try:
@@ -6087,7 +6172,13 @@ async def staff_live_tick(application: Application) -> None:
         if t.get("outlet_code") not in live and t.get("status") == staff_live.QUEUED:
             await asyncio.to_thread(_thread_update, t["id"], {"status": staff_live.DROPPED})
     threads = [t for t in threads if t.get("outlet_code") in live]
-    actions = staff_live.plan_tick(threads, now)
+    closed = await asyncio.to_thread(_closed_outlets, now.date())
+    actions = staff_live.plan_tick(threads, now, closed)
+    for _action, t in [a for a in actions if a[0] == "nudge"]:
+        try:
+            await _send_nudge(application, t, now)
+        except Exception:
+            logger.exception("staff live tick: nudge failed (thread %s)", t.get("id"))
     # One reminder message per group, however many questions are waiting.
     for chat_id, due in staff_live.group_reminders(actions).items():
         latest = max(due, key=lambda t: str(t.get("asked_at") or ""))
@@ -6106,7 +6197,7 @@ async def staff_live_tick(application: Application) -> None:
         except Exception:
             logger.exception("staff live tick: reminder failed (chat %s)", chat_id)
     for action, t in actions:
-        if action == "remind":
+        if action in ("remind", "nudge"):
             continue
         try:
             if action == "expire":
@@ -7881,6 +7972,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("staff_preview", staff_preview_command))
     app.add_handler(CommandHandler("staff_samples", staff_samples_command))
     app.add_handler(CommandHandler("draft", draft_command))
+    app.add_handler(CommandHandler("closed", closed_command))
     app.add_handler(CommandHandler("form_chase_now", form_chase_now_command))
     app.add_handler(CommandHandler("scoreboard_now", scoreboard_now_command))
     app.add_handler(CommandHandler("order_drafts_now", order_drafts_now_command))

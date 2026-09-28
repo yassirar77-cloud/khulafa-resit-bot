@@ -8,10 +8,14 @@ One question at a time, per group. Each check-in is a *thread* in
 
   queued    waiting because another question is still open in that group
   open      sent, waiting for an answer
-  reminded  sent + one reminder after 30 minutes (money questions only)
+  reminded  sent + a follow-up: up to two AI-worded nudges per check-in
+            (staff_nudge, NUDGE_AFTER_MIN apart, 07:00-23:30 only, none for
+            an outlet marked closed with /closed), or the plain 30-minute
+            reminder for the other money questions
   answered  a reply was understood (and saved)
-  no_reply  2 hours without an answer — goes in the director's morning
-            summary, and the group's next queued question is released
+  no_reply  no answer one nudge window after the second nudge (1 hour for
+            un-nudged questions) — goes in the director's morning summary,
+            and the group's next queued question is released
   dropped   was still queued when its shift ended (a 15:00 lunch question
             is pointless at 21:00)
 
@@ -36,6 +40,7 @@ from datetime import datetime, timedelta
 
 import cashier_names
 import staff_chat
+import staff_nudge
 import staff_ops
 
 logger = logging.getLogger(__name__)
@@ -47,8 +52,8 @@ ANSWERED, NO_REPLY, DROPPED = "answered", "no_reply", "dropped"
 INFO = "info"            # sent, no reply expected (staff_ops sales note, tip, praise)
 ACTIVE = (OPEN, REMINDED)
 
-# A money question gets one reminder after 30 minutes; every question expires after an hour,
-# so it never holds the next check-in back (nothing drifts past midnight).
+# Money questions outside the nudge list get one plain reminder after 30
+# minutes and expire after an hour (see staff_nudge.expire_after for the rest).
 REMIND_AFTER = timedelta(minutes=30)
 EXPIRE_AFTER = timedelta(hours=1)
 LATE_TAP_WINDOW = timedelta(hours=12)   # a button tap on an expired question still counts
@@ -103,14 +108,22 @@ def _quiet(now: datetime) -> bool:
 
 # --- planning ------------------------------------------------------------------
 
-def plan_tick(threads: list[dict], now: datetime) -> list[tuple[str, dict]]:
+def plan_tick(threads: list[dict], now: datetime,
+              closed: set | frozenset = frozenset()) -> list[tuple[str, dict]]:
     """What to do now, per group: ``[(action, thread)]`` with action one of
-    remind / expire / drop / release. Pure."""
+    nudge / remind / expire / drop / release. ``closed``: outlet codes marked
+    closed today — they get no nudges (their questions still expire). Pure.
+
+    A check-in in ``staff_nudge.slots()`` gets up to two AI-worded nudges,
+    one per ``NUDGE_AFTER_MIN`` window, inside 07:00–23:30, and expires one
+    window after the second. The other money questions keep the plain
+    30-minute reminder and the 1-hour expiry."""
     actions: list[tuple[str, dict]] = []
     by_chat: dict = {}
     for t in threads or []:
         by_chat.setdefault(t.get("chat_id"), []).append(t)
     shift_now = cashier_names.shift_at(now)
+    nudge_slots = staff_nudge.slots()
     for _chat, items in by_chat.items():
         active = [t for t in items if t.get("status") in ACTIVE]
         still_active = False
@@ -119,14 +132,18 @@ def plan_tick(threads: list[dict], now: datetime) -> list[tuple[str, dict]]:
             if asked is None:
                 continue
             age = now - asked
-            if age >= EXPIRE_AFTER:
+            slot = t.get("slot")
+            if age >= staff_nudge.expire_after(slot):
                 actions.append(("expire", t))
+                continue
+            still_active = True
+            if slot in nudge_slots:
+                if (t.get("outlet_code") not in closed and staff_nudge.in_window(now)
+                        and staff_nudge.due(t, now, asked=asked)):
+                    actions.append(("nudge", t))
             elif (t.get("status") == OPEN and age >= REMIND_AFTER and not _quiet(now)
-                  and t.get("slot") in REMIND_SLOTS):
+                  and slot in REMIND_SLOTS):
                 actions.append(("remind", t))
-                still_active = True
-            else:
-                still_active = True
         queued = sorted(
             (t for t in items if t.get("status") == QUEUED),
             key=lambda t: str(t.get("created_at") or ""),
