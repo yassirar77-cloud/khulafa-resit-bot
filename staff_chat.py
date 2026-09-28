@@ -133,6 +133,7 @@ _REQUIRED_FACTS = {
     "stock": ("item", "qty", "supplier"),
     "cook": ("item", "cook"),
     "bills": ("supplier", "days"),
+    "anomaly": ("item", "today", "usual"),
 }
 
 
@@ -205,6 +206,8 @@ _T: dict[str, dict[str, str]] = {
                   "{supplier} punya bil belum masuk, dah {days} hari (last {last}). Kalau ada, tolong upload 🙏"],
         "night": ["Malam ni ok? Ada barang rosak atau habis?",
                   "Malam ni semua ok? Ada yang rosak atau dah habis?"],
+        "anomaly": ["{item} {metric_bm} hari ni {today}, biasa {usual}. Kenapa lain sangat?",
+                    "Hari ni {item} {metric_bm} {today}, selalunya {usual}. Ada sebab ke?"],
     },
     "tamil": {
         "open": ["காலை வணக்கம் 👋 கடை ரெடியா? இன்னைக்கு ஏதாவது சாமான் குறைவா?",
@@ -227,6 +230,8 @@ _T: dict[str, dict[str, str]] = {
                   "{supplier} bill இன்னும் வரல, {days} நாள் ஆச்சு (கடைசி {last}). இருந்தா photo போடுங்க 🙏"],
         "night": ["இன்னைக்கு ராத்திரி எல்லாம் சரியா? ஏதாவது உடைஞ்சதா, தீர்ந்ததா?",
                   "ராத்திரி எப்படி போகுது? ஏதாவது பிரச்சனை, தீர்ந்த சாமான் இருக்கா?"],
+        "anomaly": ["இன்னைக்கு {item} {metric_ta} {today}, வழக்கமா {usual}. ஏன் இவ்வளவு வித்தியாசம்னு சொல்லுங்க?",
+                    "{item} {metric_ta} இன்னைக்கு {today}, சாதாரணமா {usual}. ஏதாவது காரணம் இருக்கா?"],
     },
     "english": {
         "open": "Morning 👋 Shop ready? Anything short today?",
@@ -239,6 +244,7 @@ _T: dict[str, dict[str, str]] = {
         "order": "Tomorrow's order: {list}{more_en}. OK or change?",
         "bills": "{supplier} bill not in for {days} days (last {last}). Got it? Please upload 🙏",
         "night": "All OK tonight? Anything broken or finished?",
+        "anomaly": "{item} {metric_en} today: {today}, usually {usual}. Why the difference?",
     },
     "indonesian": {
         "open": "Pagi 👋 Toko sudah siap? Ada barang yang kurang hari ini?",
@@ -251,6 +257,7 @@ _T: dict[str, dict[str, str]] = {
         "order": "Order besok: {list}{more_id}. Oke atau mau ganti?",
         "bills": "Nota {supplier} sudah {days} hari belum masuk (terakhir {last}). Ada notanya? Tolong upload 🙏",
         "night": "Malam ini aman? Ada barang rusak atau habis?",
+        "anomaly": "{item} {metric_id} hari ini {today}, biasanya {usual}. Kenapa beda ya?",
     },
     "bengali": {
         "open": "Suprobhat 👋 Dokan ready? Aaj kichu kom ache?",
@@ -263,7 +270,18 @@ _T: dict[str, dict[str, str]] = {
         "order": "Kalker order: {list}{more_bn}. Thik ache, na bodlaben?",
         "bills": "{supplier} er bill {days} din ashe nai (shesh {last}). Bill ache? Upload korun 🙏",
         "night": "Aaj raate shob thik? Kichu bhengeche ba shesh hoyeche?",
+        "anomaly": "Aaj {item} {metric_bn} {today}, shadharonto {usual}. Keno alada, bolben?",
     },
+}
+
+# The word for the number an anomaly question is about (staff_anomaly).
+_METRIC_WORDS = {
+    "sales": {"metric_bm": "jual", "metric_ta": "விற்பனை", "metric_en": "sold",
+              "metric_id": "terjual", "metric_bn": "bikri"},
+    "wastage": {"metric_bm": "buang", "metric_ta": "wastage", "metric_en": "thrown",
+                "metric_id": "dibuang", "metric_bn": "fela"},
+    "order": {"metric_bm": "order", "metric_ta": "order", "metric_en": "ordered",
+              "metric_id": "order", "metric_bn": "order"},
 }
 
 _USUAL = {
@@ -322,6 +340,7 @@ def render_template(slot: str, language: str, facts: dict, variant: int = 0) -> 
         usual = facts.get("usual")
         for key, fmt in _USUAL.items():
             values[key] = fmt.format(usual=usual) if usual not in (None, "") else ""
+        values.update(_METRIC_WORDS.get(facts.get("metric"), _METRIC_WORDS["order"]))
         key = _template_key(slot, facts)
 
         def one(lang):
@@ -671,7 +690,7 @@ MEANING_LANGUAGES = ("tamil", BM_TAMIL)
 # no numbers/items outside the data, no "lunch/shift is over", no informal
 # Tamil. The judge was rejecting correct Tamil there over loose
 # back-translations ("finished quickly" vs "ran out").
-MEANING_SLOTS = DATA_SLOTS
+MEANING_SLOTS = DATA_SLOTS + ("anomaly",)
 
 
 def _tamil_part(text: str) -> str:
@@ -709,6 +728,9 @@ def meaning_check(text, intended_en, purpose, complete) -> dict:
 
 
 def _purpose(slot, facts) -> str:
+    if slot == "anomaly":
+        import staff_anomaly
+        return staff_anomaly.purpose(facts or {})
     if slot == "order" and (facts or {}).get("ask"):
         return ("ask what they need to order for tomorrow (there is no draft "
                 "to show; ask them to list items and quantities)")

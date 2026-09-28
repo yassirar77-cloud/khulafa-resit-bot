@@ -109,6 +109,7 @@ import kitchen_usage
 import manager_registration
 import staff_chat
 import staff_ai
+import staff_anomaly
 import staff_digest
 import staff_issues
 import staff_live
@@ -5771,6 +5772,75 @@ def _unsaved_order_items(today) -> _DraftItems:
     return _unsaved_drafts_cache[today]
 
 
+def _anomaly_metrics(code, today) -> list[dict]:
+    """The outlet's numbers for staff_anomaly.detect: yesterday's items sold
+    and leftovers per dish, today's order quantity per item, each with the
+    same weekday over the trailing 4 weeks."""
+    codes = staff_chat.data_codes(code)
+    yesterday = today - timedelta(days=1)
+    prior_y = [yesterday - timedelta(days=7 * k) for k in range(1, 5)]
+    prior_t = [today - timedelta(days=7 * k) for k in range(1, 5)]
+    metrics: list[dict] = []
+    try:
+        counts = _full_day_counts(supabase, code, [yesterday] + prior_y)
+        if yesterday in counts:
+            metrics.append({"metric": "sales", "item": "Sales", "today": counts[yesterday],
+                            "usual": [counts[d] for d in prior_y if d in counts], "unit": ""})
+    except Exception:
+        logger.exception("anomaly: sales lookup failed (%s)", code)
+    try:
+        rows = [r for r in demand_forecast.load_usage_rows(
+            supabase, prior_y[-1].isoformat(), yesterday.isoformat())
+            if r.get("outlet_code") in codes and r.get("left_qty") is not None]
+        per: dict = {}
+        for r in rows:
+            d = date.fromisoformat(str(r["business_date"])[:10])
+            per.setdefault(r["item_code"], {})[d] = float(r["left_qty"] or 0)
+        for item, days in per.items():
+            if yesterday in days:
+                metrics.append({"metric": "wastage", "item": item, "today": days[yesterday],
+                                "usual": [days[d] for d in prior_y if d in days],
+                                "unit": kitchen_usage.ITEM_BY_CODE.get(item, {}).get("unit") or ""})
+    except Exception:
+        logger.exception("anomaly: wastage lookup failed (%s)", code)
+    try:
+        per = {}
+        for r in _order_history_rows(codes, today):
+            item = str(r.get("canonical_item") or "").lower()
+            try:
+                d = date.fromisoformat(str(r.get("receipt_date"))[:10])
+                qty = float(r.get("qty") or 0)
+            except (TypeError, ValueError):
+                continue
+            if item and qty > 0:
+                days = per.setdefault(item, {})
+                days[d] = days.get(d, 0.0) + qty
+        for item, days in per.items():
+            if today in days:
+                metrics.append({"metric": "order", "item": item, "today": days[today],
+                                "usual": [days[d] for d in prior_t if d in days],
+                                "unit": order_proposal._unit(item, [])})
+    except Exception:
+        logger.exception("anomaly: order lookup failed (%s)", code)
+    return metrics
+
+
+def _anomalies_asked_today(today) -> dict:
+    """``{outlet_code: {(metric, item_code)}}`` already asked about today."""
+    since = datetime.combine(today, datetime.min.time(), MALAYSIA_TZ).isoformat()
+    out: dict = {}
+    try:
+        rows = (supabase.table(staff_chat.LOG_TABLE).select("outlet_code, facts")
+                .eq("kind", staff_anomaly.KIND).gte("created_at", since).execute().data or [])
+    except Exception:
+        logger.info("anomaly: asked-today lookup failed (migrations/0050 applied?)")
+        return out
+    for r in rows:
+        f = r.get("facts") or {}
+        out.setdefault(r.get("outlet_code"), set()).add((f.get("metric"), f.get("item_code")))
+    return out
+
+
 _NO_DATA = {
     "stock": "no order draft for today — nothing to ask",
     "order": "no order draft for tomorrow — nothing to ask",
@@ -5822,6 +5892,7 @@ def _build_staff_preview(slot, today):
     names = cashier_names.all_names()
     recent = _recent_staff_texts(slot, today)
     earlier = _answers_today(today) if staff_live.live_outlets() else {}
+    asked_anomalies = _anomalies_asked_today(today)
     rows, logs = [], []
     for chat_id, code in groups:
         cashier = cashier_names.name_for(code, shift)
@@ -5829,13 +5900,27 @@ def _build_staff_preview(slot, today):
         live = staff_live.is_live(code)
         row = {"outlet_code": code, "cashier": cashier, "language": language,
                "chat_id": chat_id, "live": live, "slot": slot}
+        # A number far off its usual replaces the generic check-in with a
+        # targeted question (staff_anomaly); one per check-in, never repeated.
+        anomaly = None
         try:
-            facts = _staff_slot_facts(slot, code, chat_id, today, bills_by_chat)
+            anomaly = staff_anomaly.detect(_anomaly_metrics(code, today),
+                                           asked_recently=asked_anomalies.get(code, set()))
         except Exception:
-            logger.exception("staff preview: facts failed (%s %s)", slot, code)
-            row["skip"] = "data lookup failed — see logs"
-            rows.append(row)
-            continue
+            logger.exception("staff preview: anomaly check failed (%s %s)", slot, code)
+        message_slot = slot
+        if anomaly:
+            facts, message_slot = anomaly, staff_anomaly.SLOT
+            row["message_slot"] = message_slot
+            asked_anomalies.setdefault(code, set()).add((anomaly["metric"], anomaly["item_code"]))
+        else:
+            try:
+                facts = _staff_slot_facts(slot, code, chat_id, today, bills_by_chat)
+            except Exception:
+                logger.exception("staff preview: facts failed (%s %s)", slot, code)
+                row["skip"] = "data lookup failed — see logs"
+                rows.append(row)
+                continue
         if facts is None:
             row["skip"] = _NO_DATA.get(slot, "nothing to ask")
             rows.append(row)
@@ -5846,7 +5931,7 @@ def _build_staff_preview(slot, today):
             facts = dict(facts, earlier_today=earlier[code][-3:])
         own = {p.strip() for p in cashier.split("/")}
         result = staff_chat.build_message(
-            slot, language, facts,
+            message_slot, language, facts,
             seed=staff_chat.seed_for(slot, code, today),
             vocabulary=vocabulary, other_names=sorted(names - own),
             avoid=recent.get(code, []),
@@ -5855,11 +5940,12 @@ def _build_staff_preview(slot, today):
         row["facts"] = facts
         if proposal:
             row["thread_facts"] = {**facts, "proposal": proposal}
-        if slot == "bills":
+        if slot == "bills" and not anomaly:
             row["thread_facts"] = {**facts, **staff_chat.bills_detail(
                 bills_by_chat.get(chat_id) or [])}
         rows.append(row)
-        logs.append(staff_chat.log_row(
+        log_fn = staff_anomaly.log_row if anomaly else staff_chat.log_row
+        logs.append(log_fn(
             slot, code, chat_id, cashier, language, facts, result,
             "natural" if live else staff_chat.PREVIEW,
         ))
@@ -6002,7 +6088,7 @@ async def _live_send_or_queue(application, row) -> str:
     result, facts = row["result"], row.get("facts") or {}
     now = datetime.now(MALAYSIA_TZ)
     question_en = result.get("english") or staff_chat.render_template(
-        row["slot"], "english", facts
+        row.get("message_slot") or row["slot"], "english", facts
     )
     # Other questions may still be open (the 03:00 leftover, an invoice
     # question): each has its own buttons and expires on its own after an hour.

@@ -470,6 +470,8 @@ def _lang(language: str) -> str:
 def button_set(slot: str, facts: dict | None) -> str | None:
     """Which buttons a question gets. The open "what do you need tomorrow?"
     order question has none — the answer has to be typed."""
+    if (facts or {}).get("anomaly"):
+        return None         # "why is it so different?" has to be typed
     if slot in staff_ops.OPS_SLOTS:
         return staff_ops.button_set(slot, facts)
     if slot == "order":
