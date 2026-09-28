@@ -8,7 +8,9 @@ the transcript on a second line so the words themselves can be corrected.
 
 When the reader says the message is not an answer to the open question,
 the bot says so and asks which question it is for, naming the questions
-still open in that group.
+still open in that group. When the group has NO open question at all, it
+says so in one line ("Noted, nothing is being asked right now") so the
+cashier knows they were heard; a voice note still gets its transcript.
 
 Plain templates, no AI. The one line that carries facts (items, numbers)
 goes through ``staff_chat.fact_check`` against those very facts; if it
@@ -85,6 +87,15 @@ _UNMATCHED = {
 }
 
 
+_NOTHING_OPEN = {
+    "bm": "✅ Noted — tak ada soalan sekarang.",
+    "tamil": "✅ Noted — இப்போ எந்த கேள்வியும் இல்ல.",
+    "english": "✅ Noted — nothing is being asked right now.",
+    "indonesian": "✅ Noted — tidak ada pertanyaan sekarang.",
+    "bengali": "✅ Noted — ekhon kono proshno nai.",
+}
+
+
 def _lang(language) -> str:
     language = str(language or "").lower()
     if language == staff_chat.BM_TAMIL:
@@ -145,12 +156,27 @@ def acknowledgement(parsed: dict | None, language, *, slot=None, transcript=None
         line = f"✅ Noted: {safe}"
     lines = [line]
     if transcript:
-        t = str(transcript).strip().replace("\n", " ")
-        if len(t) > MAX_TRANSCRIPT:
-            t = t[:MAX_TRANSCRIPT - 1] + "…"
-        lines.append(_pick(_YOU_SAID, language).format(t=t) if str(language or "") != staff_chat.BM_TAMIL
-                     else _YOU_SAID["bm"].format(t=t))
+        lines.append(_transcript_line(language, transcript))
     return "\n".join(lines[:2])
+
+
+def _transcript_line(language, transcript) -> str:
+    t = str(transcript).strip().replace("\n", " ")
+    if len(t) > MAX_TRANSCRIPT:
+        t = t[:MAX_TRANSCRIPT - 1] + "…"
+    table = _YOU_SAID
+    return (table["bm"] if str(language or "") == staff_chat.BM_TAMIL
+            else _pick(table, language)).format(t=t)
+
+
+def nothing_open(language, transcript=None) -> str:
+    """No question is open in the group: one line saying so, plus the
+    transcript for a voice note. Two lines at most."""
+    line = (_NOTHING_OPEN["bm"] if str(language or "") == staff_chat.BM_TAMIL
+            else _pick(_NOTHING_OPEN, language))
+    if transcript:
+        return f"{line}\n{_transcript_line(language, transcript)}"
+    return line
 
 
 def open_questions_text(threads, language) -> str:

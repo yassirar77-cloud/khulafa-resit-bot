@@ -82,9 +82,35 @@ class GroqTranscribeTests(unittest.TestCase):
         with mock.patch.dict("os.environ", {"GROQ_API_KEY": "k"}, clear=True), \
                 mock.patch.object(staff_ai, "_groq_client", return_value=client):
             for lang, code in codes.items():
+                if lang is None:
+                    continue          # no /lang set: auto-detect, tested separately
                 sv.transcribe(b"x", lang)
                 self.assertEqual(client.audio.transcriptions.create.call_args.kwargs["language"],
                                  code, lang)
+
+    def test_no_lang_set_means_auto_detect_for_that_call_only(self):
+        client = _groq()
+        with mock.patch.dict("os.environ", {"GROQ_API_KEY": "k"}, clear=True), \
+                mock.patch.object(staff_ai, "_groq_client", return_value=client), \
+                self.assertLogs("staff_ai", level="INFO") as logs:
+            out = sv.transcribe(b"OggS...", None)
+        kwargs = client.audio.transcriptions.create.call_args.kwargs
+        self.assertNotIn("language", kwargs)                 # no parameter at all
+        self.assertEqual(kwargs["model"], "whisper-large-v3-turbo")
+        self.assertEqual(out["language"], "auto")
+        self.assertEqual(out["text"], "esok ayam 40kg ikan 10kg")
+        self.assertTrue(any("lang=auto" in line for line in logs.output))
+        # The /lang path is unchanged: a set language is always sent.
+        with mock.patch.dict("os.environ", {"GROQ_API_KEY": "k"}, clear=True), \
+                mock.patch.object(staff_ai, "_groq_client", return_value=client):
+            sv.transcribe(b"x", "tamil")
+        self.assertEqual(client.audio.transcriptions.create.call_args.kwargs["language"], "ta")
+        # Failures during an auto call still say auto.
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(sv.transcribe(b"x", None)["language"], "auto")
+        with mock.patch.dict("os.environ", {"GROQ_API_KEY": "k"}, clear=True), \
+                mock.patch.object(staff_ai, "_groq_client", return_value=_groq(error=RuntimeError("x"))):
+            self.assertEqual(sv.transcribe(b"x", None)["language"], "auto")
 
     def test_api_error_carries_status_and_message_and_logs_warning(self):
         class ApiError(RuntimeError):

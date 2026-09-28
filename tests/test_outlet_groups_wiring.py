@@ -114,6 +114,9 @@ class StaffLiveWiring(unittest.TestCase):
         self.assertIn("await _handle_staff_text(message, context, message.text, code)", entry)
         # Voice notes go through the same flow once transcribed.
         voice = _block(self.src, "async def handle_staff_voice(")
+        # Transcription uses the shift's /lang as set; none set -> None -> auto-detect.
+        self.assertIn("stt_language = cashier_names.language_for(code, shift, default=None)", voice)
+        self.assertIn("staff_voice.transcribe, audio, stt_language)", voice)
         self.assertIn("staff_voice.accept(transcript)", voice)
         self.assertIn("await _handle_staff_text(message, context, text, code)", voice)
         self.assertIn("staff_voice.type_instead_text(language)", voice)
@@ -132,7 +135,12 @@ class StaffLiveWiring(unittest.TestCase):
         # which question it is for (rate-limited per group).
         self.assertIn("await _acknowledge(message, thread, parsed, text)", body)
         self.assertIn("staff_ack.unmatched(thread.get(\"language\"), open_threads)", body)
-        self.assertIn("_unmatched_due(message.chat_id, now)", body)
+        self.assertIn('_prompt_due("unmatched", message.chat_id, now)', body)
+        # No open question: say so (rate-limited), with the transcript for a voice note.
+        self.assertIn('_prompt_due("nothing_open", message.chat_id, now)', body)
+        self.assertIn("staff_ack.nothing_open(", body)
+        self.assertLess(body.index("if not thread:"), body.index("staff_ack.nothing_open("))
+        self.assertLess(body.index("staff_ack.nothing_open("), body.index("staff_live.parse_reply"))
         ackfn = _block(self.src, "async def _acknowledge(")
         self.assertIn('transcript=text if getattr(message, "voice", None) else None', ackfn)
         self.assertIn("vocabulary=staff_chat.item_vocabulary()", ackfn)

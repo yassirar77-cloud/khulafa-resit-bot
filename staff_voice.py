@@ -92,15 +92,17 @@ def bounce(transcript: dict | None) -> dict | None:
             "level": "info"}
 
 
-def transcribe(audio_bytes: bytes, language: str) -> dict:
-    """Provider call with the cashier's language, always given. Never raises:
-    an unexpected exception becomes an api_error result."""
+def transcribe(audio_bytes: bytes, language: str | None) -> dict:
+    """Provider call with the cashier's /lang language. ``None`` = no /lang
+    set for this shift: Whisper auto-detects for this one call. Never
+    raises: an unexpected exception becomes an api_error result."""
+    code = None if language is None else language_code(language)
     try:
-        return staff_ai.transcribe(audio_bytes, language=language_code(language))
+        return staff_ai.transcribe(audio_bytes, language=code)
     except Exception as exc:
         logger.warning("staff voice: transcription raised: %s", exc)
         return {"ok": False, "reason": "api_error", "status": None, "message": str(exc)[:300],
-                "language": language_code(language)}
+                "language": code or "auto"}
 
 
 def failed(reason: str, detail: str = "", language: str = "") -> dict:
