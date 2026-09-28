@@ -18,7 +18,7 @@ import os
 import re
 
 SECRET_ENV_VARS = (
-    "TELEGRAM_BOT_TOKEN", "DEEPSEEK_API_KEY", "SUPABASE_KEY", "ZAI_API_KEY",
+    "TELEGRAM_BOT_TOKEN", "DEEPSEEK_API_KEY", "SUPABASE_KEY", "ZAI_API_KEY", "GROQ_API_KEY",
     "GMAIL_APP_PASSWORD", "CLOUDINARY_API_SECRET", "CLOUDINARY_URL",
     "ANTHROPIC_API_KEY",
 )
@@ -30,6 +30,7 @@ _PATTERNS = (
     (re.compile(r"(?<![A-Za-z0-9])\d{6,}:[A-Za-z0-9_-]{30,}"), "***"),
     # OpenAI-style keys (DeepSeek, ZAI) and JWTs (Supabase keys).
     (re.compile(r"sk-[A-Za-z0-9_-]{16,}"), "sk-***"),
+    (re.compile(r"gsk_[A-Za-z0-9_-]{16,}"), "gsk_***"),
     (re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"), "***"),
 )
 _MIN_SECRET_LEN = 8

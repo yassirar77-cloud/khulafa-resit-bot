@@ -10,14 +10,20 @@ Settings (Render env):
   DEEPSEEK_API_KEY     required for deepseek
   DEEPSEEK_MODEL       default "deepseek-flash"
   DEEPSEEK_BASE_URL    default "https://api.deepseek.com"
+  STAFF_VOICE_AI       speech provider, default "groq"
+  GROQ_API_KEY         required for voice notes (else "please type it")
+  GROQ_STT_MODEL       default "whisper-large-v3-turbo"
+  GROQ_BASE_URL        default "https://api.groq.com/openai/v1"
 
 ``complete_json`` never raises: any failure (no key, timeout, bad JSON)
 returns ``None`` and the caller sends the plain template instead.
 
-``transcribe`` is the speech-to-text slot for voice notes (staff_voice).
-``STAFF_VOICE_AI`` names the provider; none is wired yet, so it returns
-``None`` and the cashier is asked to type instead. When a provider is
-chosen it goes here and nowhere else.
+``transcribe`` is the speech-to-text call for voice notes (staff_voice):
+Groq-hosted Whisper (``GROQ_API_KEY``, ``GROQ_STT_MODEL`` default
+whisper-large-v3-turbo, OpenAI-compatible audio endpoint). The cashier's
+language is always passed — never auto-detected. Any failure returns
+``None`` and the cashier is asked to type instead. Provider code for
+speech lives here and nowhere else.
 
 ``status`` reports the last successful call and today's token spend for
 /health.
@@ -44,7 +50,16 @@ _clients: dict = {}
 # For /health: when the provider last answered, and today's token spend.
 _status: dict = {"last_ok_at": None, "tokens_in_today": 0, "tokens_out_today": 0,
                  "calls_today": 0, "failures_today": 0, "day": None}
-_VOICE_PROVIDERS: tuple = ()      # none wired yet — see transcribe()
+GROQ = "groq"
+_VOICE_PROVIDERS = (GROQ,)
+DEFAULT_GROQ_STT_MODEL = "whisper-large-v3-turbo"
+DEFAULT_GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+VOICE_TIMEOUT_SECONDS = 30.0
+# Whisper language codes per /lang setting. The Malay+Tamil mix is sent as
+# Malay: most of those cashiers speak Malay to the office.
+VOICE_LANGUAGE_CODES = {"tamil": "ta", "bm": "ms", "bengali": "bn", "english": "en",
+                        "indonesian": "id", "bm_tamil": "ms"}
+DEFAULT_VOICE_LANGUAGE = "ms"
 
 
 def provider() -> str:
@@ -207,20 +222,103 @@ def reset_status() -> None:
 # --- speech to text ------------------------------------------------------------------
 
 def voice_provider() -> str:
-    return (os.environ.get("STAFF_VOICE_AI") or "").strip().lower()
+    return (os.environ.get("STAFF_VOICE_AI") or GROQ).strip().lower()
 
 
-def transcribe(audio_bytes: bytes, *, mime: str = "audio/ogg", languages=()) -> dict | None:
-    """Speech to text for a staff voice note: ``{"text", "confidence",
-    "provider", "model"}`` or None. No provider is wired yet: the choice
-    (cheapest service that runs on Render and covers Tamil, Malay, Bengali,
-    Indonesian) is the director's — see docs. Until then every voice note
-    gets "please type it". Never raises."""
+def voice_model() -> str:
+    return (os.environ.get("GROQ_STT_MODEL") or DEFAULT_GROQ_STT_MODEL).strip()
+
+
+def voice_language_code(language) -> str:
+    """The Whisper language code for a cashier's /lang setting. Never empty:
+    auto-detect is not used (it guesses Hindi or Indonesian for our staff)."""
+    return VOICE_LANGUAGE_CODES.get(str(language or "").strip().lower(), DEFAULT_VOICE_LANGUAGE)
+
+
+def _groq_client():
+    key = (os.environ.get("GROQ_API_KEY") or "").strip()
+    if not key:
+        return None
+    base_url = (os.environ.get("GROQ_BASE_URL") or DEFAULT_GROQ_BASE_URL).strip()
+    cache_key = ("groq", key, base_url)
+    if cache_key not in _clients:
+        from openai import OpenAI
+        _clients[cache_key] = OpenAI(
+            api_key=key, base_url=base_url, timeout=VOICE_TIMEOUT_SECONDS, max_retries=1
+        )
+    return _clients[cache_key]
+
+
+def _segments_confidence(segments) -> float | None:
+    """Whisper gives no single score. Per segment it reports the average
+    log-probability of its tokens and the probability that it is not speech;
+    the confidence is the duration-weighted mean of exp(avg_logprob) scaled
+    by (1 - no_speech_prob). None when there are no segments."""
+    import math
+    total, weight = 0.0, 0.0
+    for seg in segments or []:
+        get = seg.get if isinstance(seg, dict) else (lambda k, d=None: getattr(seg, k, d))
+        try:
+            lp = float(get("avg_logprob", 0.0) or 0.0)
+            ns = float(get("no_speech_prob", 0.0) or 0.0)
+            dur = max(0.1, float(get("end", 0.0) or 0.0) - float(get("start", 0.0) or 0.0))
+        except (TypeError, ValueError):
+            continue
+        total += dur * math.exp(min(0.0, lp)) * (1.0 - min(1.0, max(0.0, ns)))
+        weight += dur
+    if weight <= 0:
+        return None
+    return round(max(0.0, min(1.0, total / weight)), 3)
+
+
+def transcribe(audio_bytes: bytes, *, language, mime: str = "audio/ogg",
+               filename: str = "voice.ogg") -> dict | None:
+    """Speech to text for a staff voice note. ``language`` is the cashier's
+    /lang setting (or already a Whisper code); it is ALWAYS sent. Returns
+    ``{"text", "confidence", "provider", "model", "language", "duration"}``
+    or None on any failure (no key, unknown provider, API error, empty
+    text). Never raises."""
     name = voice_provider()
-    if not name:
-        return None
     if name not in _VOICE_PROVIDERS:
-        logger.warning("staff ai: voice provider %r not available (none wired yet)", name)
+        logger.warning("staff ai: voice provider %r not available", name)
         return None
-    return None
-
+    code = (language if language in VOICE_LANGUAGE_CODES.values()
+            else voice_language_code(language))
+    try:
+        client = _groq_client()
+    except Exception:
+        logger.exception("staff ai: voice client setup failed")
+        return None
+    if client is None:
+        logger.warning("staff ai: GROQ_API_KEY not set — voice notes get 'please type it'")
+        return None
+    if not audio_bytes:
+        return None
+    try:
+        resp = client.audio.transcriptions.create(
+            model=voice_model(),
+            file=(filename, audio_bytes, mime),
+            language=code,
+            response_format="verbose_json",
+            temperature=0,
+        )
+    except Exception:
+        logger.exception("staff ai: transcription failed (provider=%s, lang=%s)", name, code)
+        return None
+    get = resp.get if isinstance(resp, dict) else (lambda k, d=None: getattr(resp, k, d))
+    text = str(get("text") or "").strip()
+    if not text:
+        return None
+    duration = get("duration")
+    try:
+        duration = round(float(duration), 1) if duration is not None else None
+    except (TypeError, ValueError):
+        duration = None
+    return {
+        "text": text,
+        "confidence": _segments_confidence(get("segments")),
+        "provider": name,
+        "model": voice_model(),
+        "language": code,
+        "duration": duration,
+    }

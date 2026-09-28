@@ -6507,7 +6507,8 @@ async def handle_staff_voice(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = staff_voice.accept(transcript)
     await asyncio.to_thread(_insert_staff_logs, [staff_voice.log_row(
         thread, outlet_code=code, chat_id=message.chat_id, language=language,
-        file_id=voice.file_id, transcript=transcript, text=text or "", accepted=bool(text))],
+        file_id=voice.file_id, transcript=transcript, text=text or "", accepted=bool(text),
+        duration=voice.duration)],
         "staff voice")
     if not text:
         if thread:
