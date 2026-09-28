@@ -109,6 +109,7 @@ import kitchen_usage
 import manager_registration
 import staff_chat
 import staff_ai
+import staff_digest
 import staff_live
 import staff_nudge
 import staff_ops
@@ -6775,6 +6776,72 @@ async def post_staff_morning_summary(application: Application) -> None:
         await _send_chunked_to(application, ALERT_CHAT_ID, text)
 
 
+ISSUES_TABLE = "staff_issues"
+
+
+def _open_issues(since_iso=None) -> list[dict]:
+    """Open staff_issues rows (migrations/0051), newest last. ``[]`` until the
+    table exists or on any failure."""
+    try:
+        q = supabase.table(ISSUES_TABLE).select("*").is_("resolved_at", "null")
+        if since_iso:
+            q = q.gte("created_at", since_iso)
+        return q.order("id").execute().data or []
+    except Exception:
+        logger.info("staff issues: read failed (table missing?)")
+        return []
+
+
+def _gather_night_digest(today) -> tuple[dict, dict]:
+    """Facts for the 23:30 digest from today's threads and open issues."""
+    since = datetime.combine(today, datetime.min.time(), MALAYSIA_TZ).isoformat()
+    threads = _ops_threads_since(supabase, since)
+    outlets = {code: _outlet_label(code) for _chat, code in _ops_groups()}
+    issues = [{"outlet": _outlet_label(i.get("outlet_code")), "type": i.get("type"),
+               "summary_en": i.get("summary_en"), "urgent": i.get("urgent")}
+              for i in _open_issues(since)]
+    return staff_digest.gather(threads, outlets, issues, day=today), outlets
+
+
+async def post_staff_night_digest(application: Application, *, force: bool = False) -> None:
+    """23:30: the director's plain-English digest of the day's staff replies,
+    ordered by concern (staff_digest). AI-worded, fact-checked line by line,
+    plain list on any failure."""
+    if not force and (staff_chat.style() == staff_chat.CLASSIC or not staff_live.live_outlets()):
+        return
+    today = _my_today()
+    try:
+        facts, outlets = await asyncio.to_thread(_gather_night_digest, today)
+    except Exception:
+        logger.exception("staff digest: gather failed")
+        with contextlib.suppress(Exception):
+            await application.bot.send_message(
+                chat_id=ALERT_CHAT_ID, text="⚠️ Staff digest failed — see logs.")
+        return
+    result = await asyncio.to_thread(
+        staff_digest.build, facts, all_labels=list(outlets.values()),
+        vocabulary=staff_chat.item_vocabulary(),
+    )
+    await asyncio.to_thread(_insert_staff_logs, [staff_digest.log_row(facts, result)],
+                            "staff digest")
+    logger.info("staff digest: %s (%d problem(s))", result["source"], len(result["problems"]))
+    if not result["text"]:
+        if force:
+            await application.bot.send_message(chat_id=ALERT_CHAT_ID,
+                                               text="No staff check-ins went out today.")
+        return
+    await _send_chunked_to(application, ALERT_CHAT_ID, result["text"])
+
+
+async def staff_digest_now_command(update: Update,
+                                   context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Director-only: /staff_digest_now — today's digest, right now."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    await post_staff_night_digest(context.application, force=True)
+
+
 def _build_tamil_samples(n, today, slot=None, languages=("tamil",)):
     """``n`` check-ins across slots (or just ``slot``) and outlets, real
     facts, full checks — for the director to review. Languages take turns.
@@ -7973,6 +8040,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("staff_samples", staff_samples_command))
     app.add_handler(CommandHandler("draft", draft_command))
     app.add_handler(CommandHandler("closed", closed_command))
+    app.add_handler(CommandHandler("staff_digest_now", staff_digest_now_command))
     app.add_handler(CommandHandler("form_chase_now", form_chase_now_command))
     app.add_handler(CommandHandler("scoreboard_now", scoreboard_now_command))
     app.add_handler(CommandHandler("order_drafts_now", order_drafts_now_command))
@@ -8376,6 +8444,17 @@ async def run_bot() -> None:
         minute=30,
         args=[app],
         id="staff_morning_summary",
+        replace_existing=True,
+    )
+    # Nightly director digest — 23:30 MY: every reply and non-reply of the
+    # day in plain English, ordered by concern (staff_digest).
+    scheduler.add_job(
+        post_staff_night_digest,
+        trigger="cron",
+        hour=23,
+        minute=30,
+        args=[app],
+        id="staff_night_digest",
         replace_existing=True,
     )
 
