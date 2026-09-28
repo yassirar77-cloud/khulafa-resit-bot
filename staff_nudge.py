@@ -4,9 +4,11 @@ After a scheduled check-in (staff_chat.SLOTS) an outlet gets
 ``NUDGE_AFTER_MIN`` minutes (Render env, default 40) to reply. Then ONE
 reminder goes out; after another ``NUDGE_AFTER_MIN`` without a reply a
 second, firmer one. Never more than two per check-in, none before 07:00
-or after 23:30, and none for an outlet marked closed for the day
-(``/closed <OUTLET>``). The question expires (no_reply) one more window
-after the second nudge.
+or after 23:30, none for an outlet marked closed for the day
+(``/closed <OUTLET>``), and none for an outlet the director silenced for
+the day with ``/nudge_off <OUTLET> today`` (``outlet_nudge_off``,
+migrations/0057 — the outlet is NOT closed: its check-ins still go out).
+The question expires (no_reply) one more window after the second nudge.
 
 The AI provider (``staff_ai``) only rephrases the nudge in the cashier's
 language. It is given three facts — the outlet's name, which check-in and
@@ -244,3 +246,43 @@ def log_row(thread: dict, result: dict, mode: str) -> dict:
     row["kind"] = KIND
     row["nudge_no"] = int((result.get("facts") or {}).get("nudge_no") or 1)
     return row
+
+
+# --- /nudge_off <OUTLET> today ---------------------------------------------------
+
+OFF_TABLE = "outlet_nudge_off"
+OFF_KIND = "nudge_off"
+
+
+def off_row(outlet_code: str, day, marked_by) -> dict:
+    """``outlet_nudge_off`` row: no nudges to this outlet for ``day``."""
+    return {"outlet_code": str(outlet_code).upper(), "day": day.isoformat(), "marked_by": marked_by}
+
+
+def off_log_row(outlet_code: str, day, marked_by, chat_id=None) -> dict:
+    """``staff_chat_log`` row recording who silenced the nudges (kind = 'nudge_off')."""
+    return {
+        "kind": OFF_KIND, "mode": "natural", "slot": OFF_KIND,
+        "outlet_code": str(outlet_code).upper(), "chat_id": chat_id, "cashier": None,
+        "language": None,
+        "facts": {"day": day.isoformat(), "marked_by": marked_by, "scope": "today"},
+        "template_text": None, "ai_text": None,
+        "final_text": f"nudges off for {str(outlet_code).upper()} on {day.isoformat()}",
+        "source": "command", "problems": [], "provider": None, "model": None,
+        "tokens_in": None, "tokens_out": None,
+    }
+
+
+def parse_off_args(args, known: set[str]) -> tuple[str | None, str]:
+    """``/nudge_off <OUTLET> today`` -> ``(code, "")`` or ``(None, reason)``.
+    Only "today" is accepted as the scope (it may be left out)."""
+    args = [a.strip() for a in (args or []) if a.strip()]
+    if not args:
+        return None, "usage"
+    code = args[0].upper()
+    if code not in known:
+        return None, f"Unknown outlet {code}. Known: " + ", ".join(sorted(known))
+    scope = args[1].lower() if len(args) > 1 else "today"
+    if scope != "today":
+        return None, "Only 'today' is supported: /nudge_off <OUTLET> today"
+    return code, ""

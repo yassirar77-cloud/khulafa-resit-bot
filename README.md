@@ -65,9 +65,10 @@ to type instead. Notes longer than two minutes are not transcribed.
 | `0054_staff_voice.sql` | `staff_chat_log.voice_file_id / transcript`, `staff_chat_thread.reply_clear` |
 | `0055_director_sql.sql` | `director_readonly` role, `director_sql(q)` function, `director_sql_log` |
 | `0056_phrasing_examples.sql` | `phrasing_examples` |
+| `0057_nudge_off.sql` | `outlet_nudge_off` |
 
 ## Director commands added
 
-`/closed <OUTLET> [YYYY-MM-DD] [reason]`, `/staff_digest_now`, `/issues`,
+`/closed <OUTLET> [YYYY-MM-DD] [reason]`, `/nudge_off <OUTLET> today` (no nudges for the rest of the day, outlet not closed), `/staff_digest_now`, `/issues`,
 `/resolve <id>`, `/order <OUTLET>`, `/phrasing_now`. Existing: `/lang`,
 `/draft`, `/staff_preview`, `/staff_samples`.

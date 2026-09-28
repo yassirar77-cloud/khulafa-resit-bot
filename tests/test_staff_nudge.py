@@ -158,3 +158,46 @@ class WordingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NudgeOffTests(unittest.TestCase):
+    """/nudge_off <OUTLET> today: silenced for the day, not closed."""
+
+    def test_args(self):
+        known = {"SEK7", "BISTRO7"}
+        self.assertEqual(sn.parse_off_args(["sek7", "today"], known), ("SEK7", ""))
+        self.assertEqual(sn.parse_off_args(["SEK7"], known), ("SEK7", ""))
+        self.assertEqual(sn.parse_off_args([], known), (None, "usage"))
+        code, why = sn.parse_off_args(["VISTA", "today"], known)
+        self.assertIsNone(code)
+        self.assertIn("Unknown outlet VISTA", why)
+        code, why = sn.parse_off_args(["SEK7", "tomorrow"], known)
+        self.assertIsNone(code)
+        self.assertIn("Only 'today'", why)
+
+    def test_rows(self):
+        from datetime import date
+        day = date(2026, 9, 24)
+        self.assertEqual(sn.off_row("sek7", day, 99),
+                         {"outlet_code": "SEK7", "day": "2026-09-24", "marked_by": 99})
+        row = sn.off_log_row("sek7", day, 99, chat_id=-1)
+        self.assertEqual((row["kind"], row["slot"], row["outlet_code"], row["source"]),
+                         ("nudge_off", "nudge_off", "SEK7", "command"))
+        self.assertEqual(row["facts"], {"day": "2026-09-24", "marked_by": 99, "scope": "today"})
+        self.assertIn("SEK7", row["final_text"])
+
+    def test_silenced_outlet_gets_no_nudge_but_its_question_still_expires(self):
+        """The tick hands plan_tick the closed set plus the nudge-off set."""
+        with mock.patch.dict("os.environ", {}, clear=True):
+            t = dict(_thread(), status="open")
+            now = ASKED + timedelta(minutes=45)
+            self.assertEqual([a for a, _ in sl.plan_tick([t], now)], ["nudge"])
+            silenced = set() | {"BISTRO7"}
+            self.assertEqual(sl.plan_tick([t], now, silenced), [])
+            # Another outlet in the same tick is still nudged.
+            other = dict(_thread(), id=4, chat_id=-2, outlet_code="SEK7")
+            self.assertEqual([(a, x["outlet_code"]) for a, x in sl.plan_tick([t, other], now, silenced)],
+                             [("nudge", "SEK7")])
+            # Silenced is not closed: the question still expires on schedule.
+            self.assertEqual([a for a, _ in sl.plan_tick([t], ASKED + timedelta(minutes=121), silenced)],
+                             ["expire"])

@@ -6338,6 +6338,58 @@ def _closed_outlets(day) -> set[str]:
     return {str(r.get("outlet_code") or "").upper() for r in rows}
 
 
+def _nudge_off_outlets(day) -> set[str]:
+    """Outlets whose nudges the director silenced for ``day`` (/nudge_off).
+    A failed read silences none."""
+    try:
+        rows = (supabase.table(staff_nudge.OFF_TABLE).select("outlet_code")
+                .eq("day", day.isoformat()).execute().data or [])
+    except Exception:
+        logger.info("staff live: nudge-off lookup failed (migrations/0057 applied?)")
+        return set()
+    return {str(r.get("outlet_code") or "").upper() for r in rows}
+
+
+async def nudge_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Director-only: /nudge_off SEK20 today — no more follow-up nudges to
+    that outlet for the rest of today. The outlet is NOT marked closed: its
+    check-ins still go out and still expire. Logged (kind = 'nudge_off')."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    cashier_names.refresh()
+    known = set(cashier_names.group_chats().values())
+    today = _my_today()
+    code, reason = staff_nudge.parse_off_args(context.args, known)
+    if code is None:
+        if reason == "usage":
+            off = await asyncio.to_thread(_nudge_off_outlets, today)
+            await message.reply_text(
+                f"Nudges off today: {', '.join(sorted(off)) or 'none'}\n"
+                "Usage: /nudge_off <OUTLET> today"
+            )
+        else:
+            await message.reply_text(reason)
+        return
+    by = _command_owner_id(update)
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table(staff_nudge.OFF_TABLE)
+            .upsert(staff_nudge.off_row(code, today, by), on_conflict="outlet_code,day").execute())
+    except Exception:
+        logger.exception("/nudge_off failed")
+        await message.reply_text("Couldn't save that — see logs (is migrations/0057 applied?).")
+        return
+    await asyncio.to_thread(
+        _insert_staff_logs, [staff_nudge.off_log_row(code, today, by, message.chat_id)],
+        "nudge off")
+    logger.info("staff live: nudges off for %s on %s (by %s)", code, today.isoformat(), by)
+    await message.reply_text(
+        f"🔕 {code}: no more nudges today ({today.isoformat()}). "
+        "Check-ins still go out; the outlet is not marked closed."
+    )
+
+
 async def _send_nudge(application, thread, now) -> None:
     """One follow-up nudge (staff_nudge): AI-worded in the cashier's
     language, fact-checked, plain template on any failure; the thread
@@ -6425,8 +6477,11 @@ async def staff_live_tick(application: Application) -> None:
         if t.get("outlet_code") not in live and t.get("status") == staff_live.QUEUED:
             await asyncio.to_thread(_thread_update, t["id"], {"status": staff_live.DROPPED})
     threads = [t for t in threads if t.get("outlet_code") in live]
+    # No nudges for outlets closed today (/closed) or silenced today
+    # (/nudge_off); their questions still expire like everyone else's.
     closed = await asyncio.to_thread(_closed_outlets, now.date())
-    actions = staff_live.plan_tick(threads, now, closed)
+    silenced = closed | await asyncio.to_thread(_nudge_off_outlets, now.date())
+    actions = staff_live.plan_tick(threads, now, silenced)
     for _action, t in [a for a in actions if a[0] == "nudge"]:
         try:
             await _send_nudge(application, t, now)
@@ -8547,6 +8602,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("draft", draft_command))
     app.add_handler(CommandHandler("order", order_command))
     app.add_handler(CommandHandler("closed", closed_command))
+    app.add_handler(CommandHandler("nudge_off", nudge_off_command))
     app.add_handler(CommandHandler("staff_digest_now", staff_digest_now_command))
     app.add_handler(CommandHandler("issues", issues_command))
     app.add_handler(CommandHandler("phrasing_now", phrasing_now_command))

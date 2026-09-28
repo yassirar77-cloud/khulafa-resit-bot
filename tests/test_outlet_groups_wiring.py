@@ -130,6 +130,17 @@ class StaffLiveWiring(unittest.TestCase):
         self.assertLess(body.index("asks_if_bot(text)"),
                         body.index("_active_thread"))
 
+    def test_nudge_off_wired(self):
+        tick = _block(self.src, "async def staff_live_tick(")
+        self.assertIn("silenced = closed | await asyncio.to_thread(_nudge_off_outlets, now.date())", tick)
+        self.assertIn("staff_live.plan_tick(threads, now, silenced)", tick)
+        cmd = _block(self.src, "async def nudge_off_command(")
+        self.assertIn("staff_nudge.parse_off_args(context.args, known)", cmd)
+        self.assertIn('on_conflict="outlet_code,day"', cmd)
+        self.assertIn("staff_nudge.off_log_row(code, today, by, message.chat_id)", cmd)
+        self.assertNotIn("CLOSED_TABLE", cmd)          # silenced, never marked closed
+        self.assertIn('CommandHandler("nudge_off", nudge_off_command)', self.src)
+
     def test_buttons_wired(self):
         self.assertIn('CallbackQueryHandler(handle_staff_button, pattern=r"^sc:\\d+:\\w+$")',
                       self.src)
