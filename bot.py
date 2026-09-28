@@ -110,6 +110,7 @@ import manager_registration
 import staff_chat
 import staff_ai
 import staff_digest
+import staff_issues
 import staff_live
 import staff_nudge
 import staff_ops
@@ -6273,6 +6274,7 @@ async def handle_staff_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         rows = staff_orders.rows_for_reply(thread, parsed["items"], message.text)
         saved = await asyncio.to_thread(staff_orders.save, supabase, rows)
         logger.info("staff live: saved %d order items for %s", saved, code)
+    await _flag_issue(context.application, thread, parsed, message.text)
     # One question at a time: the group's next queued check-in goes now.
     await staff_live_tick(context.application)
 
@@ -6290,7 +6292,70 @@ async def _save_detail(thread, message, code) -> None:
         rows = staff_orders.rows_for_reply(thread, parsed["items"], message.text)
         saved = await asyncio.to_thread(staff_orders.save, supabase, rows)
         logger.info("staff live: saved %d order items for %s", saved, code)
+    await _flag_issue(context.application, thread, parsed, message.text,
+                      force=thread.get("reply_status") == "problem")
     logger.info("staff live: details for %s %s", code, thread.get("slot"))
+
+
+async def _flag_issue(application, thread, parsed, text, *, force: bool = False) -> None:
+    """Save the issue a reply reports (staff_issues); forward an urgent one to
+    the director chat at once. Never breaks the reply flow."""
+    try:
+        issue = staff_issues.from_reply(parsed, text, force=force)
+        if not issue:
+            return
+        row = staff_issues.row(thread, issue, text, datetime.now(MALAYSIA_TZ))
+        try:
+            inserted = await asyncio.to_thread(
+                lambda: supabase.table(staff_issues.TABLE).insert(row).execute().data or [])
+            if inserted:
+                row = inserted[0]
+        except Exception:
+            logger.exception("staff issues: save failed (is migrations/0051 applied?)")
+        logger.info("staff issues: %s %s %s%s", thread.get("outlet_code"), issue["type"],
+                    issue.get("summary_en"), " URGENT" if issue.get("urgent") else "")
+        if issue.get("urgent"):
+            await _send_chunked_to(application, ALERT_CHAT_ID,
+                                   staff_issues.urgent_text(row, _outlet_label))
+    except Exception:
+        logger.exception("staff issues: flagging failed (thread %s)", thread.get("id"))
+
+
+async def issues_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Director-only: /issues — every open staff issue, urgent first."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    rows = await asyncio.to_thread(_open_issues)
+    await _send_chunked_to(context.application, message.chat_id,
+                           staff_issues.format_open(rows, _outlet_label))
+
+
+async def resolve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Director-only: /resolve <id> — close one staff issue."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    arg = (context.args[0].strip().lstrip("#") if context.args else "")
+    if not arg.isdigit():
+        await message.reply_text("Usage: /resolve <id>  (see /issues)")
+        return
+    fields = {"resolved_at": datetime.now(MALAYSIA_TZ).isoformat(),
+              "resolved_by": _command_owner_id(update)}
+    try:
+        changed = await asyncio.to_thread(
+            lambda: supabase.table(staff_issues.TABLE).update(fields)
+            .eq("id", int(arg)).is_("resolved_at", "null").execute().data or [])
+    except Exception:
+        logger.exception("/resolve failed")
+        await message.reply_text("Couldn't update that issue — see logs.")
+        return
+    if not changed:
+        await message.reply_text(f"Issue #{arg} not found or already resolved.")
+        return
+    r = changed[0]
+    await message.reply_text(f"✅ Resolved #{arg}: {_outlet_label(r.get('outlet_code'))} · "
+                             f"{r.get('type')} — {r.get('summary_en') or r.get('raw_reply')}")
 
 
 async def _answer_honestly(message, code) -> None:
@@ -8041,6 +8106,8 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("draft", draft_command))
     app.add_handler(CommandHandler("closed", closed_command))
     app.add_handler(CommandHandler("staff_digest_now", staff_digest_now_command))
+    app.add_handler(CommandHandler("issues", issues_command))
+    app.add_handler(CommandHandler("resolve", resolve_command))
     app.add_handler(CommandHandler("form_chase_now", form_chase_now_command))
     app.add_handler(CommandHandler("scoreboard_now", scoreboard_now_command))
     app.add_handler(CommandHandler("order_drafts_now", order_drafts_now_command))

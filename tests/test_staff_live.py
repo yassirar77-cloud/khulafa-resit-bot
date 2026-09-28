@@ -150,7 +150,7 @@ class ReplyTests(unittest.TestCase):
                                                 "status": "finished"}))
         self.assertEqual(parsed, {"is_answer": True, "clear": True,
                                   "summary_en": "Chicken finished", "status": "finished",
-                                  "items": [], "asks_if_bot": False})
+                                  "items": [], "asks_if_bot": False, "issue": None})
 
     def test_parse_reply_keeps_order_items(self):
         parsed = sl.parse_reply("What to order?", "Esok nak order apa?",

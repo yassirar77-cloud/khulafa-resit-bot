@@ -264,9 +264,20 @@ REPLY_PROMPT = (
     "invent an item or quantity they did not write. Otherwise [].\n"
     "- asks_if_bot: true if they ask whether they are talking to a person, "
     "a bot, a robot or a machine.\n"
+    "- issue: does the message report a problem the office should know about? "
+    "type = equipment (gas, fridge, aircond, stove, POS, electricity, water, "
+    "anything broken), staff (someone absent, sick, late, quit, short-handed), "
+    "supplier (goods late, missing, wrong, bad quality), customer (complaint, "
+    "refund, food poisoning), cash (cash short, wrong change, drawer), other, "
+    "or none. summary_en = one short English sentence. urgent = true only "
+    "for danger or the shop cannot run: fire, gas leak, no electricity or "
+    "water, flood, injury, robbery, theft, police. Do NOT report as an issue "
+    "an item merely sold out, a normal order, or a reply that all is fine.\n"
     'Reply with JSON only: {"is_answer": true|false, "clear": true|false, '
     '"summary_en": "...", "status": "ok|short|finished|problem|order|other", '
-    '"items": [], "asks_if_bot": false}'
+    '"items": [], "asks_if_bot": false, '
+    '"issue": {"type": "equipment|staff|supplier|customer|cash|other|none", '
+    '"summary_en": "...", "urgent": false}}'
 )
 
 
@@ -293,6 +304,7 @@ def parse_reply(question_en, question_text, reply_text, complete) -> dict | None
         "status": status if status in REPLY_STATUSES else "other",
         "items": items if isinstance(items, list) else [],
         "asks_if_bot": data.get("asks_if_bot") is True,
+        "issue": data.get("issue") if isinstance(data.get("issue"), dict) else None,
     }
 
 
