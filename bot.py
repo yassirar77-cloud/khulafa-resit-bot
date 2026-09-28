@@ -102,6 +102,7 @@ import cashier_names
 import digest
 import director_ask
 import director_feed
+import director_sql
 import log_redact
 import group_reports
 import food_cost_analytics
@@ -4198,9 +4199,36 @@ async def handle_ask_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
     else:
         interesting = bool(parsed.get("confident"))
-    if not interesting:
+    if interesting:
+        await _send_answer(message, question)
         return
-    await _send_answer(message, question)
+    # Anything else the item search can't take becomes one read-only SELECT
+    # (director_sql) — when DIRECTOR_QA is on. In the group only questions
+    # are answered, so the owners' chatter is left alone.
+    if director_sql.enabled() and (private_reviewer or director_sql.looks_like_question(question)):
+        await _answer_sql(message, question, _command_owner_id(update))
+
+
+def _run_readonly_sql(sql: str) -> list[dict]:
+    """The one door to free SQL: the director_sql() function (migrations/0055),
+    read-only role, 5-second timeout."""
+    data = supabase.rpc(director_sql.RPC, {"q": sql}).execute().data
+    return data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
+
+
+async def _answer_sql(message, question: str, user_id) -> None:
+    result = await asyncio.to_thread(
+        director_sql.run, question, run_sql=_run_readonly_sql)
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table(director_sql.LOG_TABLE)
+            .insert(director_sql.log_row(result, chat_id=message.chat_id, user_id=user_id))
+            .execute())
+    except Exception:
+        logger.exception("director sql: log failed (migrations/0055 applied?)")
+    logger.info("director sql: %s (%d rows, %d ms) %s", "ok" if result["ok"] else "no",
+                result["row_count"], result["ms"], result.get("error") or "")
+    await _reply_chunked(message, result["text"])
 
 
 # === PR #34: daily digest preview (owner-only) ===============================

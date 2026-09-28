@@ -71,8 +71,14 @@ class DirectorAskWiring(unittest.TestCase):
         # Group chatter needs the high bar; a reviewer's DM needs only an item.
         self.assertIn('parsed.get("confident")', block)
         self.assertIn('parsed.get("canonical")', block)
-        # Nothing that misses the bar gets a reply.
-        self.assertIn("if not interesting:\n        return", block)
+        # Nothing that misses the bar gets the item answer; what is left goes
+        # to the read-only SQL Q&A only when DIRECTOR_QA is on (and, in the
+        # group, only for questions).
+        self.assertIn("if interesting:\n        await _send_answer(message, question)\n        return", block)
+        self.assertIn("director_sql.enabled() and (private_reviewer or "
+                      "director_sql.looks_like_question(question))", block)
+        runner = _block(self.src, "def _run_readonly_sql(")
+        self.assertIn('supabase.rpc(director_sql.RPC, {"q": sql})', runner)
 
     def test_shop_prices_defaults_to_the_item_level_report(self):
         # Grouping by item_variant fragmented one item into dozens of
