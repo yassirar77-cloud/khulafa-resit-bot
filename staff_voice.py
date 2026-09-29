@@ -9,7 +9,13 @@ as a typed message — nothing downstream knows the difference. The
 transcript, the language used, the duration and the audio ``file_id``
 are kept in ``staff_chat_log`` with ``kind = 'voice'`` (migrations/0054).
 
-When transcription fails, or is not confident enough
+A transcript is checked BEFORE the confidence floor for its script: with
+``language=ta`` it may contain only Tamil script, Latin letters, digits and
+punctuation; ``bn`` Bengali script plus the same; ``ms``, ``en``, ``id``
+Latin plus digits and punctuation. A character from any other script
+(Korean, Greek, Cyrillic, Arabic, CJK ...) is a Whisper hallucination on a
+clip with no real speech, and the note bounces with reason
+``wrong_script``. Then, when transcription fails or is not confident enough
 (``VOICE_MIN_CONFIDENCE``, default 0.6), the bot answers in the cashier's
 language asking them to type it instead.
 
@@ -19,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
+import unicodedata
 
 import cashier_names
 import staff_ai
@@ -44,13 +51,85 @@ def min_confidence() -> float:
         return DEFAULT_MIN_CONFIDENCE
 
 
+# --- script check -----------------------------------------------------------------
+#
+# Which Unicode blocks a transcript may use, per language code sent to Whisper.
+# Latin letters (incl. accented), digits, punctuation, spaces and symbols are
+# always fine; anything else must be in the language's own script.
+_TAMIL = (0x0B80, 0x0BFF)
+_BENGALI = (0x0980, 0x09FF)
+SCRIPT_BLOCKS = {"ta": (_TAMIL,), "bn": (_BENGALI,), "ms": (), "en": (), "id": (),
+                 # no /lang set (auto-detect): any script our staff write in
+                 "auto": (_TAMIL, _BENGALI)}
+_LATIN_MAX = 0x024F      # Basic Latin, Latin-1, Latin Extended-A/B
+
+# For the bounce detail: name the foreign script found.
+_FOREIGN = (
+    ("Hangul", ((0xAC00, 0xD7AF), (0x1100, 0x11FF), (0x3130, 0x318F))),
+    ("Greek", ((0x0370, 0x03FF), (0x1F00, 0x1FFF))),
+    ("Cyrillic", ((0x0400, 0x052F),)),
+    ("Arabic", ((0x0600, 0x06FF), (0x0750, 0x077F), (0xFB50, 0xFDFF), (0xFE70, 0xFEFF))),
+    ("CJK", ((0x4E00, 0x9FFF), (0x3400, 0x4DBF), (0x3040, 0x30FF), (0xF900, 0xFAFF))),
+    ("Thai", ((0x0E00, 0x0E7F),)),
+    ("Devanagari", ((0x0900, 0x097F),)),
+    ("Hebrew", ((0x0590, 0x05FF),)),
+    ("Tamil", (_TAMIL,)),
+    ("Bengali", (_BENGALI,)),
+)
+
+
+def _in(cp: int, blocks) -> bool:
+    return any(lo <= cp <= hi for lo, hi in blocks)
+
+
+def _script_name(ch: str) -> str:
+    cp = ord(ch)
+    for name, blocks in _FOREIGN:
+        if _in(cp, blocks):
+            return name
+    return "other"
+
+
+def wrong_script(text, language_code) -> list[str]:
+    """Characters in ``text`` that are not allowed for ``language_code``:
+    ``[]`` when the transcript is clean. Letters of the language's own
+    script, Latin letters, digits, punctuation, spaces, symbols and emoji
+    are allowed; a letter from any other script is not."""
+    allowed_blocks = SCRIPT_BLOCKS.get(str(language_code or "auto"), SCRIPT_BLOCKS["auto"])
+    bad = []
+    for ch in str(text or ""):
+        cp = ord(ch)
+        if cp <= _LATIN_MAX or _in(cp, allowed_blocks):
+            continue
+        cat = unicodedata.category(ch)
+        if cat[0] in ("P", "Z", "S", "N", "C"):     # punctuation, space, symbol, number, control
+            continue
+        if cat[0] == "M" and any(_in(ord(c), allowed_blocks) for c in (ch,)):
+            continue
+        bad.append(ch)
+    return bad
+
+
+def script_detail(bad: list[str], language_code) -> str:
+    scripts = []
+    for ch in bad:
+        name = _script_name(ch)
+        if name not in scripts:
+            scripts.append(name)
+    sample = "".join(bad[:12])
+    return f"lang={language_code or 'auto'} found {', '.join(scripts) or 'other'}: {sample}"
+
+
 def accept(transcript: dict | None) -> str | None:
     """The text to feed the reply reader, or None when the cashier should
-    type instead (failed call, empty text, or below the confidence floor)."""
+    type instead (failed call, empty text, wrong script, or below the
+    confidence floor — in that order)."""
     if not transcript or transcript.get("ok") is False:
         return None
     text = str(transcript.get("text") or "").strip()
     if not text:
+        return None
+    if wrong_script(text, transcript.get("language")):
         return None
     conf = transcript.get("confidence")
     if conf is not None:
@@ -85,8 +164,13 @@ def bounce(transcript: dict | None) -> dict | None:
             detail = str(transcript.get("detail") or transcript.get("message"))
         return {"reason": reason, "detail": detail[:300],
                 "level": "warning" if reason in API_REASONS else "info"}
-    if not str(transcript.get("text") or "").strip():
+    text = str(transcript.get("text") or "").strip()
+    if not text:
         return {"reason": "empty_text", "detail": "", "level": "info"}
+    bad = wrong_script(text, transcript.get("language"))
+    if bad:
+        return {"reason": "wrong_script", "detail": script_detail(bad, transcript.get("language")),
+                "level": "info"}
     conf = transcript.get("confidence")
     return {"reason": "low_confidence", "detail": f"score={conf} floor={min_confidence()}",
             "level": "info"}
@@ -209,6 +293,9 @@ def format_stats(rows: list[dict], label=str, *, since=None) -> str:
                          "Render log at WARNING)")
         if "no_key" in all_reasons:
             lines.append("no_key = GROQ_API_KEY was not set when the note came in")
+        if "wrong_script" in all_reasons:
+            lines.append("wrong_script = letters from another script (Korean, Greek, Arabic ...) — "
+                         "Whisper heard no real speech")
         if "low_confidence" in all_reasons:
             lines.append(f"low_confidence = below VOICE_MIN_CONFIDENCE ({min_confidence()})")
     return "\n".join(lines)
