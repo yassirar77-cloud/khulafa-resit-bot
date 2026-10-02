@@ -187,6 +187,20 @@ outlet group and pick shift + name with buttons. The monthly close
   exist for the price sanity gate; it was applied to production on
   2026-10-02 together with a backfill of UNKNOWN bills from approved / known
   merchants into `item_prices`.
+* **Per-kg lines carry the weight (approvals round).** Before pricing,
+  `items_utils.resolve_weighed_lines` maps alternative OCR keys
+  (quantity / unit_price / description / total) and, when the bill total is
+  known, replaces order counts (30 birds, 40 legs) with the printed weight:
+  from the line total ÷ price, a weight in the name, or the raw text in either
+  layout ("count name weight price total" delivery orders, "qty price weight
+  total" invoices). A correction is only kept when it brings the lines to the
+  bill total. The OCR prompt now asks for the weight as qty on per-kg lines.
+* `fixed_costs_archive` (0060) and `petty_cash_archive` (0061) hold side-table
+  rows moved out after a director-approved retype, with a reason; nothing is
+  deleted outright.
+* Kitchen form edits (`kitchen_usage._edit_form_message`) log a failed
+  `edit_message_text` with its traceback instead of suppressing it;
+  "message is not modified" is logged at debug.
 
 Apply the migrations yourself (not done by the bot):
 
