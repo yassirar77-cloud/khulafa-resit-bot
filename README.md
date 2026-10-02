@@ -201,6 +201,25 @@ outlet group and pick shift + name with buttons. The monthly close
 * Kitchen form edits (`kitchen_usage._edit_form_message`) log a failed
   `edit_message_text` with its traceback instead of suppressing it;
   "message is not modified" is logged at debug.
+* **Chicken cuts are their own items (2026-10-02).** `ayam_leg` (WHOLE LEG,
+  W.LEG / WING / DRUMSTICK / THIGH, paha / peha), `ayam_wing`, `ayam_isi`
+  (ISI AYAM, ISI / MINCED / CHOP / FILLET / B.LEG) and `ayam_breast` are
+  priced separately, but `item_canonicalization_v2.item_family` maps them to
+  `ayam`, so monthly kg, key-stock, overbuy-watch and the overbuy POS check
+  still count them as chicken. Director price questions resolve a cut to the
+  `ayam` family and narrow by name, as before. WHOLE LEG lines now count as kg
+  (the "whole" per-piece marker no longer swallows "whole leg").
+* **Classifier (approvals round 2).** A supplier's "License Number : ..." /
+  "Lesen No." header line is a company ID, not a licence payment. PINJAM on a
+  bill with SILINDER / TONG / GAS / BOTOL / DEPOSIT is a cylinder loan, not a
+  staff advance.
+* Migrations 0062–0065: 0062 locks the anon key out of the 11 RLS-off tables
+  and `receipts`; 0063 gives `director_readonly` read policies on every RLS
+  table (except `outlet_registration_codes`), limits `director_sql()` to
+  service_role, and revokes anon/authenticated default privileges; 0064
+  applies 0035 (+ outlet backfill), 0036 (text sentinel) and the missing
+  indexes; 0065 adds `receipts.receipt_date_original` and
+  `staff_advances_archive`.
 
 Apply the migrations yourself (not done by the bot):
 

@@ -89,6 +89,21 @@ class QtyFold(unittest.TestCase):
         out = qty_by_day(rows, "SBESI")
         self.assertAlmostEqual(out[D]["ayam"]["kg"], 55.0)
 
+    def test_chicken_cuts_count_as_ayam(self):
+        # Whole leg / isi lines are their own items for prices but still
+        # chicken bought that day.
+        rows = [
+            {"outlet_code": "VISTA", "canonical_item": "ayam",
+             "raw_item_name": "AYAM BERSIH", "qty": 47.6, "receipt_date": D},
+            {"outlet_code": "VISTA", "canonical_item": "ayam_leg",
+             "raw_item_name": "WHOLE LEG", "qty": 11.2, "receipt_date": D},
+            {"outlet_code": "VISTA", "canonical_item": "ayam_isi",
+             "raw_item_name": "ISI AYAM", "qty": 4.0, "receipt_date": D},
+        ]
+        out = qty_by_day(rows, "VISTA")
+        self.assertEqual(list(out[D]), ["ayam"])
+        self.assertAlmostEqual(out[D]["ayam"]["kg"], 62.8)
+
 
 def _baseline(days=10, daily_kg=50.0, daily_sales=4000.0):
     """A steady baseline: same kg and sales every day -> median ratio

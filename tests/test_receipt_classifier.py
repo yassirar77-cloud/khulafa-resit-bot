@@ -1079,3 +1079,44 @@ class ShadowWeekRoutingTests(unittest.TestCase):
                              parsed_items=[{"name": "Petronas 14kg – Filled", "qty": 3, "price": 26.5}],
                              suppliers=self.SUPPLIERS)
         self.assertEqual(r.receipt_type, ReceiptType.PETTY_CASH)
+
+
+class ApprovalsRoundRetypeTests(unittest.TestCase):
+    """Bills the director retyped on 2026-10-02 must classify the same way."""
+
+    def test_supplier_license_number_header_is_not_rent(self):
+        # GM FRESH TRADING #11914: appalam invoice with "License Number" in
+        # the company header.
+        raw = ("GMFRESH TRADING SDN BHD\nTIN : C 588293271 00\nLicense Number : 202401 0271 40\n"
+               "INVOICE\nBILL TO\nKhualafa Bistro\nDescription QTY Price Amount\nAppalam 1 ctn RM195.00\n"
+               "TOTAL RM195.00")
+        r = classify_receipt(raw, parsed_items=[{"name": "Appalam", "qty": 1, "price": 195}],
+                             total=195.0, merchant="GMFRESH TRADING SDN BHD")
+        self.assertNotEqual(r.receipt_type, ReceiptType.RENT_LICENSE)
+
+    def test_real_licence_payment_still_rent_license(self):
+        r = classify_receipt("MAJLIS BANDARAYA SHAH ALAM BAYARAN LESEN PERNIAGAAN 2026", total=480.0)
+        self.assertEqual(r.receipt_type, ReceiptType.RENT_LICENSE)
+        r = classify_receipt("RENEWAL OF BUSINESS LICENSE FEE", total=300.0)
+        self.assertEqual(r.receipt_type, ReceiptType.RENT_LICENSE)
+
+    def test_pinjam_silinder_on_gas_bill_is_not_staff_advance(self):
+        # SUN RISE SA ENTERPRISE #13017: LPG invoice whose footer table reads
+        # "Pinjam Silinder HUTANG / Pulangan Silinder DIBAYAR".
+        raw = ("SUN RISE SA ENTERPRISE\nSOLAR GAS\nJUALAN TUNAI / KREDIT & PESANAN BELIAN LPG\nINVOICE\n"
+               "SILINDER BERISI 14KG 17 4442\nJUMLAH (RM) 4442\nSILINDER KOSONG 12KG 14KG 50KG JUMLAH\n"
+               "Pinjam Silinder HUTANG\nPulangan Silinder DIBAYAR")
+        items = [{"name": "SILINDER BERISI 14KG", "qty": 17}]
+        r = classify_receipt(raw, parsed_items=items, total=4442.0, merchant="SUN RISE SA ENTERPRISE")
+        self.assertNotEqual(r.receipt_type, ReceiptType.STAFF_ADVANCE)
+        suppliers = [{"canonical_name": "SUN RISE SA ENTERPRISE", "aliases": [], "active": True}]
+        r = classify_receipt(raw, parsed_items=items, total=4442.0, merchant="SUN RISE SA ENTERPRISE",
+                             suppliers=suppliers)
+        self.assertEqual(r.receipt_type, ReceiptType.SUPPLIER_PURCHASE)
+
+    def test_pinjam_to_staff_still_staff_advance(self):
+        r = classify_receipt("PINJAM TO ALI RM200 BY CASH", total=200.0)
+        self.assertEqual(r.receipt_type, ReceiptType.STAFF_ADVANCE)
+        # A deposit or bottle word does not rescue a PAYOUT line.
+        r = classify_receipt("PAYOUT TO KUMAR DEPOSIT RM100", total=100.0)
+        self.assertEqual(r.receipt_type, ReceiptType.STAFF_ADVANCE)

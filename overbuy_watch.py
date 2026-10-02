@@ -198,9 +198,9 @@ def load_item_rows(supabase, start_iso: str, end_iso: str) -> list[dict]:
     the same way the monthly report does it). ``[]`` on failure."""
     try:
         from monthly_consumption import (
-            TRACKED_CATEGORIES,
             _excluded_receipt_ids,
             _is_own_outlet,
+            tracked_canonicals,
         )
 
         def _build():
@@ -210,7 +210,7 @@ def load_item_rows(supabase, start_iso: str, end_iso: str) -> list[dict]:
                     "outlet_code, canonical_item, raw_item_name, qty, "
                     "line_total, receipt_id, receipt_date, merchant"
                 )
-                .in_("canonical_item", list(TRACKED_CATEGORIES))
+                .in_("canonical_item", tracked_canonicals())
                 .gte("receipt_date", start_iso)
                 .lte("receipt_date", end_iso)
             )
@@ -244,6 +244,7 @@ def category_totals(rows: list[dict], outlet_canonical: str) -> dict:
     ``item_prices.outlet_code`` against the reconciliation's canonical
     outlet name via the kitchen bridge (``outlets_match``). Never raises."""
     try:
+        from item_canonicalization_v2 import item_family
         from kitchen_usage import outlets_match
         from monthly_consumption import TRACKED_CATEGORIES, estimate_line_kg
 
@@ -251,13 +252,14 @@ def category_totals(rows: list[dict], outlet_canonical: str) -> dict:
         for row in rows or []:
             if not isinstance(row, dict):
                 continue
-            if row.get("canonical_item") not in TRACKED_CATEGORIES:
+            category = item_family(row.get("canonical_item"))
+            if category not in TRACKED_CATEGORIES:
                 continue
             if not outlets_match(row.get("outlet_code"), outlet_canonical):
                 continue
             kg, units = estimate_line_kg(row.get("raw_item_name"), row.get("qty"))
             bucket = totals.setdefault(
-                row["canonical_item"], {"kg": 0.0, "units": 0.0}
+                category, {"kg": 0.0, "units": 0.0}
             )
             if kg is not None:
                 bucket["kg"] += kg

@@ -84,6 +84,29 @@ def canonicalize_item(raw_name: Any) -> dict:
     return result
 
 
+# Cuts that are priced and tracked on their own but are still the base item
+# for kg totals (key stock, monthly kg, overbuy). Ayam Berlian invoices list
+# AYAM, WHOLE LEG / W.LEG..., ISI / MINCED... and wings at different per-kg
+# prices; all of it is chicken bought.
+ITEM_FAMILY: dict[str, str] = {
+    "ayam_leg": "ayam",
+    "ayam_wing": "ayam",
+    "ayam_isi": "ayam",
+    "ayam_breast": "ayam",
+}
+
+
+def item_family(canonical: Any) -> Any:
+    """Base item for a canonical key ("ayam_leg" -> "ayam"); others unchanged."""
+    return ITEM_FAMILY.get(canonical, canonical)
+
+
+def family_members(bases) -> list[str]:
+    """Every canonical key whose family is one of ``bases`` (bases included)."""
+    wanted = set(bases)
+    return sorted(wanted | {k for k, base in ITEM_FAMILY.items() if base in wanted})
+
+
 def list_canonical_items() -> list[str]:
     """Return all canonical item keys, sorted alphabetically."""
     return sorted(_CATEGORIES.keys())

@@ -245,10 +245,17 @@ def _build_combined_text(
     text = " ".join(parts).upper()
     # Malaysian e-invoices print "LHDN VALIDATED LINK" in the footer of every
     # supplier invoice — that is the tax office's stamp, not a payment to it.
-    return _EINVOICE_FOOTER_RE.sub(" ", text)
+    text = _EINVOICE_FOOTER_RE.sub(" ", text)
+    # A supplier's own registration line ("License Number : 2024...",
+    # "Lesen No.") is a company ID in the header, not a licence payment.
+    return _COMPANY_LICENSE_ID_RE.sub(" ", text)
 
 
 _EINVOICE_FOOTER_RE = re.compile(r"LHDN\s+VALIDATED(?:\s+LINK)?(?:\s+PAGE)?")
+_COMPANY_LICENSE_ID_RE = re.compile(r"\b(?:LICEN[CS]E|LESEN)\s*(?:NUMBER|NOMBOR|NO\b\.?|#)")
+# Gas-cylinder bills print "Pinjam Silinder" (cylinder loan / deposit):
+# PINJAM there is a cylinder, not a staff loan.
+_CYLINDER_CONTEXT_RE = re.compile(r"\b(?:SILINDER|TONG|GAS|BOTOL|DEPOSIT)\b")
 _SHORT_KEYWORD_LEN = 4
 
 
@@ -537,6 +544,8 @@ def classify_receipt(
     # staff name goes with it (shadow-week fix 4).
     if matched and not advance_is_staff(text, merchant):
         matched = [kw for kw in matched if kw not in ("ADVANCE", "ADVANS")]
+    if matched and _CYLINDER_CONTEXT_RE.search(text):
+        matched = [kw for kw in matched if kw not in ("PINJAM", "PINJAMAN")]
     if matched:
         staff_name = extract_staff_name(text)
         issued_by = extract_issued_by(text)

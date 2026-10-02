@@ -14,7 +14,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from item_canonicalization_v2 import (  # noqa: E402
     canonicalize_item,
     classify_items_in_receipt,
+    family_members,
     get_item_variations,
+    item_family,
     list_canonical_items,
 )
 
@@ -78,8 +80,10 @@ class CanonicalizeItemExactMatch(unittest.TestCase):
 
 
 class CanonicalizeItemVariations(unittest.TestCase):
-    def test_whole_leg_to_ayam(self):
-        self.assertEqual(canonicalize_item("WHOLE LEG")["canonical"], "ayam")
+    def test_whole_leg_is_its_own_cut_of_ayam(self):
+        # Priced on its own since 2026-10-02; still ayam for kg totals.
+        self.assertEqual(canonicalize_item("WHOLE LEG")["canonical"], "ayam_leg")
+        self.assertEqual(item_family("ayam_leg"), "ayam")
 
     def test_super_ch_to_ayam(self):
         self.assertEqual(canonicalize_item("SUPER CH")["canonical"], "ayam")
@@ -215,12 +219,12 @@ class ClassifyItemsInReceipt(unittest.TestCase):
 class ItemCanonicalUtilities(unittest.TestCase):
     def test_list_canonical_items_count_and_sorted(self):
         items = list_canonical_items()
-        self.assertEqual(len(items), 53)
+        self.assertEqual(len(items), 57)
         self.assertEqual(items, sorted(items))
 
     def test_get_item_variations_ayam(self):
         vars_ = get_item_variations("ayam")
-        self.assertEqual(len(vars_), 11)
+        self.assertEqual(len(vars_), 10)
         self.assertIn("AYAM", vars_)
         self.assertIn("LI AGAM", vars_)
 
@@ -233,6 +237,42 @@ class ItemCanonicalUtilities(unittest.TestCase):
         # get_item_variations with weird inputs returns an empty list
         self.assertEqual(get_item_variations(""), [])
         self.assertEqual(get_item_variations("AYAM"), [])  # canonical keys are lowercase
+
+
+class ChickenCutTests(unittest.TestCase):
+    """Ayam Berlian invoice lines and common cut names (2026-10-02)."""
+
+    def test_ayam_berlian_lines(self):
+        cases = {
+            "AYAM BERSIH": "ayam",
+            "AYAM Tandori": "ayam",
+            "WHOLE LEG": "ayam_leg",
+            "W.LEG / WING / DRUMSTICK / THIGH": "ayam_leg",
+            "W.LFG / WING / DRUMSTICK / THIGH": "ayam_leg",
+            "ISI AYAM": "ayam_isi",
+            "ISI / MINCED / CHOP / FILLET / B.LEG": "ayam_isi",
+            "IF / MINCED / CHOP / FILLET / B.LEG": "ayam_isi",
+            "CHICKEN WING": "ayam_wing",
+            "SAYAP AYAM": "ayam_wing",
+            "DADA AYAM": "ayam_breast",
+            "PAHA AYAM 10KG": "ayam_leg",
+        }
+        for name, canon in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(canonicalize_item(name)["canonical"], canon)
+
+    def test_cut_words_do_not_capture_other_items(self):
+        self.assertEqual(canonicalize_item("MUTTON LEG BONE IN C")["canonical"], "kambing")
+        self.assertEqual(canonicalize_item("SILINDER BERISI")["canonical"], "gas")
+        self.assertNotEqual(canonicalize_item("IKAN FILLET")["canonical"], "ayam_isi")
+
+    def test_family_helpers(self):
+        self.assertEqual(item_family("ayam_isi"), "ayam")
+        self.assertEqual(item_family("ikan"), "ikan")
+        self.assertEqual(item_family(None), None)
+        self.assertEqual(family_members(["ayam"]),
+                         ["ayam", "ayam_breast", "ayam_isi", "ayam_leg", "ayam_wing"])
+        self.assertEqual(family_members(["ikan"]), ["ikan"])
 
 
 if __name__ == "__main__":

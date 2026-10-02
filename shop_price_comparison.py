@@ -42,6 +42,8 @@ import re
 from datetime import date, datetime, timedelta
 from typing import Any
 
+from item_canonicalization_v2 import family_members, item_family
+
 logger = logging.getLogger(__name__)
 
 _ITEM_PRICES_TABLE = "item_prices"
@@ -261,7 +263,7 @@ def _fetch_price_rows(
         query = (
             supabase_client.table(_ITEM_PRICES_TABLE)
             .select(_PRICE_ROW_COLUMNS)
-            .eq("canonical_item", canonical_item)
+            .in_("canonical_item", family_members([canonical_item]))
         )
         if cutoff:
             query = query.gte("receipt_date", cutoff)
@@ -955,7 +957,18 @@ def resolve_item_query(query: Any) -> dict:
     ``suggestions`` is populated when the text is ambiguous (matches
     several canonical keys) or unknown, so the caller can reply with
     "did you mean…". Never raises.
+
+    A cut resolves to its base item ("paha ayam" -> ayam, not ayam_leg):
+    reports read the whole family and ``pick_variant`` narrows to the cut.
     """
+    out = _resolve_item_query(query)
+    if out.get("canonical"):
+        out["canonical"] = item_family(out["canonical"])
+    out["suggestions"] = sorted({item_family(s) for s in out.get("suggestions") or []})[:10]
+    return out
+
+
+def _resolve_item_query(query: Any) -> dict:
     out: dict = {"canonical": None, "suggestions": []}
     try:
         if not isinstance(query, str) or not query.strip():
