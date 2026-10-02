@@ -34,6 +34,7 @@ import logging
 import math
 from datetime import date, datetime, timedelta
 
+from date_utils import receipt_day, upload_window
 from db_pagination import fetch_all_pages
 from order_cadence import detect_cadence
 
@@ -95,6 +96,19 @@ def load_supplier_bill_rows(supabase, *, today: date | None = None) -> list[dict
                 .order("id", desc=False)
             )
 
+        def _build_undated():
+            # Bills the OCR could not date count on their upload day, so an
+            # undated bill never makes its supplier look "missing".
+            gte, lte = upload_window(cutoff, base_today)
+            return (
+                supabase.table(_RECEIPTS_TABLE)
+                .select("id, chat_id, outlet, merchant, receipt_date, receipt_type, created_at")
+                .is_("receipt_date", "null")
+                .gte("created_at", gte)
+                .lte("created_at", lte)
+                .order("id", desc=False)
+            )
+
         try:
             raw = fetch_all_pages(_build)
         except Exception:
@@ -111,6 +125,11 @@ def load_supplier_bill_rows(supabase, *, today: date | None = None) -> list[dict
                 or []
             )
 
+        try:
+            raw = list(raw) + list(fetch_all_pages(_build_undated))
+        except Exception:
+            logger.warning("missing bills: undated-receipt fallback read failed", exc_info=True)
+
         rows: list[dict] = []
         for row in raw:
             if not isinstance(row, dict):
@@ -124,7 +143,7 @@ def load_supplier_bill_rows(supabase, *, today: date | None = None) -> list[dict
             rtype = str(row.get("receipt_type") or "").strip().upper()
             if rtype in _NON_SUPPLIER_RECEIPT_TYPES:
                 continue
-            when = _to_date(row.get("receipt_date"))
+            when = receipt_day(row.get("receipt_date"), row.get("created_at"))
             if when is None or when > base_today:
                 continue
             chat_id = row.get("chat_id")

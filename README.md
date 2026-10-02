@@ -225,7 +225,10 @@ outlet group and pick shift + name with buttons. The monthly close
   filter `item_prices.receipt_date` no longer drop it; the receipt keeps
   `receipt_date` NULL. The digest's weekly outlet spend counts undated
   supplier bills on their upload day. Rule-based date fixes keep the OCR'd
-  date in `receipts.receipt_date_original`.
+  date in `receipts.receipt_date_original`. The same upload-day fallback
+  (`date_utils.receipt_day` / `upload_window`) covers `/summary`, missing-bill
+  alerts and the known-merchant baseline; migration 0067 rebuilds the
+  `price_movements` view on `COALESCE(receipt_date, upload day)`.
 * Migration 0066 drops `audit_responses`' `anon_read` policy (the last table
   the anon key could still read after 0062).
 

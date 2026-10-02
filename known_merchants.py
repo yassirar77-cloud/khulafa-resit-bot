@@ -97,6 +97,12 @@ def _to_date(value) -> date | None:
         return None
 
 
+def _upload_day(created_at) -> date | None:
+    from date_utils import receipt_day
+
+    return receipt_day(None, created_at)
+
+
 def aggregate_receipts(rows, agg: dict | None = None, *, group_codes: dict | None = None,
                        since: date | None = None, until: date | None = None) -> dict:
     """Fold a page of receipt rows into ``{(outlet, MERCHANT): {bills, first_seen,
@@ -116,7 +122,8 @@ def aggregate_receipts(rows, agg: dict | None = None, *, group_codes: dict | Non
 
         if is_staff_payment(merchant):
             continue
-        d = _to_date(r.get("receipt_date"))
+        # Undated bills count on their upload day.
+        d = _to_date(r.get("receipt_date")) or _upload_day(r.get("created_at"))
         if d is None or (since and d < since) or (until and d > until):
             continue
         code = None
@@ -223,6 +230,8 @@ def stream_receipt_aggregates(db, since: date, until: date, group_codes: dict | 
                               page_size: int = PAGE_SIZE) -> dict:
     """Aggregate the receipts in ``[since, until]`` one page at a time — the
     aggregate holds one entry per (outlet, merchant), never the receipts."""
+    from date_utils import upload_window
+
     agg: dict = {}
     start = 0
     while True:
@@ -235,6 +244,24 @@ def stream_receipt_aggregates(db, since: date, until: date, group_codes: dict | 
         if len(page) < page_size:
             break
         start += page_size
+    # Undated bills, by upload day, so a supplier billed without dates still
+    # becomes known (and is not flagged as an outside purchase).
+    try:
+        gte, lte = upload_window(since, until)
+        start = 0
+        while True:
+            page = (db.table(RECEIPTS_TABLE)
+                    .select("id, outlet, merchant, chat_id, receipt_date, receipt_type, created_at")
+                    .is_("receipt_date", "null")
+                    .gte("created_at", gte).lte("created_at", lte)
+                    .order("id", desc=False).range(start, start + page_size - 1)
+                    .execute().data or [])
+            aggregate_receipts(page, agg, group_codes=group_codes, since=since, until=until)
+            if len(page) < page_size:
+                break
+            start += page_size
+    except Exception:
+        logger.warning("known merchants: undated-receipt fallback read failed", exc_info=True)
     return agg
 
 

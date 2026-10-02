@@ -3195,7 +3195,25 @@ def fetch_today_receipts(user_id: int, today_iso: str) -> list[dict]:
         .eq("receipt_date", today_iso)
         .execute()
     )
-    return result.data or []
+    rows = result.data or []
+    # Bills the OCR could not date count on their upload day.
+    try:
+        from date_utils import upload_window
+
+        gte, lte = upload_window(today_iso, today_iso)
+        undated = (
+            supabase.table(RECEIPTS_TABLE)
+            .select("merchant, total, currency")
+            .eq("telegram_user_id", user_id)
+            .is_("receipt_date", "null")
+            .gte("created_at", gte)
+            .lte("created_at", lte)
+            .execute()
+        )
+        rows += undated.data or []
+    except Exception:
+        logger.warning("summary: undated-receipt fallback read failed", exc_info=True)
+    return rows
 
 
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
