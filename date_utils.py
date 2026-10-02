@@ -239,3 +239,20 @@ def effective_purchase_date(receipt_date, ingested_at, *, today=None,
     # 3. Implausibly old, month/day far from ingestion -> ambiguous, don't guess.
     return rd, False, ("old date %s, %d days from ingestion — needs review"
                        % (rd.isoformat(), drift))
+
+
+def receipt_day(receipt_date, created_at):
+    """The day a receipt counts on: its OCR'd ``receipt_date`` when present,
+    else its Malaysia upload day (``created_at``). ``None`` when neither
+    parses. Unlike ``clamp_business_date`` it does not second-guess a
+    present date."""
+    return _parse_local_date(receipt_date) or _parse_upload_date(created_at)
+
+
+def upload_window(start, end):
+    """``(gte, lte)`` ISO bounds on ``created_at`` covering the Malaysia
+    calendar days ``start``..``end`` inclusive — for the second query that
+    picks up undated receipts (``receipt_date IS NULL``) in a date window."""
+    s = start.isoformat() if hasattr(start, "isoformat") else str(start)[:10]
+    e = end.isoformat() if hasattr(end, "isoformat") else str(end)[:10]
+    return f"{s}T00:00:00+08:00", f"{e}T23:59:59.999999+08:00"

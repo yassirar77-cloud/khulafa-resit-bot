@@ -142,6 +142,18 @@ class KnownMerchantTests(unittest.TestCase):
         self.assertEqual(names["SWEETTI FREEZEE ENTERPRISE"]["bill_count"], 3)
         self.assertEqual(names["SWEETTI FREEZEE ENTERPRISE"]["outlet"], "SEK-20")
 
+    def test_undated_bills_count_on_their_upload_day(self):
+        from datetime import date as _date
+
+        agg: dict = {}
+        rows = [{"chat_id": -500, "merchant": "LOTUS", "receipt_date": None,
+                 "created_at": f"2026-09-0{d}T02:00:00+00:00", "receipt_type": "UNKNOWN"} for d in (1, 2, 3)]
+        rows.append({"chat_id": -500, "merchant": "LOTUS", "receipt_date": None,
+                     "created_at": "2026-01-01T02:00:00+00:00", "receipt_type": "UNKNOWN"})
+        km.aggregate_receipts(rows, agg, group_codes={-500: "SEK20"},
+                              since=_date(2026, 8, 1), until=_date(2026, 9, 30))
+        self.assertEqual(agg[("SEK-20", "LOTUS")]["bills"], 3)
+
     def test_refresh_recounts_but_never_promotes_a_shop_cashiers_keep_using(self):
         db = FakeSupabase()
         db.table(op.SUPPLIERS_TABLE).insert([dict(s) for s in SUPPLIERS]).execute()

@@ -201,12 +201,22 @@ class FakeQuery:
     def __init__(self, rows):
         self._rows = rows
         self._gte = {}
+        self._lte = {}
+        self._null = []
 
     def select(self, *_):
         return self
 
     def gte(self, col, val):
         self._gte[col] = val
+        return self
+
+    def lte(self, col, val):
+        self._lte[col] = val
+        return self
+
+    def is_(self, col, _val):
+        self._null.append(col)
         return self
 
     def order(self, *_, **__):
@@ -219,7 +229,9 @@ class FakeQuery:
     def execute(self):
         rows = [
             r for r in self._rows
-            if str(r.get("receipt_date") or "") >= self._gte.get("receipt_date", "")
+            if all(r.get(c) is None for c in self._null)
+            and all(str(r.get(c) or "") >= v for c, v in self._gte.items())
+            and all(str(r.get(c) or "") <= v for c, v in self._lte.items())
         ]
         start, end = getattr(self, "_range", (0, len(rows) - 1))
         return FakeResult(rows[start:end + 1])
@@ -262,6 +274,19 @@ class LoadSupplierBillRows(unittest.TestCase):
         # The unclassified shop is kept (UNKNOWN is not evidence against it);
         # utility, own-outlet, chatless and future-dated rows are dropped.
         self.assertEqual(kept, ["BESTARI FARM", "UNCLASSIFIED SHOP"])
+        self.assertEqual(out[0]["receipt_date"], date(2026, 8, 1))
+
+    def test_undated_bill_counts_on_its_upload_day(self):
+        rows = [
+            {"id": 1, "chat_id": CHAT, "outlet": "SEK 20", "merchant": "BESTARI FARM",
+             "receipt_date": None, "created_at": "2026-08-01T03:00:00+00:00",
+             "receipt_type": "SUPPLIER_PURCHASE"},
+            {"id": 2, "chat_id": CHAT, "outlet": "SEK 20", "merchant": "OLD SHOP",
+             "receipt_date": None, "created_at": "2025-01-01T03:00:00+00:00",
+             "receipt_type": "SUPPLIER_PURCHASE"},
+        ]
+        out = load_supplier_bill_rows(FakeSupabase(rows), today=TODAY)
+        self.assertEqual([r["merchant"] for r in out], ["BESTARI FARM"])
         self.assertEqual(out[0]["receipt_date"], date(2026, 8, 1))
 
     def test_db_failure_returns_empty_no_raise(self):
