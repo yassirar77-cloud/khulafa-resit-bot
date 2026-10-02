@@ -54,7 +54,7 @@ _NON_PURCHASE_TYPES = frozenset({
     "STAFF_ADVANCE", "UTILITY", "RENT_LICENSE", "PETTY_CASH", "INTERNAL_TRANSFER",
 })
 # Khulafa's own outlets as OCR reads them (stock transfers are not shops).
-_OWN_OUTLET_RE = re.compile(r"(khula|khalifa|kulapa|kehulafia)", re.IGNORECASE)
+_OWN_OUTLET_RE = re.compile(r"(khula|khalifa|kulapa|kehulafia|sharfud+in)", re.IGNORECASE)
 
 
 def _display_outlet(value: Any) -> str | None:
@@ -246,11 +246,20 @@ def _roster_outlets(db) -> list[str]:
     return sorted({_display_outlet(r.get("outlet")) for r in rows if r.get("outlet")})
 
 
+def _invalidate() -> None:
+    try:
+        import outside_purchase
+        outside_purchase.invalidate_config_cache()
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+
 def refresh(db, suppliers, *, group_codes: dict | None = None, today: date | None = None,
             seed_if_empty: bool = True) -> dict:
     """Nightly: recount the known merchants from the last ``LOOKBACK_DAYS``
     days, add approved suppliers everywhere, seed the baseline the very first
     time (empty table). Returns a summary dict. Never raises."""
+    _invalidate()
     today = today or datetime.now(MY_TZ).date()
     summary = {"seeded": 0, "updated": 0, "approved_added": 0, "pairs": 0, "error": None}
     try:
@@ -296,6 +305,7 @@ def refresh(db, suppliers, *, group_codes: dict | None = None, today: date | Non
 def remove(db, outlet: Any, name: str, removed_by=None) -> dict | None:
     """/buang_merchant: deactivate the known row that matches ``name`` at
     ``outlet`` (exact, alias or clear fuzzy match). Returns the row or None."""
+    _invalidate()
     from outside_purchase import APPROVED, match_supplier
 
     rows = active_rows(load(db, outlet), outlet)

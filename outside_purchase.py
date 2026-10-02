@@ -43,7 +43,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -97,7 +97,9 @@ DEFAULT_WINDOW_DAYS = 30
 DEFAULT_SCOLD_THRESHOLD = 5
 DEFAULT_PRICE_LOOKBACK_DAYS = 90
 
-_OWN_OUTLET_MARKERS = ("khulafa", "khulapa", "khulafah")
+# Khulafa / Nasi Kandar Haji Sharfuddin: the OCR sometimes reads the
+# customer line (our own outlet) as the merchant.
+_OWN_OUTLET_MARKERS = ("khulafa", "khulapa", "khulafah", "khulata", "khulala", "sharfuddin", "sharfudin")
 
 # Legal / trading words that do not identify a shop. "BABAS PRODUCTS SDN BHD"
 # is BABAS; "PASAR SAYUR SEGAR" is NOT the SAYUR supplier just because the
@@ -283,24 +285,30 @@ def _date_label(value: Any) -> str:
 # overbuy check, never a strike.
 _STAFF_PAYMENT_RE = re.compile(
     r"(\b(?:le+a?v+e|lene|leone|leong|l\s*tave|liv+e)\s*pay\b|\bgaji\b|salar[yvi]|\bwages?\b|"
-    r"\badvance|\badvans|pendahuluan|pinjam|payout|\bo\.?t\.?\s*pay\b|overtime|"
+    r"pendahuluan|pinjam|payout|\bo\.?t\.?\s*pay\b|overtime|"
     r"\bustad|\bustaz|\bimam\b|zakat|sedekah|khairat|\bsurau\b|\bmasjid\b|tahlil|kenduri|"
     r"\bbonus\b|komisen|commission|\bkwsp\b|\bepf\b|socso|perkeso|\belaun\b|allowance|"
-    r"\bcuti\b|\bupah\b|\bduit\s*raya\b)",
-    re.IGNORECASE,
-)
+    r"\bcuti\b|\bupah\b|\bduit\s*raya\b)", re.IGNORECASE)
+# "ADVANCE" is handled apart (receipt_classifier.advance_is_staff): it only
+# counts with payroll context or a staff name, never for a shop called
+# "ADVANCE ENTERPRISE" / "ADVANCES ACCESSORIES SHOP".
 PAYROLL = "payroll"
 
 
 def is_staff_payment(merchant: Any, items: Any = None) -> bool:
-    """True when the receipt is a staff / religious payment, not a purchase."""
-    if _STAFF_PAYMENT_RE.search(str(merchant or "")):
-        return True
+    """True when the receipt is a staff / religious payment, not a purchase.
+    Checks the merchant line and every item name."""
+    from receipt_classifier import advance_is_staff
+    merchant_text = str(merchant or "")
+    texts = [merchant_text]
     for entry in items if isinstance(items, list) else []:
         name = entry.get("name") or entry.get("item") or entry.get("raw_name") if isinstance(entry, dict) else entry
-        if isinstance(name, str) and _STAFF_PAYMENT_RE.search(name):
+        if isinstance(name, str):
+            texts.append(name)
+    for text in texts:
+        if _STAFF_PAYMENT_RE.search(text):
             return True
-    return False
+    return advance_is_staff(" ".join(texts), merchant_text)
 
 
 # --- merchant matching -----------------------------------------------------------
@@ -1163,6 +1171,38 @@ def load_config(db) -> dict:
     return config
 
 
+CONFIG_CACHE_SECONDS = 120
+_config_cache: dict = {}
+
+
+def cached_config(db, *, now: datetime | None = None) -> dict:
+    """``load_config`` with a short cache per client: the classifier and the
+    Pinpoint hook both need the lists on every receipt, so one load serves
+    both. An empty load (all tables failed) is never cached."""
+    moment = now or datetime.now(timezone.utc)
+    entry = _config_cache.get(id(db))
+    if entry and (moment - entry["at"]).total_seconds() < CONFIG_CACHE_SECONDS:
+        return entry["config"]
+    config = load_config(db)
+    if any(config.values()):
+        _config_cache[id(db)] = {"at": moment, "config": config}
+    return config
+
+
+def invalidate_config_cache() -> None:
+    """Call after suppliers / known merchants / roster change."""
+    _config_cache.clear()
+
+
+def classifier_suppliers(config: dict, outlet: Any) -> list[dict]:
+    """Approved suppliers plus this outlet's active known merchants, in the
+    shape ``receipt_classifier.classify_receipt(suppliers=...)`` reads."""
+    suppliers = list((config or {}).get("suppliers") or [])
+    if outlet:
+        suppliers += known_merchants.as_suppliers((config or {}).get("known"), outlet)
+    return suppliers
+
+
 def _price_cutoff(as_of: date, lookback_days: int) -> str:
     return (as_of - timedelta(days=lookback_days)).isoformat()
 
@@ -1235,7 +1275,7 @@ def process_receipt(db, stored: dict, *, group_code: Any = None,
             existing = db.table(TABLE).select("id").eq("receipt_id", receipt_id).execute().data or []
             if existing:
                 return None
-        config = load_config(db)
+        config = cached_config(db)
         result = evaluate(stored, config, group_code=group_code, now=now)
         if result["action"] == "skip":
             return None
@@ -1354,6 +1394,7 @@ def add_supplier(db, name: str, alias_of: str | None = None, added_by=None) -> d
                 db.table(SUPPLIERS_TABLE).update({"aliases": aliases, "active": True}) \
                     .eq("id", target["id"]).execute()
             return {"ok": True, "kind": "alias", "supplier": target["canonical_name"]}
+        invalidate_config_cache()
         db.table(SUPPLIERS_TABLE).insert({"canonical_name": clean, "aliases": [], "active": True,
                                           "added_by": added_by}).execute()
         return {"ok": True, "kind": "new", "supplier": clean}

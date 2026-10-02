@@ -167,7 +167,26 @@ outlet group and pick shift + name with buttons. The monthly close
   bonuses, EPF / SOCSO, ustad / surau / khairat payments
   (`outside_purchase.is_staff_payment`) are outside the whole Pinpoint flow:
   no outside-purchase check, no overbuy check, never a strike, never seeded
-  as a known merchant.
+  as a known merchant. "ADVANCE" alone is a shop's brand word: it only counts
+  with payroll context (SALARY / GAJI / STAF / voucher or form words) or a
+  staff name, never for ADVANCE ENTERPRISE / ADVANCES ACCESSORIES SHOP
+  (`receipt_classifier.advance_is_staff`).
+* **Classifier knows the Pinpoint lists (shadow-week fix).** `classify_receipt`
+  takes `suppliers=` (approved suppliers + the outlet's active known
+  merchants, from `outside_purchase.cached_config`, two-minute cache). A bill
+  from one of them is SUPPLIER_PURCHASE, so price history, Pinpoint and the
+  overbuy check all run on it. Deactivated known merchants do not count.
+  Fuel-only bills (E5 / B10 / B20 / RON95 / RON97 / Diesel / Primax /
+  V-Power / FuelSave / FS Diesel, `receipt_classifier.is_fuel_line`) stay
+  PETTY_CASH whatever the total, as do LALAMOVE and Touch 'n Go reloads;
+  LPG cylinders are gas, not fuel. A petty-cash keyword on a bill with stock
+  lines (drinks, fruit, meat, dairy, bottles) is a purchase. Short keywords
+  (TOL, TNB, LHDN, KWSP...) match whole words only, and the e-invoice footer
+  "LHDN VALIDATED LINK" is stripped before matching.
+* `item_price_quarantine` (`migrations/0042_item_price_quarantine.sql`) must
+  exist for the price sanity gate; it was applied to production on
+  2026-10-02 together with a backfill of UNKNOWN bills from approved / known
+  merchants into `item_prices`.
 
 Apply the migrations yourself (not done by the bot):
 

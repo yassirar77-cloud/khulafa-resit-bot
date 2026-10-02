@@ -232,6 +232,24 @@ class ExtraCostTests(unittest.TestCase):
         self.assertEqual(prices["ayam"]["unit_price"], 9.8)
         self.assertEqual(prices["telur"]["unit_price"], 13.0)
 
+    def test_known_merchant_prices_never_become_the_approved_reference(self):
+        # Shadow-week check: extra_cost_vs_approved compares against approved
+        # suppliers only. A known merchant (outside shop the outlet buys from
+        # regularly) is matched with the approved list only, so its rows are
+        # ignored even when they are the latest, and nothing is compared when
+        # no approved supplier ever sold the item.
+        rows = [
+            {"id": 1, "canonical_item": "ayam", "merchant": "BESTARI FARM", "unit_price": 9.8, "receipt_date": "2026-09-01"},
+            {"id": 2, "canonical_item": "ayam", "merchant": "PASAR MINI A M", "unit_price": 7.0, "receipt_date": "2026-09-25"},
+            {"id": 3, "canonical_item": "roti", "merchant": "DIAMOND BALL", "unit_price": 28.0, "receipt_date": "2026-09-25"},
+        ]
+        prices = op.latest_approved_prices(rows, SUPPLIERS)
+        self.assertEqual(prices["ayam"]["merchant"], "BESTARI FARM")
+        self.assertNotIn("roti", prices)
+        total, detail = op.extra_cost(
+            [{"canonical_item": "roti", "unit_price": 30.0, "qty": 2}], prices)
+        self.assertEqual((total, detail), (None, []))
+
     def test_extra_cost_with_missing_price_data(self):
         items = op.normalise_purchase_items([
             {"name": "AYAM", "qty": 2, "price": 12.5},        # 2 x (12.5 - 9.8) = 5.40
