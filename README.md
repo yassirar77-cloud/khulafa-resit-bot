@@ -71,6 +71,110 @@ message, at WARNING), `empty_text`, `low_confidence` (with the score),
 | `0055_director_sql.sql` | `director_readonly` role, `director_sql(q)` function, `director_sql_log` |
 | `0056_phrasing_examples.sql` | `phrasing_examples` |
 | `0057_nudge_off.sql` | `outlet_nudge_off` |
+| `0058_outside_purchases.sql` | `approved_suppliers`, `allowed_outside_items`, `cashier_roster`, `outside_purchases`, view `cashier_strikes` (RLS on) |
+| `0059_pinpoint_v2.sql` | `outside_purchases.mode / notified_at / source`, `outlet_known_merchants` (seeded), `overbuy_flags`, `holiday_calendar` (seeded) — RLS on |
+
+## Outside purchases + cashier strikes ("Pinpoint Target")
+
+`outside_purchase.py`, `migrations/0058_outside_purchases.sql`. When a
+cashier uploads a bill from a shop that is **not** an approved supplier
+(Lotus, 99 Speedmart, pasar, kedai runcit …) the bot works purely from what
+OCR already extracted (no new vision call) and pinpoints:
+
+* **who** — the cashier on shift (`cashier_roster`, outlet + morning/night,
+  Asia/Kuala_Lumpur, night shift runs past midnight); a cashier who linked
+  their account with `/daftar_cashier` is matched directly by uploader id;
+* **when** — the receipt date + a time read from the OCR text, else the
+  upload time; **where** — the outlet; **what** — the items (qty, price);
+* **how much extra** — against the latest approved-supplier unit price in
+  `item_prices` (skipped when there is no approved price).
+
+Rules: merchants match `approved_suppliers` on exact name / alias /
+word-bounded phrase / clear OCR drift — never a bare `%bestari%`
+(BESTARI MINIMART is outside, BESTARI FARM (M) SDN BHD is ours). Items in
+`allowed_outside_items` (ais, emergency gas) never count; a bill with only
+those gets no strike. **False-positive guard:** a fuzzy grey-zone merchant,
+an unreadable merchant or a receipt the verifier scored below
+`OUTSIDE_MIN_CONFIDENCE` is held as `pending_review` and the director chat
+gets **[Beli Luar ✅] [Supplier Kita ❌]** — no strike until a human confirms.
+
+Strikes are counted per cashier and outlet over `STRIKE_WINDOW_DAYS` (30),
+`status = 'counted'` only (view `cashier_strikes`). The reply under the
+receipt is BM + Tamil (the Tamil lines need a native-speaker review before
+go-live, see the module docstring):
+
+| Strike | Reply in the group |
+| --- | --- |
+| 1 | info: this bill is from an outside shop, please order from the official supplier |
+| 2–3 | reminder with the count and the extra cost vs the approved supplier |
+| 4 | final warning: the next one is reported to management |
+| 5+ (`SCOLD_THRESHOLD`) | firm warning listing every purchase in the window with totals and extra cost, "management has been informed"; the full report also goes to `ALERT_CHAT_ID` |
+
+The warnings criticise the action, never the person: no insults, nothing
+about race, religion or nationality. `SCOLD_CHANNEL=dm` sends the warning to
+the cashier's DM instead (only works once they ran `/daftar_cashier` and
+started the bot; otherwise it falls back to the group reply).
+
+Commands (admin = director chat or a reviewer): `/beli_luar [outlet] [days]`
+(per cashier: count, RM, extra cost, top items), `/beli_luar_cashier <name>`
+(full history), `/izin <id> <reason>` (approved emergency — strike removed),
+`/bukan_beli_luar <id>` (false positive), `/tambah_supplier <name> [= <supplier>]`
+(approve a supplier or add an alias). Cashiers run `/daftar_cashier` in their
+outlet group and pick shift + name with buttons. The monthly close
+(`/monthly_kg`, 1st of the month) ends with a per-outlet "Beli Luar" section.
+
+### v2: shadow mode, known merchants, overbuy (`migrations/0059_pinpoint_v2.sql`)
+
+* **Shadow mode.** `OUTSIDE_PURCHASE_MODE=shadow` (the default) detects,
+  attributes, records, counts strikes and sends the review buttons and
+  reports to the director chat, but sends **nothing** to cashiers.
+  `/pinpoint_shadow` (and a 21:45 job while in shadow) lists what WOULD have
+  gone out. Every row carries the mode it was recorded in; after the switch
+  to `live` the cashier's strike number counts live rows only, so old shadow
+  strikes never fire retroactively (management reports keep the full count).
+* **One bill = one message.** When the pinpoint reply or the overbuy question
+  goes out, the mini-market "why?" and the invoice question stay quiet.
+* **Known merchants per outlet** (`known_merchants.py`,
+  `outlet_known_merchants`). Only a merchant that is neither an approved
+  supplier nor known for THAT outlet is pinned. The baseline is the last 90
+  days (>= 3 bills at the outlet); approved suppliers are known everywhere.
+  The nightly 03:30 refresh streams receipts page by page and only recounts —
+  a shop never becomes known by being used; `/tambah_supplier` or a manual
+  row does that. `/merchant_known <outlet>` (`all` for the full report),
+  `/buang_merchant <outlet> <name>`.
+* **Overbuy** (`overbuy_check.py`, `overbuy_flags`, `holiday_calendar`). A
+  known-supplier bill with an item at >= `OVERBUY_PCT` (40) above the
+  outlet's cadence-adjusted usual (median qty per day of cover over the last
+  8 purchases at that supplier) while yesterday's POS sales were not above
+  the 14-day average asks the cashier why — BM + Tamil, reply to the bill,
+  buttons [Stok habis] [Ada tempahan/katering] [Supplier hantar lebih]
+  [Lain-lain] (typed reason). Skipped, never flagged: POS not in yet, bad
+  qty or a receipt whose lines don't add up, < 4 past purchases, standing
+  orders (roti / capati / gas), Jakel, public holidays. No answer in 12h →
+  `no_reply`. The director gets the numbers (sales RM, 14-day average, %
+  drop) with [Terima] [Tolak]; only `no_reply` and `rejected` count toward
+  the separate overbuy strike counter (same tiers, rolling 30 days).
+  `/lebih_beli [outlet] [days]`; the monthly close gains an "Overbuy" block.
+* **Cashiers never see sales figures.** No sales RM, average or % in any
+  cashier-facing text; their own purchase quantities and bill totals may
+  appear. Management texts keep the numbers. The weekly food-cost % is
+  management-only (`group_reports.MANAGEMENT_ONLY`, never a group or a
+  manager DM), and the kitchen Used-vs-POS recap in the group shows only the
+  gap per item ("Ayam: guna lebih 4 pcs dari jangkaan" / "Ayam: OK") while
+  the full Used / POS numbers go to the director chat.
+* **Staff payments are not purchases.** Leave pay (and its OCR spellings),
+  gaji / salary / wages, advances and loans, overtime pay, allowances,
+  bonuses, EPF / SOCSO, ustad / surau / khairat payments
+  (`outside_purchase.is_staff_payment`) are outside the whole Pinpoint flow:
+  no outside-purchase check, no overbuy check, never a strike, never seeded
+  as a known merchant.
+
+Apply the migrations yourself (not done by the bot):
+
+```
+psql "$SUPABASE_DB_URL" -f migrations/0058_outside_purchases.sql
+psql "$SUPABASE_DB_URL" -f migrations/0059_pinpoint_v2.sql
+```
 
 ## Director commands added
 

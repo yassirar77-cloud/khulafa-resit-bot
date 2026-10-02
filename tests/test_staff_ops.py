@@ -84,13 +84,18 @@ class SalesTests(unittest.TestCase):
         self.assertIsNone(staff_ops.sales_signal(850, [900, 880, 920]))
         self.assertIsNone(staff_ops.sales_signal(500, [900, 880]))   # too little history
 
-    def test_texts_have_no_money(self):
+    def test_texts_have_no_sales_figures(self):
+        # Cashiers never see a sales count, average, % or RM: only "lower /
+        # higher than usual". The numbers stay in the facts for management.
         sig = {"direction": "low", "count": 613, "usual": 900}
         for full in (True, False):
             for lang in LANGS:
                 text = staff_ops.sales_text(sig, 2, lang, full_day=full)
-                self.assertIn("613", text)
+                self.assertNotIn("613", text)
+                self.assertNotIn("900", text)
                 self.assertNotIn("RM", text)
+                self.assertNotIn("%", text)
+                self.assertFalse(any(ch.isdigit() for ch in text), (lang, text))
         self.assertIn("shift", staff_ops.sales_text(sig, 2, "english", full_day=False))
         self.assertNotIn("shift", staff_ops.sales_text(sig, 2, "english", full_day=True))
 

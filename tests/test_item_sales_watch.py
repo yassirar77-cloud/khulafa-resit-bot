@@ -144,8 +144,10 @@ class Messages(unittest.TestCase):
         text = format_manager_slow_items(self._entry())
         self.assertIn("Bistro", text)
         self.assertIn("NAAN", text)
-        self.assertIn("50", text)
-        self.assertIn("120", text)
+        # No sales figure for the shop floor: not the count, the usual or the %.
+        self.assertNotIn("50", text)
+        self.assertNotIn("120", text)
+        self.assertNotIn("%", text)
         self.assertIn("push", text)
         # 1-day dip: no quality escalation yet.
         self.assertNotIn("taste", text)

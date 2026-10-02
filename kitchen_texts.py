@@ -245,6 +245,59 @@ T: dict[str, dict[str, str]] = {
         "english": "➖ {label}: used {used} {unit}, no purchase record",
         "indonesian": "➖ {label}: terpakai {used} {unit}, tidak ada catatan beli",
     },
+    # Gap-only recap lines (the shop floor never sees units sold per dish —
+    # the full Used / POS numbers go to management).
+    "mini_ok": {
+        "bm": "✅ {label}: OK", "tamil": "✅ {label}: சரி", "bengali": "✅ {label}: thik ache",
+        "english": "✅ {label}: OK", "indonesian": "✅ {label}: OK",
+    },
+    "mini_ok_buy": {
+        "bm": "✅ {label}: OK (guna ikut beli)", "tamil": "✅ {label}: சரி (வாங்கினதுக்கு ஏத்த மாதிரி)",
+        "bengali": "✅ {label}: thik ache (kenar moto)", "english": "✅ {label}: OK (used matches bought)",
+        "indonesian": "✅ {label}: OK (sesuai beli)",
+    },
+    "mini_over": {
+        "bm": "🔴 {label}: guna lebih {over} {unit} dari jangkaan",
+        "tamil": "🔴 {label}: எதிர்பார்த்ததை விட {over} {unit} அதிகம் பயன்பாடு",
+        "bengali": "🔴 {label}: proyojoner cheye {over} {unit} beshi byabohar",
+        "english": "🔴 {label}: used {over} {unit} more than expected",
+        "indonesian": "🔴 {label}: terpakai lebih {over} {unit} dari perkiraan",
+    },
+    "mini_under": {
+        "bm": "⚠️ {label}: guna kurang {under} {unit} dari jangkaan (mungkin salah isi)",
+        "tamil": "⚠️ {label}: எதிர்பார்த்ததை விட {under} {unit} குறைவு பயன்பாடு (தப்பா போட்டிருக்கலாம்)",
+        "bengali": "⚠️ {label}: proyojoner cheye {under} {unit} kom byabohar (hoyto bhul likha)",
+        "english": "⚠️ {label}: used {under} {unit} less than expected (maybe entered wrong)",
+        "indonesian": "⚠️ {label}: terpakai kurang {under} {unit} dari perkiraan (mungkin salah isi)",
+    },
+    "mini_over_buy": {
+        "bm": "🔴 {label}: guna lebih {over} {unit} dari beli",
+        "tamil": "🔴 {label}: வாங்கினதை விட {over} {unit} அதிகம் பயன்பாடு",
+        "bengali": "🔴 {label}: kenar cheye {over} {unit} beshi byabohar",
+        "english": "🔴 {label}: used {over} {unit} more than bought",
+        "indonesian": "🔴 {label}: terpakai lebih {over} {unit} dari yang dibeli",
+    },
+    "mini_under_buy": {
+        "bm": "⚠️ {label}: guna kurang {under} {unit} dari beli (mungkin salah isi)",
+        "tamil": "⚠️ {label}: வாங்கினதை விட {under} {unit} குறைவு பயன்பாடு (தப்பா போட்டிருக்கலாம்)",
+        "bengali": "⚠️ {label}: kenar cheye {under} {unit} kom byabohar (hoyto bhul likha)",
+        "english": "⚠️ {label}: used {under} {unit} less than bought (maybe entered wrong)",
+        "indonesian": "⚠️ {label}: terpakai kurang {under} {unit} dari yang dibeli (mungkin salah isi)",
+    },
+    "waste_gap": {
+        "bm": "• {label}: guna lebih {over} {unit} dari jangkaan",
+        "tamil": "• {label}: எதிர்பார்த்ததை விட {over} {unit} அதிகம் பயன்பாடு",
+        "bengali": "• {label}: proyojoner cheye {over} {unit} beshi byabohar",
+        "english": "• {label}: used {over} {unit} more than expected",
+        "indonesian": "• {label}: terpakai lebih {over} {unit} dari perkiraan",
+    },
+    "waste_gap_buy": {
+        "bm": "• {label}: guna lebih {over} {unit} dari beli",
+        "tamil": "• {label}: வாங்கினதை விட {over} {unit} அதிகம் பயன்பாடு",
+        "bengali": "• {label}: kenar cheye {over} {unit} beshi byabohar",
+        "english": "• {label}: used {over} {unit} more than bought",
+        "indonesian": "• {label}: terpakai lebih {over} {unit} dari yang dibeli",
+    },
     "mini_all_ok": {
         "bm": "Semua padan 👍", "tamil": "எல்லாம் சரியா இருக்கு 👍",
         "bengali": "Shob mile geche 👍", "english": "Everything matches 👍",
@@ -317,16 +370,17 @@ T: dict[str, dict[str, str]] = {
         "indonesian": "🧾 Penjualan POS — {outlet} • {date}",
     },
     "pos_only_intro": {
-        "bm": "Rekod Masak/Baki tidak diisi hari tu, jadi Guna vs POS tak dapat dibanding. Ikut POS, jualan hari tu:",
-        "tamil": "அன்னைக்கு சமையல்/மீதம் form fill ஆகல, அதனால பயன்பாடு vs POS ஒப்பிட முடியல. POS படி அன்னைக்கு விற்பனை:",
-        "bengali": "Shedin ranna/baki form bhora hoy nai, tai byabohar vs POS milano gelo na. POS onujayi shediner bikri:",
-        "english": "The cooked/leftover forms weren't filled that day, so Used vs POS can't be compared. The POS sold:",
-        "indonesian": "Formulir masak/sisa tidak diisi hari itu, jadi Terpakai vs POS tidak bisa dibandingkan. Menurut POS, penjualan hari itu:",
+        "bm": "Rekod Masak/Baki tidak diisi hari tu, jadi Guna vs POS tak dapat dibanding untuk:",
+        "tamil": "அன்னைக்கு சமையல்/மீதம் form fill ஆகல, அதனால இந்த item-களுக்கு பயன்பாடு vs POS ஒப்பிட முடியல:",
+        "bengali": "Shedin ranna/baki form bhora hoy nai, tai ei item-gulor byabohar vs POS milano gelo na:",
+        "english": "The cooked/leftover forms weren't filled that day, so Used vs POS can't be compared for:",
+        "indonesian": "Formulir masak/sisa tidak diisi hari itu, jadi Terpakai vs POS tidak bisa dibandingkan untuk:",
     },
+    # Item names only: how many were sold is management's number.
     "pos_only_line": {
-        "bm": "• {label}: POS jual {pos} {unit}", "tamil": "• {label}: POS விற்பனை {pos} {unit}",
-        "bengali": "• {label}: POS bikri {pos} {unit}", "english": "• {label}: POS sold {pos} {unit}",
-        "indonesian": "• {label}: POS terjual {pos} {unit}",
+        "bm": "• {label}: tiada rekod masak/baki", "tamil": "• {label}: சமையல்/மீதம் பதிவு இல்ல",
+        "bengali": "• {label}: ranna/baki record nai", "english": "• {label}: no cooked/leftover record",
+        "indonesian": "• {label}: tidak ada catatan masak/sisa",
     },
     "pos_only_foot": {
         "bm": "Tolong isi borang Masak/Baki setiap hari supaya Guna vs POS boleh dibanding 🙏",

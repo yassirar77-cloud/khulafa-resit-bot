@@ -27,6 +27,11 @@ PRAISE = "praise"
 BILL_ANALYSIS = "bill_analysis"
 MONEY_REPORTS = (FOOD_COST, OVERBUY, PRAISE, BILL_ANALYSIS)
 
+# Reports that never leave the director chat, whatever GROUP_MONEY_REPORTS
+# says and whether the target is a group or a manager's DM: the weekly
+# food-cost % is a sales-derived figure and cashiers never see sales data.
+MANAGEMENT_ONLY = frozenset({FOOD_COST})
+
 
 def allowed_in_groups() -> set[str]:
     raw = os.environ.get("GROUP_MONEY_REPORTS") or ""
@@ -51,6 +56,8 @@ def blocked(report, chat_id, owner_chat_id=None) -> bool:
     ("[NO MANAGER REGISTERED]", "[TEST …]") keeps working as before."""
     if owner_chat_id is not None and _same(chat_id, owner_chat_id):
         return False
+    if report in MANAGEMENT_ONLY:
+        return True
     return is_group_chat(chat_id) and report not in allowed_in_groups()
 
 

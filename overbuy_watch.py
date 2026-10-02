@@ -320,37 +320,32 @@ def _fmt_qty(value: float) -> str:
 
 
 def format_manager_overbuy(entry: dict) -> str:
-    """The Tamil question to the outlet manager: sales down X%, buying
-    barely moved, these items still at the old volume — why not less?
-    Returns ``""`` on malformed input. Never raises."""
+    """The Tamil question to the outlet manager: sales went down, buying did
+    not, these items are still at the old volume — why not less?
+
+    No sales figure reaches the shop floor: no RM, no average, no percentage.
+    The manager sees only "sales lower than usual" and their own purchase
+    quantities; the numbers stay in ``format_owner_summary``. Returns ``""``
+    on malformed input. Never raises.
+    """
     try:
         if not isinstance(entry, dict):
             return ""
         outlet = str(entry.get("outlet") or "").strip()
-        sales_drop = float(entry["sales_drop_pct"])
-        week_sales = float(entry["week_sales"])
-        base_sales = float(entry["base_weekly_sales"])
-        week_purch = float(entry["week_purchases"])
-        base_purch = float(entry["base_weekly_purchases"])
+        if not outlet:
+            return ""
+        float(entry["sales_drop_pct"])          # malformed entries still return ""
         purchase_drop = float(entry["purchase_drop_pct"])
 
         lines = [
             f"📉 Sales இறங்குது, order அப்படியே — {outlet}",
             "",
-            f"போன 7 நாள் sales: RM{week_sales:,.0f} "
-            f"(வழக்கமா RM{base_sales:,.0f} — {sales_drop:.0f}% கம்மி)",
+            "போன 7 நாள் sales வழக்கத்தை விட கம்மி.",
         ]
         if purchase_drop <= 0:
-            lines.append(
-                f"ஆனா purchase RM{week_purch:,.0f} "
-                f"(வழக்கமா RM{base_purch:,.0f}) — குறையவே இல்ல."
-            )
+            lines.append("ஆனா purchase குறையவே இல்ல.")
         else:
-            lines.append(
-                f"ஆனா purchase RM{week_purch:,.0f} "
-                f"(வழக்கமா RM{base_purch:,.0f}) — "
-                f"{purchase_drop:.0f}% தான் குறைஞ்சிருக்கு."
-            )
+            lines.append("ஆனா purchase அதுக்கு ஏத்த மாதிரி குறையல.")
 
         items = entry.get("items") or []
         if items:

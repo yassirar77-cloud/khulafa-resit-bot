@@ -1936,17 +1936,63 @@ def render_pos_only_summary(outlet_label, business_date, evaluations: list,
         kitchen_texts.text("pos_only_intro", language),
         "",
     ]
+    # Item names only — the units the POS sold are management's number.
     for ev in evaluations:
-        lines.append(kitchen_texts.short(
-            "pos_only_line", language, label=ev["label"],
-            pos=format_value(ev.get("pos"), ev["unit"]), unit=ev["unit"]))
+        lines.append(kitchen_texts.short("pos_only_line", language, label=ev["label"]))
     lines += ["", kitchen_texts.text("pos_only_foot", language)]
     return "\n".join(lines)
 
 
+def _gap(ev: dict):
+    """``(over, under)`` as formatted strings for one evaluation (used − compared)."""
+    try:
+        diff = float(ev["used"]) - float(ev["pos"])
+    except (KeyError, TypeError, ValueError):
+        return None, None
+    unit = ev.get("unit", "pcs")
+    return (format_value(diff, unit) if diff > 0 else None,
+            format_value(-diff, unit) if diff < 0 else None)
+
+
 def render_mini_summary(outlet_label, business_date, evaluations: list,
                         language: str = "bm") -> str:
-    """The short Used-vs-POS recap (STAGE 2) posted in the group at 09:00."""
+    """The short Used-vs-POS recap (STAGE 2) posted in the group at 09:00.
+
+    Shop-floor version: only the GAP per item ("Ayam: guna lebih 4 ekor dari
+    jangkaan" / "Ayam: OK"). Units sold per dish never appear here — the full
+    Used / POS numbers go to management (``render_mini_summary_full``)."""
+    lines = [
+        kitchen_texts.short("mini_head", language),
+        f"{outlet_label} • {business_date}",
+        "",
+    ]
+    flagged = 0
+    for ev in evaluations:
+        unit = ev["unit"]
+        buy = ev.get("source") == "purchase"
+        if buy and ev["pos"] is None:
+            lines.append(kitchen_texts.short("mini_line_nobuy", language, label=ev["label"],
+                                             used=format_value(ev["used"], unit), unit=unit))
+            continue
+        over, under = _gap(ev)
+        if ev["flag"] == "LEAK" and over is not None:
+            flagged += 1
+            lines.append(kitchen_texts.short("mini_over_buy" if buy else "mini_over", language,
+                                             label=ev["label"], over=over, unit=unit))
+        elif ev["flag"] == "DATA" and under is not None:
+            flagged += 1
+            lines.append(kitchen_texts.short("mini_under_buy" if buy else "mini_under", language,
+                                             label=ev["label"], under=under, unit=unit))
+        else:
+            lines.append(kitchen_texts.short("mini_ok_buy" if buy else "mini_ok", language, label=ev["label"]))
+    lines.append("")
+    lines.append(kitchen_texts.text("mini_all_ok" if flagged == 0 else "mini_legend", language))
+    return "\n".join(lines)
+
+
+def render_mini_summary_full(outlet_label, business_date, evaluations: list,
+                             language: str = "bm") -> str:
+    """Management copy of the recap with the full Used vs POS numbers."""
     lines = [
         kitchen_texts.short("mini_head", language),
         f"{outlet_label} • {business_date}",
@@ -2001,16 +2047,12 @@ def leak_items(evaluations: list) -> list:
 
 
 def _leak_line(ev: dict, language: str = "bm") -> str:
+    """Gap only — the kitchen and the manager see "guna lebih N dari
+    jangkaan", never the units the POS sold."""
     unit = ev.get("unit", "pcs")
-    used = format_value(ev.get("used"), unit)
-    compared = format_value(ev.get("pos"), unit)
-    try:
-        over = format_value(float(ev["used"]) - float(ev["pos"]), unit)
-    except (KeyError, TypeError, ValueError):
-        over = "?"
-    key = "waste_line_buy" if ev.get("source") == "purchase" else "waste_line"
-    return kitchen_texts.short(key, language, label=ev.get("label", "?"), used=used,
-                               pos=compared, over=over, unit=unit)
+    over, _under = _gap(ev)
+    key = "waste_gap_buy" if ev.get("source") == "purchase" else "waste_gap"
+    return kitchen_texts.short(key, language, label=ev.get("label", "?"), over=over or "?", unit=unit)
 
 
 def render_pandari_wastage(outlet_label, business_date, leaks: list,
@@ -2037,7 +2079,7 @@ def render_manager_wastage(outlet_label, business_date, leaks: list) -> str:
     lines = [
         f"🔴 Wastage alert — {outlet_label} • {business_date}",
         "",
-        "POS sales-அ விட kitchen guna அதிகம்:",
+        "எதிர்பார்த்ததை விட kitchen guna அதிகம்:",
     ]
     lines += [_leak_line(ev) for ev in leaks]
     lines += [
@@ -3025,6 +3067,17 @@ async def post_comparison_digests(
                     with contextlib.suppress(Exception):
                         await application.bot.send_message(chat_id=chat_id, text=summary)
                     posted += 1
+                    # Management gets the full Used vs POS numbers; the
+                    # group above only saw the gaps.
+                    try:
+                        owner_chat_id = int(os.environ["ALERT_CHAT_ID"])
+                    except (KeyError, ValueError):
+                        owner_chat_id = None
+                    if owner_chat_id is not None and owner_chat_id != chat_id:
+                        with contextlib.suppress(Exception):
+                            await application.bot.send_message(
+                                chat_id=owner_chat_id,
+                                text=render_mini_summary_full(outlet_label, d, evaluations))
                     # Over-use (LEAK) follow-ups: Tamil note to the pandari in
                     # this group + Tamil alert to the outlet manager. Rides the
                     # same once-per-day idempotency as the summary — a day is

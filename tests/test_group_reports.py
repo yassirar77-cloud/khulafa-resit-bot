@@ -32,10 +32,20 @@ class GroupReportsTests(unittest.TestCase):
             self.assertFalse(gr.blocked(gr.PRAISE, GROUP, DIRECTOR))
             self.assertTrue(gr.blocked(gr.OVERBUY, GROUP, DIRECTOR))
 
-    def test_all_allows_everything(self):
+    def test_all_allows_everything_except_management_only(self):
         with mock.patch.dict("os.environ", {"GROUP_MONEY_REPORTS": "all"}):
             for report in gr.MONEY_REPORTS:
+                if report in gr.MANAGEMENT_ONLY:
+                    continue
                 self.assertFalse(gr.blocked(report, GROUP, DIRECTOR))
+
+    def test_food_cost_is_management_only_everywhere(self):
+        # Sales-derived: never a group, never a manager's DM, whatever the env.
+        for env in ({}, {"GROUP_MONEY_REPORTS": "all"}, {"GROUP_MONEY_REPORTS": "food_cost"}):
+            with mock.patch.dict("os.environ", env, clear=True):
+                self.assertTrue(gr.blocked(gr.FOOD_COST, GROUP, DIRECTOR), env)
+                self.assertTrue(gr.blocked(gr.FOOD_COST, MANAGER_DM, DIRECTOR), env)
+                self.assertFalse(gr.blocked(gr.FOOD_COST, DIRECTOR, DIRECTOR), env)
 
     def test_bad_chat_ids_are_not_groups(self):
         self.assertFalse(gr.is_group_chat(None))
