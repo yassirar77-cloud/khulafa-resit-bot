@@ -1199,6 +1199,8 @@ def classifier_suppliers(config: dict, outlet: Any) -> list[dict]:
     shape ``receipt_classifier.classify_receipt(suppliers=...)`` reads."""
     suppliers = list((config or {}).get("suppliers") or [])
     if outlet:
+        import known_merchants
+
         suppliers += known_merchants.as_suppliers((config or {}).get("known"), outlet)
     return suppliers
 

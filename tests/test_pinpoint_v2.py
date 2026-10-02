@@ -693,3 +693,21 @@ class WiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClassifierSuppliersTests(unittest.TestCase):
+    """Regression (2026-10-02): classifier_suppliers referenced
+    known_merchants without importing it, so every bill with an outlet hit
+    NameError and the classifier ran with no supplier list."""
+
+    def test_outlet_known_merchants_are_included(self):
+        config = {
+            "suppliers": [{"canonical_name": "BESTARI FARM", "aliases": [], "active": True}],
+            "known": [{"id": 7, "outlet": "Jakel", "canonical_merchant": "TUNAS MANJA SDN BHD",
+                       "aliases": [], "active": True, "source": "history"}],
+        }
+        out = op.classifier_suppliers(config, "Jakel")
+        names = [s["canonical_name"] for s in out]
+        self.assertIn("BESTARI FARM", names)
+        self.assertIn("TUNAS MANJA SDN BHD", names)
+        self.assertEqual(op.classifier_suppliers(config, None), config["suppliers"])
