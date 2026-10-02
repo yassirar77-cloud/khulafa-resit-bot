@@ -693,3 +693,37 @@ class WiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClassifierSuppliersTests(unittest.TestCase):
+    """Regression (2026-10-02): classifier_suppliers referenced
+    known_merchants without importing it, so every bill with an outlet hit
+    NameError and the classifier ran with no supplier list."""
+
+    def test_outlet_known_merchants_are_included(self):
+        config = {
+            "suppliers": [{"canonical_name": "BESTARI FARM", "aliases": [], "active": True}],
+            "known": [{"id": 7, "outlet": "Jakel", "canonical_merchant": "TUNAS MANJA SDN BHD",
+                       "aliases": [], "active": True, "source": "history"}],
+        }
+        out = op.classifier_suppliers(config, "Jakel")
+        names = [s["canonical_name"] for s in out]
+        self.assertIn("BESTARI FARM", names)
+        self.assertIn("TUNAS MANJA SDN BHD", names)
+        self.assertEqual(op.classifier_suppliers(config, None), config["suppliers"])
+
+
+class ConfigCacheIdentityTests(unittest.TestCase):
+    """cached_config is keyed by id(db); a garbage-collected client's id can
+    be reused by a new one, which then must not inherit its cached lists
+    (this made test_empty_config_holds_everything_for_review flaky)."""
+
+    def test_reused_id_does_not_return_another_clients_config(self):
+        new_db = FakeSupabase()
+        stale = {"suppliers": [{"canonical_name": "STALE"}], "known": [], "allowed": [], "roster": []}
+        op._config_cache[id(new_db)] = {"at": datetime.now(timezone.utc), "config": stale, "db": object()}
+        try:
+            config = op.cached_config(new_db)
+            self.assertNotEqual(config.get("suppliers"), stale["suppliers"])
+        finally:
+            op.invalidate_config_cache()

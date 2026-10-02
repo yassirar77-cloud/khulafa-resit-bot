@@ -1181,11 +1181,13 @@ def cached_config(db, *, now: datetime | None = None) -> dict:
     both. An empty load (all tables failed) is never cached."""
     moment = now or datetime.now(timezone.utc)
     entry = _config_cache.get(id(db))
-    if entry and (moment - entry["at"]).total_seconds() < CONFIG_CACHE_SECONDS:
+    # id() can be reused once a client is garbage-collected; only trust an
+    # entry that was stored for this very object (it holds a reference).
+    if entry and entry.get("db") is db and (moment - entry["at"]).total_seconds() < CONFIG_CACHE_SECONDS:
         return entry["config"]
     config = load_config(db)
     if any(config.values()):
-        _config_cache[id(db)] = {"at": moment, "config": config}
+        _config_cache[id(db)] = {"at": moment, "config": config, "db": db}
     return config
 
 
@@ -1199,6 +1201,8 @@ def classifier_suppliers(config: dict, outlet: Any) -> list[dict]:
     shape ``receipt_classifier.classify_receipt(suppliers=...)`` reads."""
     suppliers = list((config or {}).get("suppliers") or [])
     if outlet:
+        import known_merchants
+
         suppliers += known_merchants.as_suppliers((config or {}).get("known"), outlet)
     return suppliers
 
