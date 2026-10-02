@@ -220,6 +220,14 @@ outlet group and pick shift + name with buttons. The monthly close
   applies 0035 (+ outlet backfill), 0036 (text sentinel) and the missing
   indexes; 0065 adds `receipts.receipt_date_original` and
   `staff_advances_archive`.
+* **Undated bills (close-out).** `save_item_prices` dates the price rows of a
+  bill with no receipt date by its Malaysia upload day, so reports that
+  filter `item_prices.receipt_date` no longer drop it; the receipt keeps
+  `receipt_date` NULL. The digest's weekly outlet spend counts undated
+  supplier bills on their upload day. Rule-based date fixes keep the OCR'd
+  date in `receipts.receipt_date_original`.
+* Migration 0066 drops `audit_responses`' `anon_read` policy (the last table
+  the anon key could still read after 0062).
 
 Apply the migrations yourself (not done by the bot):
 

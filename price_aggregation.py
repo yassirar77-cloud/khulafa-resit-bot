@@ -107,6 +107,15 @@ def quarantine_rows(supabase_client, rows: list[dict]) -> int:
     return len(result.data) if getattr(result, "data", None) else 0
 
 
+def _upload_day_my() -> str:
+    """Today's date in Malaysia (ISO), i.e. the upload day of a bill being
+    saved now."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    return datetime.now(ZoneInfo("Asia/Kuala_Lumpur")).date().isoformat()
+
+
 def save_item_prices(
     supabase_client,
     receipt_id,
@@ -163,6 +172,14 @@ def save_item_prices(
 
     if not usable:
         return 0
+
+    # A bill the OCR could not date still happened: date its price rows by
+    # the upload day (Malaysia), so every report that filters item_prices
+    # by receipt_date (monthly kg, key stock, director spend, orders...)
+    # sees them instead of silently dropping them. The receipt itself keeps
+    # receipt_date NULL.
+    if not receipt_date:
+        receipt_date = _upload_day_my()
 
     # === Issue #79 sanity gate ===
     history_by_item: dict = {}
