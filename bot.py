@@ -127,8 +127,10 @@ import demand_forecast
 import missing_bills
 import monthly_consumption
 import human_touch
+import known_merchants
 import outlet_resolver
 import outside_purchase
+import overbuy_check
 import overbuy_watch
 import supervisor
 import order_generator
@@ -1890,17 +1892,24 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     receipt_id = stored.get("id")
     receipt_type = classification.receipt_type
 
-    # Staff questions v2: a mini market buy gets one "why?" in the group,
-    # whatever the receipt was classified as (most come in as UNKNOWN).
-    if staff_ops.is_minimarket(stored.get("merchant")):
-        await staff_ops_on_upload(context.application, stored, message, supplier=False)
-
-    # Pinpoint Target: a bill from a shop that is not an approved supplier is
-    # an outside purchase — pinpoint the cashier, count the strike, reply
-    # under the receipt (outside_purchase). Purchases only: advances,
-    # utilities, rent and petty cash are not stock bought outside.
+    # Pinpoint Target: a bill from a shop that is neither an approved supplier
+    # nor known for this outlet is an outside purchase — pinpoint the cashier,
+    # count the strike, reply under the receipt (outside_purchase). A bill
+    # from a known supplier is checked for overbuying against sales instead
+    # (overbuy_check). Purchases only: advances, utilities, rent and petty
+    # cash are not stock. ONE BILL = ONE MESSAGE: when either sent the cashier
+    # something, the mini-market "why?" and the invoice question stay quiet.
+    pinpoint_sent = False
     if receipt_type in _OUTSIDE_RECEIPT_TYPES:
-        await outside_purchase_on_upload(context, stored, message)
+        pinpoint_sent, outcome = await outside_purchase_on_upload(context, stored, message)
+        if outcome == "skip" and not pinpoint_sent:
+            pinpoint_sent = await overbuy_on_upload(context, stored, message)
+
+    # Staff questions v2: a mini market buy gets one "why?" in the group,
+    # whatever the receipt was classified as (most come in as UNKNOWN) —
+    # unless the pinpoint reply already asked.
+    if staff_ops.is_minimarket(stored.get("merchant")) and not pinpoint_sent:
+        await staff_ops_on_upload(context.application, stored, message, supplier=False)
 
     if receipt_type == ReceiptType.STAFF_ADVANCE:
         try:
@@ -2214,7 +2223,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             name = details.get("suspicious_item")
             if name:
                 ops_candidates["pricerise"] = {"item": "", "label": staff_ops.pos_item_label(name)}
-    if not staff_ops.is_minimarket(stored.get("merchant")):
+    if not staff_ops.is_minimarket(stored.get("merchant")) and not pinpoint_sent:
         await staff_ops_on_upload(context.application, stored, message, supplier=True,
                                   candidates=ops_candidates)
 
@@ -2240,28 +2249,48 @@ async def _outside_send_strike(bot, result: dict, *, chat_id, reply_to_message_i
     strike_no = result.get("strike_no")
     history = result.get("history") or []
     contact = result.get("attribution") or {}
+    # Message counting starts from the switch to live: the cashier is told
+    # the live strike number, management the full one.
+    shown_no = result.get("live_strike_no") if "live_strike_no" in result else strike_no
+    shown_history = outside_purchase.live_rows(history) if "live_strike_no" in result else history
     sent_dm = False
+    if not outside_purchase.is_live():
+        # Shadow: nothing reaches the cashier; the director still gets the
+        # report when the (full) strike count crosses the threshold.
+        if strike_no and strike_no >= outside_purchase.scold_threshold():
+            try:
+                report = "[SHADOW — not sent to the cashier]\n" + outside_purchase.management_report(
+                    row, strike_no, history)
+                for chunk in chunk_message(report):
+                    await bot.send_message(chat_id=ALERT_CHAT_ID, text=chunk)
+            except Exception:
+                logger.exception("outside purchase: shadow report failed (purchase %s)", row.get("id"))
+        return False
     if outside_purchase.scold_channel() == "dm" and contact.get("telegram_user_id"):
         try:
             await bot.send_message(
                 chat_id=contact["telegram_user_id"],
                 text=outside_purchase.group_message(
-                    row, strike_no, history, contact.get("language") or "bm"),
+                    row, shown_no, shown_history, contact.get("language") or "bm"),
             )
             sent_dm = True
         except Exception:
             # The cashier has not started the bot: the group gets it instead.
             logger.info("outside purchase: DM to cashier failed, replying in the group",
                         exc_info=True)
+    sent_group = False
     if not sent_dm and chat_id is not None:
         try:
             await bot.send_message(
                 chat_id=chat_id,
-                text=outside_purchase.group_message(row, strike_no, history, "bm_tamil"),
+                text=outside_purchase.group_message(row, shown_no, shown_history, "bm_tamil"),
                 reply_to_message_id=reply_to_message_id, allow_sending_without_reply=True,
             )
+            sent_group = True
         except Exception:
             logger.exception("outside purchase: group message failed (purchase %s)", row.get("id"))
+    if (sent_dm or sent_group) and row.get("id") is not None:
+        await asyncio.to_thread(outside_purchase.mark_notified, supabase, row["id"])
     if strike_no and strike_no >= outside_purchase.scold_threshold():
         try:
             report = outside_purchase.management_report(row, strike_no, history)
@@ -2269,22 +2298,25 @@ async def _outside_send_strike(bot, result: dict, *, chat_id, reply_to_message_i
                 await bot.send_message(chat_id=ALERT_CHAT_ID, text=chunk)
         except Exception:
             logger.exception("outside purchase: management report failed (purchase %s)", row.get("id"))
+    return sent_dm or sent_group
 
 
-async def outside_purchase_on_upload(context, stored: dict, message) -> None:
+async def outside_purchase_on_upload(context, stored: dict, message) -> tuple[bool, str]:
     """After a bill is saved: if the shop is not an approved supplier, record
     the outside purchase, pinpoint the cashier on shift, count the strike and
     reply under the receipt. A grey-zone merchant (fuzzy, low-confidence OCR,
     unreadable) goes to the director chat with [Beli Luar ✅] [Supplier Kita ❌]
-    instead — never an automatic strike. Never breaks the receipt pipeline."""
+    instead — never an automatic strike. Returns ``(sent to the cashier,
+    outcome)`` with outcome skip / pending / count / allowed_only / error.
+    Never breaks the receipt pipeline."""
     try:
         if stored.get("id") is None:
-            return
+            return False, "skip"
         group_code = cashier_names.outlet_for_chat(message.chat_id)
         result = await asyncio.to_thread(
             outside_purchase.process_receipt, supabase, stored, group_code=group_code)
         if not result:
-            return
+            return False, "skip"
         row = result["row"]
         if result["action"] == "pending":
             await context.bot.send_message(
@@ -2294,23 +2326,354 @@ async def outside_purchase_on_upload(context, stored: dict, message) -> None:
             )
             logger.info("outside purchase: #%s held for review (%s)", row.get("id"),
                         (result.get("match") or {}).get("tier"))
-            return
+            return False, "pending"
         if result["action"] != "count":
             logger.info("outside purchase: #%s recorded without a strike (%s)",
                         row.get("id"), result["action"])
-            return
-        logger.info("outside purchase: #%s counted — strike %s for %s at %s", row.get("id"),
-                    result.get("strike_no"), row.get("cashier_name"), row.get("outlet"))
-        await _outside_send_strike(context.bot, result, chat_id=message.chat_id,
-                                   reply_to_message_id=message.message_id)
+            return False, result["action"]
+        logger.info("outside purchase: #%s counted — strike %s for %s at %s (%s)", row.get("id"),
+                    result.get("strike_no"), row.get("cashier_name"), row.get("outlet"),
+                    outside_purchase.mode())
+        sent = await _outside_send_strike(context.bot, result, chat_id=message.chat_id,
+                                          reply_to_message_id=message.message_id)
+        return sent, "count"
     except Exception:
         logger.exception("outside purchase: upload hook failed (receipt %s)", stored.get("id"))
+        return False, "error"
+
+
+# --- overbuy from known suppliers (overbuy_check) --------------------------------
+
+def _overbuy_reason_markup(flag_id, language) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data=data)]
+                                 for label, data in overbuy_check.reason_buttons(flag_id, language)])
+
+
+def _overbuy_decision_markup(flag_id) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data=data)
+                                  for label, data in overbuy_check.decision_buttons(flag_id)]])
+
+
+async def _overbuy_alert_management(bot, flag: dict, *, shadow: bool) -> None:
+    """The director's copy (with the sales numbers) — buttons only when the
+    cashier was actually asked."""
+    try:
+        sent = await bot.send_message(
+            chat_id=ALERT_CHAT_ID, text=overbuy_check.management_alert(flag, shadow=shadow),
+            reply_markup=None if shadow else _overbuy_decision_markup(flag.get("id")))
+        if flag.get("id") is not None:
+            await asyncio.to_thread(overbuy_check.set_fields, supabase, flag["id"],
+                                    alert_message_id=sent.message_id)
+            flag["alert_message_id"] = sent.message_id
+    except Exception:
+        logger.exception("overbuy: management alert failed (flag %s)", flag.get("id"))
+
+
+async def _overbuy_refresh_alert(bot, flag: dict, *, keep_buttons: bool = True) -> None:
+    """Rewrite the director's alert with the cashier's reason / the outcome."""
+    if not flag.get("alert_message_id"):
+        return
+    with contextlib.suppress(Exception):
+        await bot.edit_message_text(
+            chat_id=ALERT_CHAT_ID, message_id=flag["alert_message_id"],
+            text=overbuy_check.management_alert(flag),
+            reply_markup=_overbuy_decision_markup(flag["id"]) if keep_buttons else None)
+
+
+async def overbuy_on_upload(context, stored: dict, message) -> bool:
+    """A known-supplier bill: much more of an item than the outlet's usual
+    rate while yesterday's sales were not higher -> ask the cashier why (no
+    sales figure in the question), tell the director with the numbers. Shadow
+    mode records the flag and tells the director only. Returns True when a
+    question reached the group. Never breaks the receipt pipeline."""
+    try:
+        if stored.get("id") is None or outside_purchase.is_own_outlet(stored.get("merchant")):
+            return False
+        group_code = cashier_names.outlet_for_chat(message.chat_id)
+        roster = await asyncio.to_thread(outside_purchase.load_roster, supabase)
+        result = await asyncio.to_thread(
+            overbuy_check.process_bill, supabase, stored, group_code=group_code, roster=roster)
+        sent = False
+        for flag in result.get("flags") or []:
+            live = flag.get("status") == overbuy_check.PENDING
+            if live:
+                try:
+                    q = await context.bot.send_message(
+                        chat_id=message.chat_id,
+                        text=overbuy_check.cashier_question(flag, "bm_tamil"),
+                        reply_markup=_overbuy_reason_markup(flag.get("id"), "bm_tamil"),
+                        reply_to_message_id=message.message_id, allow_sending_without_reply=True)
+                    sent = True
+                    await asyncio.to_thread(overbuy_check.set_fields, supabase, flag["id"],
+                                            question_message_id=q.message_id)
+                except Exception:
+                    logger.exception("overbuy: question failed (flag %s)", flag.get("id"))
+            logger.info("overbuy: flag #%s %s %s %s (%s)", flag.get("id"), flag.get("outlet"),
+                        flag.get("item"), flag.get("qty"), outside_purchase.mode())
+            await _overbuy_alert_management(context.bot, flag, shadow=not live)
+        return sent
+    except Exception:
+        logger.exception("overbuy: upload hook failed (receipt %s)", stored.get("id"))
+        return False
+
+
+async def _overbuy_send_strike(bot, outcome: dict) -> None:
+    """After a rejection or a no-reply: the tiered reply under the bill (live
+    mode only, live rows counted) and the director's report at the threshold."""
+    row, strike_no, history = outcome["row"], outcome.get("strike_no"), outcome.get("history") or []
+    if not strike_no:
+        return
+    if outside_purchase.is_live() and row.get("chat_id"):
+        shown_history = outside_purchase.live_rows(history)
+        shown_no = len(shown_history) or None
+        if shown_no:
+            try:
+                await bot.send_message(
+                    chat_id=row["chat_id"],
+                    text=overbuy_check.strike_message(row, shown_no, shown_history, "bm_tamil"),
+                    reply_to_message_id=row.get("receipt_message_id"), allow_sending_without_reply=True)
+            except Exception:
+                logger.exception("overbuy: strike message failed (flag %s)", row.get("id"))
+    if strike_no >= outside_purchase.scold_threshold():
+        prefix = "" if outside_purchase.is_live() else "[SHADOW — not sent to the cashier]\n"
+        with contextlib.suppress(Exception):
+            for chunk in chunk_message(prefix + overbuy_check.management_strike_report(row, strike_no, history)):
+                await bot.send_message(chat_id=ALERT_CHAT_ID, text=chunk)
+
+
+async def handle_overbuy_reason(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """The cashier's button under the overbuy question (ov:<id>:<code>)."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    m = re.match(r"^ov:(\d+):(stock|order|supplier|other)$", query.data or "")
+    if not m:
+        return
+    flag_id, code = int(m.group(1)), m.group(2)
+    flag = await asyncio.to_thread(overbuy_check._get, supabase, flag_id)
+    if not flag or flag.get("status") not in (overbuy_check.PENDING, overbuy_check.ANSWERED):
+        with contextlib.suppress(Exception):
+            await query.edit_message_reply_markup(reply_markup=None)
+        return
+    language = "bm_tamil"
+    if code == "other":
+        with contextlib.suppress(Exception):
+            await query.edit_message_reply_markup(reply_markup=None)
+        prompt = await _callback_prompt(query, context, overbuy_check.other_prompt(language))
+        await asyncio.to_thread(overbuy_check.set_fields, supabase, flag_id, reason_code="other",
+                                prompt_message_id=prompt.message_id if prompt else None)
+        return
+    row = await asyncio.to_thread(overbuy_check.answer, supabase, flag_id, code)
+    if not row:
+        return
+    with contextlib.suppress(Exception):
+        await query.edit_message_reply_markup(reply_markup=None)
+    await _callback_prompt(query, context, overbuy_check.thanks_text(
+        overbuy_check.reason_label(code, "bm"), language))
+    await _overbuy_refresh_alert(context.bot, row)
+
+
+async def _callback_prompt(query, context, text: str):
+    """Reply in a callback's chat and hand back the sent message (or None)."""
+    message = query.message
+    try:
+        if message is not None and hasattr(message, "reply_text"):
+            return await message.reply_text(text)
+        chat = getattr(message, "chat", None)
+        chat_id = chat.id if chat is not None else (query.from_user.id if query.from_user else None)
+        if chat_id is not None:
+            return await context.bot.send_message(chat_id=chat_id, text=text)
+    except Exception:
+        logger.exception("overbuy: prompt failed")
+    return None
+
+
+async def handle_overbuy_reason_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A typed reason: the reply to the bot's "type your reason" prompt."""
+    message = update.effective_message
+    if not message or not message.reply_to_message or not message.text:
+        return
+    flag = await asyncio.to_thread(overbuy_check.flag_by_prompt, supabase, message.chat_id,
+                                   message.reply_to_message.message_id)
+    if not flag:
+        return
+    row = await asyncio.to_thread(overbuy_check.answer, supabase, flag["id"], "other", message.text)
+    if not row:
+        return
+    with contextlib.suppress(Exception):
+        await message.reply_text(overbuy_check.thanks_text(row.get("reason") or "", "bm_tamil"))
+    await _overbuy_refresh_alert(context.bot, row)
+    logger.info("overbuy: typed reason for flag #%s", flag["id"])
+
+
+async def handle_overbuy_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """[Terima] / [Tolak] on the director's overbuy alert (ovm:<id>:accept|reject)."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    reviewer = query.from_user.id if query.from_user else None
+    chat = getattr(query.message, "chat", None)
+    if not outside_purchase.admin_allowed(chat.id if chat is not None else None, reviewer,
+                                          ALERT_CHAT_ID, is_reviewer):
+        return
+    m = re.match(r"^ovm:(\d+):(accept|reject)$", query.data or "")
+    if not m:
+        return
+    flag_id, accept = int(m.group(1)), m.group(2) == "accept"
+    outcome = await asyncio.to_thread(overbuy_check.decide, supabase, flag_id, accept, reviewer)
+    if not outcome:
+        await _callback_reply(query, context, f"Overbuy #{flag_id} sudah diputuskan.")
+        return
+    row = outcome["row"]
+    row["alert_message_id"] = row.get("alert_message_id") or (query.message.message_id if query.message else None)
+    await _overbuy_refresh_alert(context.bot, row, keep_buttons=False)
+    if accept:
+        await _callback_reply(query, context, f"✔ Overbuy #{flag_id} diterima — tiada strike.")
+        return
+    await _overbuy_send_strike(context.bot, outcome)
+    await _callback_reply(query, context,
+                          f"✖ Overbuy #{flag_id} ditolak — overbuy strike {outcome.get('strike_no') or '—'} "
+                          f"untuk {row.get('cashier') or '?'} ({row.get('outlet') or '?'}).")
+
+
+async def overbuy_no_reply_tick(application: Application) -> None:
+    """Every 30 min: overbuy questions unanswered for 12h -> no_reply (a
+    strike) + a line to the director."""
+    try:
+        expired = await asyncio.to_thread(overbuy_check.expire_no_reply, supabase)
+    except Exception:
+        logger.exception("overbuy: no-reply tick failed")
+        return
+    for outcome in expired:
+        row = outcome["row"]
+        with contextlib.suppress(Exception):
+            await application.bot.send_message(chat_id=ALERT_CHAT_ID, text=overbuy_check.no_reply_alert(row))
+        await _overbuy_refresh_alert(application.bot, row, keep_buttons=False)
+        await _overbuy_send_strike(application.bot, outcome)
+
+
+async def refresh_known_merchants_job(application: Application) -> None:
+    """Nightly 03:30 MY: recount the known merchants per outlet (streamed)."""
+    try:
+        suppliers = await asyncio.to_thread(
+            lambda: supabase.table(outside_purchase.SUPPLIERS_TABLE).select("*").execute().data or [])
+        summary = await asyncio.to_thread(
+            known_merchants.refresh, supabase, suppliers, group_codes=cashier_names.group_chats())
+        logger.info("known merchants: refresh %s", summary)
+        if summary.get("seeded"):
+            with contextlib.suppress(Exception):
+                await application.bot.send_message(
+                    chat_id=ALERT_CHAT_ID,
+                    text=f"🏪 Known-merchant baseline seeded: {summary['seeded']} rows. "
+                         "Review with /merchant_known <outlet>; remove mini markets with /buang_merchant.")
+    except Exception:
+        logger.exception("known merchants: nightly refresh failed")
+
+
+def _shadow_rows(day):
+    outside = outside_purchase.fetch_purchases(supabase, since=day - timedelta(days=1), until=day)
+    outside = [r for r in outside if r.get("mode") == outside_purchase.SHADOW
+               or str(r.get("created_at") or "")[:10] == day.isoformat()]
+    overbuy = overbuy_check.fetch_flags(supabase, since=day - timedelta(days=1), until=day)
+    overbuy = [r for r in overbuy if r.get("status") == overbuy_check.SHADOW]
+    return outside, overbuy
+
+
+async def post_shadow_summary(application: Application, *, notify_chat_id=None, force=False) -> None:
+    """Daily 21:45 MY while in shadow mode (and /pinpoint_shadow): what would
+    have been sent to the cashiers today, to the director chat."""
+    if not force and outside_purchase.is_live():
+        return
+    today = _my_today()
+    try:
+        outside, overbuy = await asyncio.to_thread(_shadow_rows, today)
+        text = outside_purchase.shadow_summary(outside, overbuy, today)
+    except Exception:
+        logger.exception("pinpoint shadow summary failed")
+        text = "⚠️ Pinpoint shadow summary failed — see logs."
+    for chat in {ALERT_CHAT_ID, notify_chat_id} - {None}:
+        await _send_chunked_to(application, chat, text)
+
+
+async def pinpoint_shadow_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: /pinpoint_shadow — today's would-have-been-sent summary."""
+    message = update.effective_message
+    if not message or not _outside_admin(update):
+        return
+    await post_shadow_summary(context.application, notify_chat_id=message.chat_id
+                              if message.chat_id != ALERT_CHAT_ID else None, force=True)
+
+
+async def lebih_beli_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: /lebih_beli [outlet] [days] — overbuy flags per cashier and item."""
+    message = update.effective_message
+    if not message or not _outside_admin(update):
+        return
+    args = list(context.args or [])
+    days = outside_purchase.strike_window_days()
+    if args and args[-1].isdigit():
+        days = max(1, min(int(args.pop()), 365))
+    outlet = " ".join(args).strip() or None
+    if outlet and not outlet_resolver.canonical_outlet(outlet):
+        await message.reply_text(f"Outlet {outlet} tak dikenali. Contoh: /lebih_beli SEK20 30")
+        return
+    today = _my_today()
+    rows = await asyncio.to_thread(overbuy_check.fetch_flags, supabase, outlet=outlet,
+                                   since=today - timedelta(days=days), until=today)
+    await _reply_chunked(message, overbuy_check.format_summary(rows, outlet, days))
+
+
+async def merchant_known_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: /merchant_known <outlet> — the shops known for that outlet;
+    /merchant_known all — the full per-outlet report."""
+    message = update.effective_message
+    if not message or not _outside_admin(update):
+        return
+    arg = " ".join(context.args or []).strip()
+    if not arg:
+        await message.reply_text("Usage: /merchant_known <outlet>  atau  /merchant_known all")
+        return
+    if arg.lower() == "all":
+        rows = await asyncio.to_thread(known_merchants.load, supabase)
+        await _reply_chunked(message, known_merchants.format_report(rows))
+        return
+    if not outlet_resolver.canonical_outlet(arg):
+        await message.reply_text(f"Outlet {arg} tak dikenali.")
+        return
+    rows = await asyncio.to_thread(known_merchants.load, supabase, arg)
+    await _reply_chunked(message, known_merchants.format_known(rows, arg))
+
+
+async def buang_merchant_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: /buang_merchant <outlet> <name> — this shop is NOT a regular
+    supplier of that outlet; its bills become pin targets again."""
+    message = update.effective_message
+    if not message or not _outside_admin(update):
+        return
+    args = list(context.args or [])
+    if len(args) < 2:
+        await message.reply_text("Usage: /buang_merchant <outlet> <nama>  e.g. /buang_merchant SEK6 PASAR MINI A M")
+        return
+    outlet, name = args[0], " ".join(args[1:]).strip()
+    if not outlet_resolver.canonical_outlet(outlet):
+        await message.reply_text(f"Outlet {outlet} tak dikenali.")
+        return
+    row = await asyncio.to_thread(known_merchants.remove, supabase, outlet, name, _command_owner_id(update))
+    if not row:
+        await message.reply_text(f"{name} tidak ada dalam senarai dikenali untuk {outlet}.")
+        return
+    await message.reply_text(f"✖ {row.get('canonical_merchant')} dibuang dari senarai dikenali "
+                             f"{row.get('outlet')}. Bil dari kedai ini akan ditanda beli luar.")
 
 
 def _outside_admin(update: Update) -> bool:
+    """Admin commands answer in the director chat or to a reviewer anywhere;
+    a cashier typing one in an outlet group gets nothing."""
     message = update.effective_message
-    return message is not None and (
-        message.chat_id == ALERT_CHAT_ID or is_reviewer(_command_owner_id(update)))
+    return message is not None and outside_purchase.admin_allowed(
+        message.chat_id, _command_owner_id(update), ALERT_CHAT_ID, is_reviewer)
 
 
 def _receipt_chat_ref(receipt_id):
@@ -2571,7 +2934,11 @@ async def _with_outside_section(text: str, year: int, month: int) -> str:
         rows = await asyncio.to_thread(
             outside_purchase.fetch_purchases, supabase,
             since=date.fromisoformat(first), until=date.fromisoformat(last))
-        return text + "\n\n" + outside_purchase.monthly_section(rows, year, month)
+        flags = await asyncio.to_thread(
+            overbuy_check.fetch_flags, supabase,
+            since=date.fromisoformat(first), until=date.fromisoformat(last))
+        return (text + "\n\n" + outside_purchase.monthly_section(rows, year, month)
+                + "\n\n" + overbuy_check.monthly_section(flags, year, month))
     except Exception:
         logger.exception("outside purchase: monthly section failed (%s-%s)", year, month)
         return text
@@ -2739,7 +3106,12 @@ HELP_TEXT = (
     "/bukan_beli_luar <id> — mark a false positive (it was a supplier)\n"
     "/tambah_supplier <name> [= <supplier>] — approve a supplier or add an alias\n"
     "/daftar_cashier — (cashier, in the outlet group) link your Telegram "
-    "account to your shift"
+    "account to your shift\n"
+    "/lebih_beli [outlet] [days] — overbuy flags: cashier, item, times, extra qty/RM, reasons\n"
+    "/merchant_known <outlet> | all — shops known for an outlet (bills from unknown shops are pinned)\n"
+    "/buang_merchant <outlet> <name> — remove a shop from the known list\n"
+    "/pinpoint_shadow — what shadow mode WOULD have sent to cashiers today "
+    "(OUTSIDE_PURCHASE_MODE=shadow|live)"
 )
 
 
@@ -6200,13 +6572,9 @@ def _anomaly_metrics(code, today) -> list[dict]:
     prior_y = [yesterday - timedelta(days=7 * k) for k in range(1, 5)]
     prior_t = [today - timedelta(days=7 * k) for k in range(1, 5)]
     metrics: list[dict] = []
-    try:
-        counts = _full_day_counts(supabase, code, [yesterday] + prior_y)
-        if yesterday in counts:
-            metrics.append({"metric": "sales", "item": "Sales", "today": counts[yesterday],
-                            "usual": [counts[d] for d in prior_y if d in counts], "unit": ""})
-    except Exception:
-        logger.exception("anomaly: sales lookup failed (%s)", code)
+    # No "sales" metric here: the anomaly question would quote yesterday's
+    # items-sold count and the usual to the cashier, and sales figures are
+    # management-only. Wastage and order quantities are the cashier's own.
     try:
         rows = [r for r in demand_forecast.load_usage_rows(
             supabase, prior_y[-1].isoformat(), yesterday.isoformat())
@@ -7492,9 +7860,11 @@ def _ops_message(db, slot, code, today, language, praise) -> dict | None:
         if not note:
             return None
         args = (note, note["weekday"], )
+        # The count and the usual stay out of the stored facts too.
+        facts = {k: v for k, v in note.items() if k not in ("count", "usual")}
         return {"text": staff_ops.sales_text(*args, language, full_day=note["full_day"]),
                 "question_en": staff_ops.sales_text(*args, "english", full_day=note["full_day"]),
-                "facts": note, "info": True}
+                "facts": facts, "info": True}
     if slot == "afternoon":
         drop = _item_drop_for(db, code, today)
         if drop:
@@ -9104,6 +9474,13 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("tambah_supplier", tambah_supplier_command))
     app.add_handler(CallbackQueryHandler(handle_outside_review, pattern=r"^ob:\d+:(yes|no)$"))
     app.add_handler(CallbackQueryHandler(handle_daftar_callback, pattern=r"^dc:\d+:"))
+    app.add_handler(CommandHandler("lebih_beli", lebih_beli_command))
+    app.add_handler(CommandHandler("merchant_known", merchant_known_command))
+    app.add_handler(CommandHandler("buang_merchant", buang_merchant_command))
+    app.add_handler(CommandHandler("pinpoint_shadow", pinpoint_shadow_command))
+    app.add_handler(CallbackQueryHandler(handle_overbuy_reason,
+                                         pattern=r"^ov:\d+:(stock|order|supplier|other)$"))
+    app.add_handler(CallbackQueryHandler(handle_overbuy_decision, pattern=r"^ovm:\d+:(accept|reject)$"))
     app.add_handler(
         CallbackQueryHandler(reparse_apply_all_callback, pattern=r"^reparse_applyall:(yes|no)$")
     )
@@ -9145,6 +9522,14 @@ async def run_bot() -> None:
                     group=1)
     # Tap-to-answer buttons on live check-ins ("sc:<thread>:<choice>").
     app.add_handler(CallbackQueryHandler(handle_staff_button, pattern=r"^sc:\d+:\w+$"))
+    # A typed overbuy reason (reply to the bot's "type your reason" prompt).
+    # Group 2: runs in addition to the handlers above and only acts when the
+    # replied-to message is one of its own prompts.
+    app.add_handler(
+        MessageHandler(filters.TEXT & filters.REPLY & ~filters.COMMAND & filters.ChatType.GROUPS,
+                       handle_overbuy_reason_text),
+        group=2,
+    )
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -9511,6 +9896,36 @@ async def run_bot() -> None:
         minute=0,
         args=[app],
         id="phrasing_examples",
+        replace_existing=True,
+    )
+    # Pinpoint Target: overbuy questions unanswered for 12h become no_reply
+    # strikes (every 30 min); the known-merchant baseline is recounted nightly
+    # (03:30, streamed); in shadow mode the director gets the day's
+    # would-have-been-sent summary at 21:45.
+    scheduler.add_job(
+        overbuy_no_reply_tick,
+        trigger="cron",
+        minute="5,35",
+        args=[app],
+        id="overbuy_no_reply_tick",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        refresh_known_merchants_job,
+        trigger="cron",
+        hour=3,
+        minute=30,
+        args=[app],
+        id="known_merchants_refresh",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        post_shadow_summary,
+        trigger="cron",
+        hour=21,
+        minute=45,
+        args=[app],
+        id="pinpoint_shadow_summary",
         replace_existing=True,
     )
     # Nightly director digest — 23:30 MY: every reply and non-reply of the

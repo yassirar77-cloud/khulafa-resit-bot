@@ -148,6 +148,50 @@ def scold_channel() -> str:
     return raw if raw in ("group", "dm") else "group"
 
 
+SHADOW, LIVE = "shadow", "live"
+
+
+def mode() -> str:
+    """``OUTSIDE_PURCHASE_MODE``: ``shadow`` (default — detect, record, count
+    and tell the director, but send NOTHING to cashiers) or ``live``."""
+    raw = str(os.environ.get("OUTSIDE_PURCHASE_MODE", SHADOW) or SHADOW).strip().lower()
+    return LIVE if raw == LIVE else SHADOW
+
+
+def is_live() -> bool:
+    return mode() == LIVE
+
+
+def live_rows(history) -> list[dict]:
+    """The rows recorded in live mode. Message tiers count ONLY these, so
+    flipping the switch never fires the strikes that piled up in shadow
+    mode — message counting starts from the switch."""
+    return [h for h in history or [] if isinstance(h, dict) and h.get("mode") == LIVE]
+
+
+def message_strike_no(history, strike_no=None) -> int | None:
+    """The strike number the cashier is told about: live rows in the window
+    (None when nothing is counted)."""
+    if not strike_no:
+        return None
+    n = len(live_rows(history))
+    return n or None
+
+
+def admin_allowed(chat_id, user_id, alert_chat_id, is_reviewer) -> bool:
+    """Admin commands: the director chat itself, or a reviewer anywhere. A
+    cashier in an outlet group is neither, whatever they type."""
+    try:
+        if alert_chat_id is not None and int(chat_id) == int(alert_chat_id):
+            return True
+    except (TypeError, ValueError):
+        pass
+    try:
+        return bool(is_reviewer(user_id))
+    except Exception:
+        return False
+
+
 # --- small helpers -------------------------------------------------------------
 
 def _to_float(value: Any) -> float | None:
@@ -296,6 +340,13 @@ def match_supplier(merchant: Any, suppliers) -> dict:
                 for i in range(len(m_words) - len(n_words) + 1):
                     window = " ".join(m_words[i:i + len(n_words)])
                     score = max(score, _similarity(window, name))
+            # OCR drops spaces ("EVERESTAISVARAM"): compare squashed spellings,
+            # with and without the legal tail.
+            squashed = merchant_norm.replace(" ", "")
+            core = _significant(n_words) or n_words
+            for cand in {name.replace(" ", ""), "".join(core)}:
+                if len(cand) >= MIN_FUZZY_LEN:
+                    score = max(score, _similarity(squashed, cand))
             if score >= CLEAR_SCORE:
                 consider(APPROVED, canonical, score, "fuzzy")
             elif score >= GREY_SCORE:
@@ -784,6 +835,7 @@ def pending_alert(purchase: dict, match: dict | None = None) -> str:
         "low_confidence": "no supplier matched, but the OCR read of this receipt is low-confidence",
         "no_merchant": "the merchant name could not be read",
         "no_suppliers": "the approved_suppliers table is empty — apply migrations/0058",
+        "none": "not an approved supplier and never seen at this outlet before",
     }.get(reason, reason)
     return (
         "❓ Beli luar? Outside purchase needs a human eye\n"
@@ -873,6 +925,51 @@ def monthly_section(rows: list[dict], year: int, month: int) -> str:
     return "\n".join(lines)
 
 
+def shadow_summary(outside_rows: list[dict], overbuy_rows: list[dict], day: date,
+                   *, threshold: int | None = None) -> str:
+    """/pinpoint_shadow — what WOULD have reached the cashiers today had the
+    mode been live: one line per recorded row (cashier, outlet, type, strike
+    number, tier, merchant, items). Nothing in here is sent to a cashier."""
+    limit = threshold or scold_threshold()
+    day_iso = day.isoformat()
+    outside = [r for r in outside_rows or [] if str(r.get("created_at") or "")[:10] == day_iso
+               or str(r.get("business_date") or "")[:10] == day_iso]
+    overbuy = [r for r in overbuy_rows or [] if str(r.get("created_at") or "")[:10] == day_iso
+               or str(r.get("business_date") or "")[:10] == day_iso]
+    lines = [f"👁 Pinpoint shadow — {day:%d %b %Y} (mode: {mode()})"]
+    if not outside and not overbuy:
+        lines.append("Nothing would have been sent today.")
+        return "\n".join(lines)
+    tier_label = {INFO: "info", REMINDER: "reminder", FINAL: "final warning", SCOLD: "FIRM WARNING + report"}
+    for r in sorted(outside, key=lambda r: (str(r.get("outlet")), r.get("id") or 0)):
+        items = r.get("items") if isinstance(r.get("items"), list) else []
+        who = r.get("cashier_name") or "cashier unknown"
+        kind = "mini market" if r.get("source") == "minimarket" else "new merchant"
+        if r.get("status") == PENDING:
+            what = "held for review (no message)"
+        elif r.get("status") == EXCUSED:
+            what = "no strike (allowed items)"
+        elif r.get("status") == COUNTED:
+            n = r.get("strike_no")
+            what = f"strike {n} → {tier_label[tier_for(n, limit)]}" if n else "recorded, no cashier on roster"
+        else:
+            what = str(r.get("status"))
+        lines.append(f"• {who} · {r.get('outlet') or '?'} · {kind} #{r.get('id')} — {what} — "
+                     f"{r.get('merchant_raw') or '?'}: {items_text(items, 4)}")
+    for r in sorted(overbuy, key=lambda r: (str(r.get("outlet")), r.get("id") or 0)):
+        who = r.get("cashier") or "cashier unknown"
+        qty = _to_float(r.get("qty"))
+        base = _to_float(r.get("baseline_qty"))
+        lines.append(f"• {who} · {r.get('outlet') or '?'} · overbuy #{r.get('id')} — question would be asked — "
+                     f"{r.get('supplier') or '?'}: {r.get('item_label') or r.get('item')} "
+                     f"{qty:g} {r.get('unit') or ''} (usual {base:g})".replace("  ", " ")
+                     if qty is not None and base is not None else
+                     f"• {who} · {r.get('outlet') or '?'} · overbuy #{r.get('id')} — {r.get('item')}")
+    lines.append(f"\n{len(outside)} outside-purchase row(s), {len(overbuy)} overbuy flag(s). "
+                 "Live mode would send these to the cashiers.")
+    return "\n".join(lines)
+
+
 # --- /daftar_cashier keyboards -----------------------------------------------------------
 
 def roster_outlets(roster) -> list[str]:
@@ -920,6 +1017,15 @@ def parse_register_callback(data: str) -> dict | None:
     return None
 
 
+def _is_minimarket(merchant: Any) -> bool:
+    try:
+        from staff_ops import is_minimarket
+
+        return bool(is_minimarket(merchant))
+    except Exception:
+        return False
+
+
 # --- evaluation (pure) ------------------------------------------------------------------------
 
 def resolve_outlet(stored: dict, group_code: Any = None) -> str | None:
@@ -947,11 +1053,19 @@ def evaluate(stored: dict, config: dict, *, group_code: Any = None,
     outlet), ``allowed_only`` (every item may be bought outside — recorded as
     excused, no strike), ``pending`` (grey zone) or ``count``.
     """
-    match = classify_merchant(stored.get("merchant"), config.get("suppliers"),
-                              stored.get("confidence"))
-    if match["decision"] in (APPROVED, INTERNAL):
-        return {"action": "skip", "match": match, "row": None, "attribution": None, "removed": []}
     outlet = resolve_outlet(stored, group_code)
+    # Approved suppliers everywhere + the shops this outlet is known to use
+    # (known_merchants): only a merchant that is neither is a pin target.
+    import known_merchants
+
+    suppliers = list(config.get("suppliers") or [])
+    known = known_merchants.as_suppliers(config.get("known"), outlet) if outlet else []
+    match = classify_merchant(stored.get("merchant"), suppliers + known, stored.get("confidence"))
+    if match["decision"] in (APPROVED, INTERNAL):
+        if match["decision"] == APPROVED and match.get("supplier") and not any(
+                s.get("canonical_name") == match["supplier"] for s in suppliers):
+            match = dict(match, tier="known_" + match["tier"])
+        return {"action": "skip", "match": match, "row": None, "attribution": None, "removed": []}
     if not outlet:
         return {"action": "skip", "match": dict(match, tier="no_outlet"), "row": None,
                 "attribution": None, "removed": []}
@@ -985,6 +1099,8 @@ def evaluate(stored: dict, config: dict, *, group_code: Any = None,
         "extra_cost_vs_approved": None,
         "status": PENDING,
         "strike_no": None,
+        "mode": mode(),
+        "source": "minimarket" if _is_minimarket(stored.get("merchant")) else "new_merchant",
     }
     if items and not kept:
         row["status"] = EXCUSED
@@ -1005,9 +1121,9 @@ def evaluate(stored: dict, config: dict, *, group_code: Any = None,
 def load_config(db) -> dict:
     """Suppliers, allowed items and roster in one go. Never raises — an
     empty config makes every merchant UNSURE (pending review), never a strike."""
-    config = {"suppliers": [], "allowed": [], "roster": []}
+    config = {"suppliers": [], "allowed": [], "roster": [], "known": []}
     for key, table in (("suppliers", SUPPLIERS_TABLE), ("allowed", ALLOWED_TABLE),
-                       ("roster", ROSTER_TABLE)):
+                       ("roster", ROSTER_TABLE), ("known", "outlet_known_merchants")):
         try:
             config[key] = db.table(table).select("*").execute().data or []
         except Exception:
@@ -1109,6 +1225,7 @@ def process_receipt(db, stored: dict, *, group_code: Any = None,
                 db.table(TABLE).update({"strike_no": strike_no}).eq("id", saved["id"]).execute()
                 saved["strike_no"] = strike_no
         return {"action": result["action"], "row": saved, "strike_no": strike_no,
+                "live_strike_no": message_strike_no(history, strike_no),
                 "history": history, "attribution": result["attribution"], "match": result["match"]}
     except Exception:
         logger.exception("outside purchase: processing failed (receipt %s)", stored.get("id"))
@@ -1138,7 +1255,17 @@ def confirm_outside(db, purchase_id, reviewer_id=None) -> dict | None:
         strike_no = len(history)
         db.table(TABLE).update({"strike_no": strike_no}).eq("id", row["id"]).execute()
         row["strike_no"] = strike_no
-    return {"row": row, "strike_no": strike_no, "history": history}
+    return {"row": row, "strike_no": strike_no, "history": history,
+            "live_strike_no": message_strike_no(history, strike_no)}
+
+
+def mark_notified(db, purchase_id) -> None:
+    """Stamp the moment the cashier was actually told (live mode only)."""
+    try:
+        db.table(TABLE).update({"notified_at": datetime.now(MY_TZ).isoformat()}) \
+            .eq("id", int(purchase_id)).execute()
+    except Exception:
+        logger.exception("outside purchase: notified stamp failed (%s)", purchase_id)
 
 
 def mark_false_positive(db, purchase_id, reviewer_id=None) -> dict | None:

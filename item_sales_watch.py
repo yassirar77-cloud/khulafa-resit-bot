@@ -266,11 +266,10 @@ def format_manager_slow_items(entry: dict) -> str:
             "(day shift + night shift, 24 மணி நேரம் சேர்த்து):",
             "",
         ]
+        # No sales figure on the shop floor: the item names only — how many
+        # sold, the usual and the % stay in the director's summary.
         for f in flags:
-            lines.append(
-                f"• {f['label']}: {_fmt_qty(f['qty'])} தான் போச்சு — "
-                f"வழக்கமா ~{_fmt_qty(f['median'])} போகும் (-{f['drop_pct']}%)"
-            )
+            lines.append(f"• {f['label']}: வழக்கத்தை விட குறைவா போச்சு")
         lines += [
             "",
             "இன்னைக்கு இந்த items-அ push பண்ணுங்க 👉 customer-கிட்ட "

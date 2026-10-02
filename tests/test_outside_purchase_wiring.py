@@ -61,7 +61,10 @@ class OutsidePurchaseWiring(unittest.TestCase):
     def test_strike_reply_goes_under_the_receipt_and_scold_reports_to_management(self):
         send = _block(self.src, "async def _outside_send_strike(")
         self.assertIn("reply_to_message_id=reply_to_message_id", send)
-        self.assertIn('outside_purchase.group_message(row, strike_no, history, "bm_tamil")', send)
+        self.assertIn('outside_purchase.group_message(row, shown_no, shown_history, "bm_tamil")', send)
+        # Live rows only: the tier the cashier hears starts counting at the switch.
+        self.assertIn("outside_purchase.live_rows(history)", send)
+        self.assertIn("if not outside_purchase.is_live():", send)
         self.assertIn("if strike_no and strike_no >= outside_purchase.scold_threshold():", send)
         self.assertIn("outside_purchase.management_report(row, strike_no, history)", send)
         self.assertIn("chat_id=ALERT_CHAT_ID", send)

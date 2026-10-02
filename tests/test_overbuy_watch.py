@@ -182,9 +182,13 @@ class Formatting(unittest.TestCase):
     def test_manager_message_tamil_content(self):
         out = format_manager_overbuy(self._entry())
         self.assertIn("📉 Sales இறங்குது, order அப்படியே — SEK-20", out)
-        self.assertIn("RM10,200", out)
-        self.assertIn("22% கம்மி", out)
-        self.assertIn("4% தான் குறைஞ்சிருக்கு", out)
+        # No sales figure reaches the shop floor: no RM, no %, no average.
+        self.assertNotIn("RM", out)
+        self.assertNotIn("%", out)
+        self.assertNotIn("10,200", out)
+        self.assertNotIn("13,100", out)
+        self.assertIn("போன 7 நாள் sales வழக்கத்தை விட கம்மி", out)
+        # Their own purchase quantities may stay.
         self.assertIn("🐔 Ayam: 208 kg (வழக்கமா 215 kg)", out)
         self.assertIn("ஏன் இந்த items குறைக்கலன்னு சொல்லுங்க", out)
 
@@ -195,12 +199,15 @@ class Formatting(unittest.TestCase):
         out = format_manager_overbuy(entry)
         self.assertIn("குறையவே இல்ல", out)
 
-    def test_no_item_detail_still_sends_the_rm_comparison(self):
+    def test_no_item_detail_still_sends_the_question_without_figures(self):
         entry = self._entry()
         entry["items"] = []
         out = format_manager_overbuy(entry)
-        self.assertIn("RM10,200", out)
+        self.assertIn("Sales இறங்குது", out)
+        self.assertNotIn("RM", out)
         self.assertNotIn("இதெல்லாம்", out)
+        # The director's summary keeps the numbers.
+        self.assertIn("RM", format_owner_summary([self._entry()]))
 
     def test_owner_summary_lists_flagged_outlets(self):
         out = format_owner_summary([self._entry()])
