@@ -127,6 +127,8 @@ import demand_forecast
 import missing_bills
 import monthly_consumption
 import human_touch
+import outlet_resolver
+import outside_purchase
 import overbuy_watch
 import supervisor
 import order_generator
@@ -1893,6 +1895,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if staff_ops.is_minimarket(stored.get("merchant")):
         await staff_ops_on_upload(context.application, stored, message, supplier=False)
 
+    # Pinpoint Target: a bill from a shop that is not an approved supplier is
+    # an outside purchase — pinpoint the cashier, count the strike, reply
+    # under the receipt (outside_purchase). Purchases only: advances,
+    # utilities, rent and petty cash are not stock bought outside.
+    if receipt_type in _OUTSIDE_RECEIPT_TYPES:
+        await outside_purchase_on_upload(context, stored, message)
+
     if receipt_type == ReceiptType.STAFF_ADVANCE:
         try:
             await asyncio.to_thread(
@@ -2210,6 +2219,364 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                                   candidates=ops_candidates)
 
 
+# === Pinpoint Target: outside purchases + cashier strikes (outside_purchase) ===
+
+_OUTSIDE_RECEIPT_TYPES = (ReceiptType.SUPPLIER_PURCHASE, ReceiptType.UNKNOWN)
+
+
+def _outside_review_keyboard(purchase_id) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("Beli Luar ✅", callback_data=f"ob:{purchase_id}:yes"),
+        InlineKeyboardButton("Supplier Kita ❌", callback_data=f"ob:{purchase_id}:no"),
+    ]])
+
+
+async def _outside_send_strike(bot, result: dict, *, chat_id, reply_to_message_id=None) -> None:
+    """The strike message to the cashier — a reply under the receipt in the
+    outlet group (BM + Tamil), or a DM when SCOLD_CHANNEL=dm and the cashier
+    has linked their account (falls back to the group when the DM fails) —
+    plus the full report to the director chat from the scold threshold on."""
+    row = result["row"]
+    strike_no = result.get("strike_no")
+    history = result.get("history") or []
+    contact = result.get("attribution") or {}
+    sent_dm = False
+    if outside_purchase.scold_channel() == "dm" and contact.get("telegram_user_id"):
+        try:
+            await bot.send_message(
+                chat_id=contact["telegram_user_id"],
+                text=outside_purchase.group_message(
+                    row, strike_no, history, contact.get("language") or "bm"),
+            )
+            sent_dm = True
+        except Exception:
+            # The cashier has not started the bot: the group gets it instead.
+            logger.info("outside purchase: DM to cashier failed, replying in the group",
+                        exc_info=True)
+    if not sent_dm and chat_id is not None:
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=outside_purchase.group_message(row, strike_no, history, "bm_tamil"),
+                reply_to_message_id=reply_to_message_id, allow_sending_without_reply=True,
+            )
+        except Exception:
+            logger.exception("outside purchase: group message failed (purchase %s)", row.get("id"))
+    if strike_no and strike_no >= outside_purchase.scold_threshold():
+        try:
+            report = outside_purchase.management_report(row, strike_no, history)
+            for chunk in chunk_message(report):
+                await bot.send_message(chat_id=ALERT_CHAT_ID, text=chunk)
+        except Exception:
+            logger.exception("outside purchase: management report failed (purchase %s)", row.get("id"))
+
+
+async def outside_purchase_on_upload(context, stored: dict, message) -> None:
+    """After a bill is saved: if the shop is not an approved supplier, record
+    the outside purchase, pinpoint the cashier on shift, count the strike and
+    reply under the receipt. A grey-zone merchant (fuzzy, low-confidence OCR,
+    unreadable) goes to the director chat with [Beli Luar ✅] [Supplier Kita ❌]
+    instead — never an automatic strike. Never breaks the receipt pipeline."""
+    try:
+        if stored.get("id") is None:
+            return
+        group_code = cashier_names.outlet_for_chat(message.chat_id)
+        result = await asyncio.to_thread(
+            outside_purchase.process_receipt, supabase, stored, group_code=group_code)
+        if not result:
+            return
+        row = result["row"]
+        if result["action"] == "pending":
+            await context.bot.send_message(
+                chat_id=ALERT_CHAT_ID,
+                text=outside_purchase.pending_alert(row, result.get("match")),
+                reply_markup=_outside_review_keyboard(row.get("id")),
+            )
+            logger.info("outside purchase: #%s held for review (%s)", row.get("id"),
+                        (result.get("match") or {}).get("tier"))
+            return
+        if result["action"] != "count":
+            logger.info("outside purchase: #%s recorded without a strike (%s)",
+                        row.get("id"), result["action"])
+            return
+        logger.info("outside purchase: #%s counted — strike %s for %s at %s", row.get("id"),
+                    result.get("strike_no"), row.get("cashier_name"), row.get("outlet"))
+        await _outside_send_strike(context.bot, result, chat_id=message.chat_id,
+                                   reply_to_message_id=message.message_id)
+    except Exception:
+        logger.exception("outside purchase: upload hook failed (receipt %s)", stored.get("id"))
+
+
+def _outside_admin(update: Update) -> bool:
+    message = update.effective_message
+    return message is not None and (
+        message.chat_id == ALERT_CHAT_ID or is_reviewer(_command_owner_id(update)))
+
+
+def _receipt_chat_ref(receipt_id):
+    """``(chat_id, message_id)`` of a stored receipt, for replying under it later."""
+    if receipt_id is None:
+        return None, None
+    rows = (supabase.table(RECEIPTS_TABLE).select("chat_id, message_id")
+            .eq("id", receipt_id).execute().data or [])
+    if not rows:
+        return None, None
+    return rows[0].get("chat_id"), rows[0].get("message_id")
+
+
+async def handle_outside_review(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """[Beli Luar ✅] / [Supplier Kita ❌] on a held outside purchase."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    reviewer = query.from_user.id if query.from_user else None
+    chat = getattr(query.message, "chat", None)
+    if not is_reviewer(reviewer) and not (chat is not None and chat.id == ALERT_CHAT_ID):
+        return
+    m = re.match(r"^ob:(\d+):(yes|no)$", query.data or "")
+    if not m:
+        return
+    purchase_id, choice = int(m.group(1)), m.group(2)
+    if choice == "no":
+        row = await asyncio.to_thread(
+            outside_purchase.mark_false_positive, supabase, purchase_id, reviewer)
+        if row is None:
+            text = f"#{purchase_id} sudah diselesaikan."
+        else:
+            text = (f"✖ #{purchase_id} ditanda bukan beli luar: {row.get('merchant_raw') or '?'}.\n"
+                    f"Supaya tak ditanya lagi: /tambah_supplier {row.get('merchant_raw') or '<nama>'}")
+    else:
+        result = await asyncio.to_thread(
+            outside_purchase.confirm_outside, supabase, purchase_id, reviewer)
+        if result is None:
+            text = f"#{purchase_id} sudah diselesaikan."
+        else:
+            row = result["row"]
+            roster = await asyncio.to_thread(outside_purchase.load_roster, supabase)
+            result["attribution"] = outside_purchase.cashier_contact(
+                roster, row.get("outlet"), row.get("cashier_name"))
+            chat_id, message_id = await asyncio.to_thread(_receipt_chat_ref, row.get("receipt_id"))
+            await _outside_send_strike(context.bot, result, chat_id=chat_id,
+                                       reply_to_message_id=message_id)
+            who = row.get("cashier_name") or "cashier tak dikenal pasti"
+            text = (f"✅ #{purchase_id} dikira beli luar — strike {result.get('strike_no') or '—'} "
+                    f"untuk {who} ({row.get('outlet') or '?'}).")
+    with contextlib.suppress(Exception):
+        await query.edit_message_reply_markup(reply_markup=None)
+    await _callback_reply(query, context, text)
+
+
+async def beli_luar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: /beli_luar [outlet] [days] — outside purchases per cashier."""
+    message = update.effective_message
+    if not message or not _outside_admin(update):
+        return
+    args = list(context.args or [])
+    days = outside_purchase.strike_window_days()
+    if args and args[-1].isdigit():
+        days = max(1, min(int(args.pop()), 365))
+    outlet = " ".join(args).strip() or None
+    if outlet and not outlet_resolver.canonical_outlet(outlet):
+        await message.reply_text(
+            f"Outlet {outlet} tak dikenali. Contoh: /beli_luar SEK20 30, /beli_luar Vista, /beli_luar 60")
+        return
+    today = _my_today()
+    rows = await asyncio.to_thread(
+        outside_purchase.fetch_purchases, supabase,
+        outlet=outlet, since=today - timedelta(days=days), until=today)
+    await _reply_chunked(message, outside_purchase.format_summary(rows, outlet, days))
+
+
+async def beli_luar_cashier_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: /beli_luar_cashier <name> — one cashier's full history."""
+    message = update.effective_message
+    if not message or not _outside_admin(update):
+        return
+    name = " ".join(context.args or []).strip()
+    if not name:
+        await message.reply_text("Usage: /beli_luar_cashier <nama>  e.g. /beli_luar_cashier Rahim")
+        return
+    today = _my_today()
+    rows = await asyncio.to_thread(
+        outside_purchase.fetch_purchases, supabase, since=today - timedelta(days=365))
+    await _reply_chunked(message, outside_purchase.format_cashier_history(rows, name))
+
+
+async def izin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: /izin <purchase_id> <reason> — an approved emergency, strike removed."""
+    message = update.effective_message
+    if not message or not _outside_admin(update):
+        return
+    args = list(context.args or [])
+    if not args or not args[0].lstrip("#").isdigit() or len(args) < 2:
+        await message.reply_text("Usage: /izin <purchase_id> <sebab>  e.g. /izin 12 gas habis, saya benarkan")
+        return
+    purchase_id = int(args[0].lstrip("#"))
+    row = await asyncio.to_thread(
+        outside_purchase.excuse, supabase, purchase_id, " ".join(args[1:]), _command_owner_id(update))
+    if row is None:
+        await message.reply_text(f"#{purchase_id} tak dijumpai atau sudah diizinkan.")
+        return
+    await message.reply_text(
+        f"🆗 #{purchase_id} diizinkan — {row.get('cashier_name') or '?'} ({row.get('outlet') or '?'}), "
+        f"{row.get('merchant_raw') or '?'}. Strike dibuang. Sebab: {row.get('excused_reason')}")
+
+
+async def bukan_beli_luar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: /bukan_beli_luar <purchase_id> — false positive, this is a supplier."""
+    message = update.effective_message
+    if not message or not _outside_admin(update):
+        return
+    args = list(context.args or [])
+    if not args or not args[0].lstrip("#").isdigit():
+        await message.reply_text("Usage: /bukan_beli_luar <purchase_id>")
+        return
+    purchase_id = int(args[0].lstrip("#"))
+    row = await asyncio.to_thread(
+        outside_purchase.mark_false_positive, supabase, purchase_id, _command_owner_id(update))
+    if row is None:
+        await message.reply_text(f"#{purchase_id} tak dijumpai atau sudah ditanda.")
+        return
+    await message.reply_text(
+        f"✖ #{purchase_id} ditanda bukan beli luar ({row.get('merchant_raw') or '?'}). "
+        f"Supaya tak ditanya lagi: /tambah_supplier {row.get('merchant_raw') or '<nama>'}")
+
+
+async def tambah_supplier_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: /tambah_supplier <name> — approve a supplier; a name that already
+    matches one of ours is saved as its alias. ``/tambah_supplier <alias> = <supplier>``
+    pins the alias to a specific supplier."""
+    message = update.effective_message
+    if not message or not _outside_admin(update):
+        return
+    text = " ".join(context.args or []).strip()
+    if not text:
+        await message.reply_text(
+            "Usage: /tambah_supplier <nama>  atau  /tambah_supplier <alias> = <supplier>\n"
+            "e.g. /tambah_supplier PASARAYA BORONG SNS ALI\n"
+            "     /tambah_supplier BESTARI FARM SDN BHD = BESTARI FARM (M) SDN BHD")
+        return
+    name, alias_of = text, None
+    if "=" in text:
+        name, alias_of = (part.strip() for part in text.split("=", 1))
+    result = await asyncio.to_thread(
+        outside_purchase.add_supplier, supabase, name, alias_of, _command_owner_id(update))
+    if not result.get("ok"):
+        await message.reply_text(f"⚠️ {result.get('error')}")
+        return
+    kind = result.get("kind")
+    if kind == "new":
+        await message.reply_text(f"✅ Supplier baru diluluskan: {result['supplier']}")
+    elif kind == "alias":
+        await message.reply_text(f"✅ Alias disimpan: {name.upper()} → {result['supplier']}")
+    else:
+        await message.reply_text(f"ℹ️ {result['supplier']} sudah ada dalam senarai supplier.")
+
+
+def _daftar_markup(buttons) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data=data)]
+                                 for label, data in buttons])
+
+
+_DAFTAR_TEXT = {
+    "outlet": "Pilih outlet anda.\nஉங்க outlet-ஐ தேர்ந்தெடுங்க.",
+    "shift": "Pilih shift anda.\nஉங்க shift-ஐ தேர்ந்தெடுங்க.",
+    "name": "Pilih nama anda.\nஉங்க பெயரை தேர்ந்தெடுங்க.",
+    "empty": "Tiada nama cashier untuk outlet/shift ini — minta pengurusan tambah dalam cashier_roster.\n"
+             "இந்த outlet/shift-க்கு cashier பெயர் இல்ல — management-கிட்ட சொல்லுங்க.",
+}
+
+
+async def daftar_cashier_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Any cashier, in their outlet group: /daftar_cashier — link your Telegram
+    account to your roster row (outlet + shift + name via buttons)."""
+    message = update.effective_message
+    user = update.effective_user
+    if not message or not user:
+        return
+    roster = await asyncio.to_thread(outside_purchase.load_roster, supabase)
+    outlets = outside_purchase.roster_outlets(roster)
+    if not outlets:
+        await message.reply_text(_DAFTAR_TEXT["empty"])
+        return
+    code = cashier_names.outlet_for_chat(message.chat_id)
+    known = outlet_resolver.canonical_outlet(code) if code else None
+    if known in outlets:
+        await message.reply_text(
+            f"{known}\n" + _DAFTAR_TEXT["shift"],
+            reply_markup=_daftar_markup(
+                outside_purchase.register_shift_buttons(user.id, outlets.index(known))))
+        return
+    await message.reply_text(
+        _DAFTAR_TEXT["outlet"],
+        reply_markup=_daftar_markup(outside_purchase.register_outlet_buttons(roster, user.id)))
+
+
+async def handle_daftar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """The /daftar_cashier buttons: outlet -> shift -> name -> linked."""
+    query = update.callback_query
+    if not query:
+        return
+    parsed = outside_purchase.parse_register_callback(query.data)
+    if not parsed:
+        await query.answer()
+        return
+    tapper = query.from_user.id if query.from_user else None
+    if tapper != parsed["user_id"]:
+        await query.answer("Bukan untuk anda — taip /daftar_cashier sendiri.", show_alert=True)
+        return
+    await query.answer()
+    roster = await asyncio.to_thread(outside_purchase.load_roster, supabase)
+    outlets = outside_purchase.roster_outlets(roster)
+    try:
+        if parsed["step"] == "outlet":
+            idx = parsed["outlet_idx"]
+            if not 0 <= idx < len(outlets):
+                return
+            await query.edit_message_text(
+                f"{outlets[idx]}\n" + _DAFTAR_TEXT["shift"],
+                reply_markup=_daftar_markup(outside_purchase.register_shift_buttons(tapper, idx)))
+        elif parsed["step"] == "shift":
+            idx = parsed["outlet_idx"]
+            buttons = outside_purchase.register_name_buttons(roster, tapper, idx, parsed["shift"])
+            if not buttons:
+                await query.edit_message_text(_DAFTAR_TEXT["empty"])
+                return
+            label = outlets[idx] if 0 <= idx < len(outlets) else "?"
+            await query.edit_message_text(
+                f"{label} · {parsed['shift']}\n" + _DAFTAR_TEXT["name"],
+                reply_markup=_daftar_markup(buttons))
+        else:
+            row = await asyncio.to_thread(
+                outside_purchase.link_cashier, supabase, parsed["roster_id"], tapper)
+            if row is None:
+                await query.edit_message_text("Rekod tak dijumpai. Cuba /daftar_cashier semula.")
+                return
+            logger.info("outside purchase: cashier %s (%s %s) linked to telegram %s",
+                        row.get("cashier_name"), row.get("outlet"), row.get("shift"), tapper)
+            await query.edit_message_text(
+                f"✅ {row.get('cashier_name')} ({row.get('outlet')}, {row.get('shift')}) "
+                "dipautkan dengan akaun Telegram anda.\n"
+                f"✅ {row.get('cashier_name')} ({row.get('outlet')}, {row.get('shift')}) "
+                "உங்க Telegram account-ஓட link ஆயிடுச்சு.")
+    except Exception:
+        logger.exception("outside purchase: /daftar_cashier step failed")
+
+
+async def _with_outside_section(text: str, year: int, month: int) -> str:
+    """Append the month's "Beli Luar" block to the monthly close report."""
+    try:
+        first, last = monthly_consumption.month_bounds(year, month)
+        rows = await asyncio.to_thread(
+            outside_purchase.fetch_purchases, supabase,
+            since=date.fromisoformat(first), until=date.fromisoformat(last))
+        return text + "\n\n" + outside_purchase.monthly_section(rows, year, month)
+    except Exception:
+        logger.exception("outside purchase: monthly section failed (%s-%s)", year, month)
+        return text
+
+
 def _manager_name_for_chat(chat_id):
     """The registered manager name behind a chat, for the personal ack.
     ``None`` (-> generic 'boss') when the chat isn't a manager DM."""
@@ -2362,7 +2729,17 @@ HELP_TEXT = (
     "\n"
     "Data quality:\n"
     "/price_quarantine [n] — latest garbage price rows the sanity gate "
-    "kept out of item_prices, with reject reasons"
+    "kept out of item_prices, with reject reasons\n"
+    "\n"
+    "Beli luar (outside purchases + cashier strikes):\n"
+    "/beli_luar [outlet] [days] — per cashier: count, RM, extra cost vs "
+    "supplier, top items (default 30 days)\n"
+    "/beli_luar_cashier <name> — one cashier's full history with dates and items\n"
+    "/izin <id> <reason> — excuse an approved emergency buy (strike removed)\n"
+    "/bukan_beli_luar <id> — mark a false positive (it was a supplier)\n"
+    "/tambah_supplier <name> [= <supplier>] — approve a supplier or add an alias\n"
+    "/daftar_cashier — (cashier, in the outlet group) link your Telegram "
+    "account to your shift"
 )
 
 
@@ -2415,7 +2792,8 @@ async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text(HELP_TEXT)
+    # The command list has outgrown one Telegram message (4096 chars).
+    await _reply_chunked(update.effective_message, HELP_TEXT)
 
 
 def fetch_today_receipts(user_id: int, today_iso: str) -> list[dict]:
@@ -4842,7 +5220,8 @@ async def monthly_kg_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.exception("monthly_kg failed (%s-%s)", year, month)
         await message.reply_text("Failed to build the monthly kg report.")
         return
-    await message.reply_text(text)
+    text = await _with_outside_section(text, year, month)
+    await _reply_chunked(message, text)
 
 
 async def post_monthly_kg_report(application: Application) -> None:
@@ -4857,8 +5236,9 @@ async def post_monthly_kg_report(application: Application) -> None:
     text = await asyncio.to_thread(
         monthly_consumption.build_monthly_report, supabase, year, month, today
     )
+    text = await _with_outside_section(text, year, month)
     try:
-        await application.bot.send_message(chat_id=ALERT_CHAT_ID, text=text)
+        await _send_chunked_to(application, ALERT_CHAT_ID, text)
     except Exception:
         logger.exception("monthly kg report: send failed (%s-%s)", year, month)
 
@@ -8715,6 +9095,15 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("sales_avg_ticket", sales_avg_ticket_command))
     app.add_handler(CommandHandler("sales_takeaway_split", sales_takeaway_split_command))
     app.add_handler(CommandHandler("top_items_yesterday", top_items_yesterday_command))
+    # Pinpoint Target: outside purchases + cashier strikes (outside_purchase).
+    app.add_handler(CommandHandler("beli_luar", beli_luar_command))
+    app.add_handler(CommandHandler("beli_luar_cashier", beli_luar_cashier_command))
+    app.add_handler(CommandHandler("izin", izin_command))
+    app.add_handler(CommandHandler("bukan_beli_luar", bukan_beli_luar_command))
+    app.add_handler(CommandHandler("daftar_cashier", daftar_cashier_command))
+    app.add_handler(CommandHandler("tambah_supplier", tambah_supplier_command))
+    app.add_handler(CallbackQueryHandler(handle_outside_review, pattern=r"^ob:\d+:(yes|no)$"))
+    app.add_handler(CallbackQueryHandler(handle_daftar_callback, pattern=r"^dc:\d+:"))
     app.add_handler(
         CallbackQueryHandler(reparse_apply_all_callback, pattern=r"^reparse_applyall:(yes|no)$")
     )

@@ -71,6 +71,62 @@ message, at WARNING), `empty_text`, `low_confidence` (with the score),
 | `0055_director_sql.sql` | `director_readonly` role, `director_sql(q)` function, `director_sql_log` |
 | `0056_phrasing_examples.sql` | `phrasing_examples` |
 | `0057_nudge_off.sql` | `outlet_nudge_off` |
+| `0058_outside_purchases.sql` | `approved_suppliers`, `allowed_outside_items`, `cashier_roster`, `outside_purchases`, view `cashier_strikes` (RLS on) |
+
+## Outside purchases + cashier strikes ("Pinpoint Target")
+
+`outside_purchase.py`, `migrations/0058_outside_purchases.sql`. When a
+cashier uploads a bill from a shop that is **not** an approved supplier
+(Lotus, 99 Speedmart, pasar, kedai runcit …) the bot works purely from what
+OCR already extracted (no new vision call) and pinpoints:
+
+* **who** — the cashier on shift (`cashier_roster`, outlet + morning/night,
+  Asia/Kuala_Lumpur, night shift runs past midnight); a cashier who linked
+  their account with `/daftar_cashier` is matched directly by uploader id;
+* **when** — the receipt date + a time read from the OCR text, else the
+  upload time; **where** — the outlet; **what** — the items (qty, price);
+* **how much extra** — against the latest approved-supplier unit price in
+  `item_prices` (skipped when there is no approved price).
+
+Rules: merchants match `approved_suppliers` on exact name / alias /
+word-bounded phrase / clear OCR drift — never a bare `%bestari%`
+(BESTARI MINIMART is outside, BESTARI FARM (M) SDN BHD is ours). Items in
+`allowed_outside_items` (ais, emergency gas) never count; a bill with only
+those gets no strike. **False-positive guard:** a fuzzy grey-zone merchant,
+an unreadable merchant or a receipt the verifier scored below
+`OUTSIDE_MIN_CONFIDENCE` is held as `pending_review` and the director chat
+gets **[Beli Luar ✅] [Supplier Kita ❌]** — no strike until a human confirms.
+
+Strikes are counted per cashier and outlet over `STRIKE_WINDOW_DAYS` (30),
+`status = 'counted'` only (view `cashier_strikes`). The reply under the
+receipt is BM + Tamil (the Tamil lines need a native-speaker review before
+go-live, see the module docstring):
+
+| Strike | Reply in the group |
+| --- | --- |
+| 1 | info: this bill is from an outside shop, please order from the official supplier |
+| 2–3 | reminder with the count and the extra cost vs the approved supplier |
+| 4 | final warning: the next one is reported to management |
+| 5+ (`SCOLD_THRESHOLD`) | firm warning listing every purchase in the window with totals and extra cost, "management has been informed"; the full report also goes to `ALERT_CHAT_ID` |
+
+The warnings criticise the action, never the person: no insults, nothing
+about race, religion or nationality. `SCOLD_CHANNEL=dm` sends the warning to
+the cashier's DM instead (only works once they ran `/daftar_cashier` and
+started the bot; otherwise it falls back to the group reply).
+
+Commands (admin = director chat or a reviewer): `/beli_luar [outlet] [days]`
+(per cashier: count, RM, extra cost, top items), `/beli_luar_cashier <name>`
+(full history), `/izin <id> <reason>` (approved emergency — strike removed),
+`/bukan_beli_luar <id>` (false positive), `/tambah_supplier <name> [= <supplier>]`
+(approve a supplier or add an alias). Cashiers run `/daftar_cashier` in their
+outlet group and pick shift + name with buttons. The monthly close
+(`/monthly_kg`, 1st of the month) ends with a per-outlet "Beli Luar" section.
+
+Apply the migration yourself (not done by the bot):
+
+```
+psql "$SUPABASE_DB_URL" -f migrations/0058_outside_purchases.sql
+```
 
 ## Director commands added
 
