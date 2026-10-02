@@ -73,7 +73,9 @@ STANDING_DEFAULT = frozenset({"roti", "capati", "gas"})
 CATERING_OUTLETS = frozenset({"Jakel"})
 
 # canonical purchase item -> POS dish base word (kitchen_usage mapping)
-POS_BASES = {"ayam": "ayam", "ikan": "ikan", "kambing": "kambing", "daging": "daging"}
+POS_BASES = {"ayam": "ayam", "ikan": "ikan", "kambing": "kambing", "daging": "daging",
+             # Chicken cuts sell as the same nasi kandar ayam dishes.
+             "ayam_leg": "ayam", "ayam_wing": "ayam", "ayam_isi": "ayam", "ayam_breast": "ayam"}
 
 REASON_CODES = ("stock", "order", "supplier", "other")
 REASON_LABELS = {

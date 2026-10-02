@@ -790,7 +790,9 @@ def cut_phrase(text: Any, canonical: str, outlet_words: str = "") -> str:
     resolves to the same item on its own.
     """
     try:
-        from shop_price_comparison import resolve_item_query
+        # The raw resolution, not the family one: "leg" alone is a cut of
+        # ayam (ayam_leg), so it stays in the phrase.
+        from shop_price_comparison import _resolve_item_query
 
         words = extract_item_text(text).split()
         outlet_tokens = set(_norm(outlet_words).split())
@@ -799,7 +801,7 @@ def cut_phrase(text: Any, canonical: str, outlet_words: str = "") -> str:
         for word in words:
             if word in outlet_tokens or word in item_tokens:
                 continue
-            if (resolve_item_query(word) or {}).get("canonical") == canonical:
+            if (_resolve_item_query(word) or {}).get("canonical") == canonical:
                 continue
             kept.append(word)
         return " ".join(kept)

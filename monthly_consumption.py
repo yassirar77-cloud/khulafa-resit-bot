@@ -33,6 +33,8 @@ import re
 from datetime import date
 from typing import Any
 
+from item_canonicalization_v2 import family_members, item_family
+
 logger = logging.getLogger(__name__)
 
 _ITEM_PRICES_TABLE = "item_prices"
@@ -53,6 +55,12 @@ TRACKED_CATEGORIES: dict[str, dict[str, str]] = {
     "udang": {"emoji": "🦐", "label": "Udang"},
     "ikan_bilis": {"emoji": "🐟", "label": "Ikan Bilis"},
 }
+
+
+def tracked_canonicals() -> list[str]:
+    """``item_prices.canonical_item`` values that count toward a tracked
+    category: the categories plus their cuts (ayam_leg, ayam_isi... -> ayam)."""
+    return family_members(TRACKED_CATEGORIES)
 
 # Mirrors shop_price_comparison: receipts that are NOT purchases from a
 # shop. Filter by what a receipt IS NOT — receipt_type defaults to
@@ -77,8 +85,9 @@ _WEIGHT_RE = re.compile(
 
 # Tokens that mark a line as counted per piece, not weighed. Checked only
 # when the name carries no explicit weight.
+# "whole" is a whole bird by the ekor; WHOLE LEG is a weighed cut.
 _UNIT_MARKER_RE = re.compile(
-    r"\b(ekor|whole|pcs?|pkts?|paket|packet|biji|ctn|carton|kotak|box|"
+    r"\b(ekor|whole(?!\s*leg)|pcs?|pkts?|paket|packet|biji|ctn|carton|kotak|box|"
     r"btl|botol|bottle|tin|can|tray|keping)\b",
     re.IGNORECASE,
 )
@@ -213,7 +222,7 @@ def load_month_rows(supabase_client, start_iso: str, end_iso: str) -> list[dict]
                 "canonical_item, raw_item_name, qty, line_total, "
                 "receipt_id, receipt_date, merchant"
             )
-            .in_("canonical_item", list(TRACKED_CATEGORIES))
+            .in_("canonical_item", tracked_canonicals())
             .gte("receipt_date", start_iso)
             .lte("receipt_date", end_iso)
         )
@@ -291,7 +300,7 @@ def aggregate_rows(rows: list[dict]) -> dict[str, dict]:
     for row in rows or []:
         if not isinstance(row, dict):
             continue
-        category = row.get("canonical_item")
+        category = item_family(row.get("canonical_item"))
         if category not in TRACKED_CATEGORIES:
             continue
         kg, units = estimate_line_kg(row.get("raw_item_name"), row.get("qty"))

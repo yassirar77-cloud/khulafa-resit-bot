@@ -125,6 +125,7 @@ def qty_by_day(item_rows: list[dict], outlet_code: str) -> dict:
     purchase lines (rows from ``overbuy_watch.load_item_rows``). Never
     raises."""
     try:
+        from item_canonicalization_v2 import item_family
         from kitchen_usage import outlets_match
         from monthly_consumption import TRACKED_CATEGORIES, estimate_line_kg
 
@@ -132,7 +133,8 @@ def qty_by_day(item_rows: list[dict], outlet_code: str) -> dict:
         for row in item_rows or []:
             if not isinstance(row, dict):
                 continue
-            if row.get("canonical_item") not in TRACKED_CATEGORIES:
+            category = item_family(row.get("canonical_item"))
+            if category not in TRACKED_CATEGORIES:
                 continue
             day = str(row.get("receipt_date") or "").strip()
             if not day:
@@ -141,7 +143,7 @@ def qty_by_day(item_rows: list[dict], outlet_code: str) -> dict:
                 continue
             kg, units = estimate_line_kg(row.get("raw_item_name"), row.get("qty"))
             bucket = out.setdefault(day, {}).setdefault(
-                row["canonical_item"], {"kg": 0.0, "units": 0.0}
+                category, {"kg": 0.0, "units": 0.0}
             )
             if kg is not None:
                 bucket["kg"] += kg
