@@ -326,7 +326,13 @@ OCR_PROMPT = (
     "Items: extract each line item separately. Put the product name in "
     "\"name\" and the numeric quantity in \"qty\" (e.g. name=\"Ayam\", qty=5). "
     "If the unit is non-numeric or part of the name (e.g. \"5kg\"), keep the "
-    "full descriptor in name and set qty to the count of units sold. If a "
+    "full descriptor in name and set qty to the count of units sold. "
+    "Weighed lines: when an item is priced per kg (chicken, meat, fish; "
+    "columns like \"KG / Qty\", \"Harga per kg\", a count followed by a "
+    "weight), set qty to the WEIGHT in kg that the unit price is multiplied "
+    "by (e.g. \"30 AYAM 47.2 11.50 542.80\" -> name=\"AYAM (30 ekor)\", "
+    "qty=47.2, price=11.50), never the count of birds or pieces. When a line "
+    "total is printed, also add it as \"total\" (number). If a "
     "field is unreadable, use null. Even single-line and ice/water-only "
     "receipts must use the dict shape — never collapse items to a list of "
     "bare strings. No markdown, no commentary, JSON only."
@@ -2006,7 +2012,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         from outlet_mapping import outlet_from_chat_title
 
         if receipt_id is not None:
-            price_records = classify_and_extract_items(parsed.get("items"))
+            price_records = classify_and_extract_items(
+                parsed.get("items"), _to_float(stored.get("total")), parsed.get("raw_text"))
             inserted = await asyncio.to_thread(
                 save_item_prices,
                 supabase,
@@ -2043,7 +2050,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         receipt_id = stored.get("id")
         if receipt_id is not None:
-            price_records = classify_and_extract_items(parsed.get("items"))
+            price_records = classify_and_extract_items(
+                parsed.get("items"), _to_float(stored.get("total")), parsed.get("raw_text"))
             spikes = await asyncio.to_thread(
                 detect_spikes,
                 supabase,

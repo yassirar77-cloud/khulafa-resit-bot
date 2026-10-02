@@ -3243,3 +3243,26 @@ def test_form_chase_job_sends_one_message_per_group(monkeypatch):
     group_msgs = [t for c, t in bot.sent if c == -100]
     assert len(group_msgs) == 1
     assert "2 borang belum siap" in group_msgs[0]
+
+
+def test_edit_form_message_logs_failures_and_keeps_going(caplog):
+    # A failed form edit is logged with its traceback instead of being
+    # swallowed; "message is not modified" stays quiet; nothing is raised.
+    import asyncio
+    import logging
+
+    class _Query:
+        def __init__(self, exc):
+            self.exc = exc
+
+        async def edit_message_text(self, text, **k):
+            raise self.exc
+
+    with caplog.at_level(logging.DEBUG, logger="kitchen_usage"):
+        asyncio.run(ku._edit_form_message(_Query(RuntimeError("Bad Request: chat not found")), "x", "numpad_commit"))
+        asyncio.run(ku._edit_form_message(
+            _Query(RuntimeError("Message is not modified: specified new message content")), "x", "numpad_open"))
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1
+    assert "numpad_commit" in errors[0].getMessage() and errors[0].exc_info
+    assert any(r.levelno == logging.DEBUG and "not modified" in r.getMessage() for r in caplog.records)

@@ -2701,6 +2701,22 @@ def _merge_entry(client, session_id, item_code, value, *, unset=False):
     return entries
 
 
+async def _edit_form_message(query, text: str, where: str, **kwargs) -> None:
+    """Edit the form message; log any failure instead of swallowing it.
+
+    Telegram's "message is not modified" (same text and keyboard) is harmless
+    and logged at debug. Every other error is logged with its traceback and
+    the bot carries on — a failed edit must never kill the callback handler.
+    """
+    try:
+        await query.edit_message_text(text, **kwargs)
+    except Exception as exc:
+        if "not modified" in str(exc).lower():
+            logger.debug("kitchen: %s edit skipped (message not modified)", where)
+            return
+        logger.exception("kitchen: %s edit_message_text failed", where)
+
+
 async def handle_kitchen_callback(update, context) -> None:
     """Single CallbackQueryHandler for everything under the ``kdu:`` namespace."""
     query = update.callback_query
@@ -2741,9 +2757,8 @@ async def handle_kitchen_callback(update, context) -> None:
     if session is None:
         with contextlib.suppress(Exception):
             await query.answer()
-        with contextlib.suppress(Exception):
-            await query.edit_message_text(
-                kitchen_texts.text("session_over", form_language(msg_chat)))
+        await _edit_form_message(
+            query, kitchen_texts.text("session_over", form_language(msg_chat)), "session_over")
         return
     lang = form_language(session.get("chat_id") or msg_chat, session.get("phase"))
     if session.get("status") == "submitted":
@@ -2807,10 +2822,11 @@ async def handle_kitchen_callback(update, context) -> None:
                 await query.message.reply_text(f"⚠️ {note}")
             return
         _clear_numpad_state(session_id)
-        with contextlib.suppress(Exception):
-            await query.edit_message_text(
-                kitchen_texts.short("saved", lang, title=form_title(phase, lang))
-                + f"\n{outlet_label} • {business_date}")
+        await _edit_form_message(
+            query,
+            kitchen_texts.short("saved", lang, title=form_title(phase, lang))
+            + f"\n{outlet_label} • {business_date}",
+            "saved")
         if phase == PHASE_LEFT and evaluations:
             # STAGE 1: usage-only save confirmation (no POS comparison at 02:00).
             summary = render_save_confirmation(outlet_label, business_date, evaluations, lang)
@@ -2839,11 +2855,12 @@ async def handle_kitchen_callback(update, context) -> None:
             _numpad_key(chat_id, user_id, session_id, item_code),
             {"buffer": "", "phase": phase},
         )
-        with contextlib.suppress(Exception):
-            await query.edit_message_text(
-                numpad_text(phase, meta["label"], unit, current, lang),
-                reply_markup=build_numpad_keyboard(session_id, item_code, unit, lang),
-            )
+        await _edit_form_message(
+            query,
+            numpad_text(phase, meta["label"], unit, current, lang),
+            "numpad_open",
+            reply_markup=build_numpad_keyboard(session_id, item_code, unit, lang),
+        )
         return
 
     # --- 🗑 Kosongkan: unset this item (wrong item tapped) and return to list ---
@@ -2852,11 +2869,12 @@ async def handle_kitchen_callback(update, context) -> None:
         entries = await asyncio.to_thread(
             _merge_entry, _supabase, session_id, item_code, None, unset=True
         )
-        with contextlib.suppress(Exception):
-            await query.edit_message_text(
-                form_text(phase, business_date, outlet_label, entries, outlet_code, lang),
-                reply_markup=build_item_keyboard(session_id, outlet_code, entries, phase, lang),
-            )
+        await _edit_form_message(
+            query,
+            form_text(phase, business_date, outlet_label, entries, outlet_code, lang),
+            "clear_item",
+            reply_markup=build_item_keyboard(session_id, outlet_code, entries, phase, lang),
+        )
         return
 
     # --- ✓ commit: read the in-memory buffer, persist the value to the DB ---
@@ -2872,11 +2890,12 @@ async def handle_kitchen_callback(update, context) -> None:
         )
         # The ONLY message edit in the numpad flow — back to the item list.
         t_edit = time.monotonic()
-        with contextlib.suppress(Exception):
-            await query.edit_message_text(
-                form_text(phase, business_date, outlet_label, entries, outlet_code, lang),
-                reply_markup=build_item_keyboard(session_id, outlet_code, entries, phase, lang),
-            )
+        await _edit_form_message(
+            query,
+            form_text(phase, business_date, outlet_label, entries, outlet_code, lang),
+            "numpad_commit",
+            reply_markup=build_item_keyboard(session_id, outlet_code, entries, phase, lang),
+        )
         logger.info("kitchen numpad ✓ commit %s=%r: edit %.0fms",
                     item_code, value, (time.monotonic() - t_edit) * 1000)
         return

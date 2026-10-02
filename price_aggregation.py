@@ -21,6 +21,7 @@ import logging
 from typing import Any
 
 from item_canonicalization_v2 import canonicalize_item
+from items_utils import resolve_weighed_lines
 import price_sanity
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ def _is_numeric(value: Any) -> bool:
 
 
 def classify_and_extract_items(
-    items: list[dict], receipt_total: float | None = None
+    items: list[dict], receipt_total: float | None = None, raw_text: str | None = None
 ) -> list[dict]:
     """Build per-item price records from a normalized items list.
 
@@ -51,11 +52,16 @@ def classify_and_extract_items(
     or with blank ``name`` are also dropped. Returns ``[]`` for any
     non-list input. Never raises.
 
-    ``receipt_total`` is accepted for forward-compatibility (PR #24 may
-    use it for reconciliation) but is not consulted today.
+    Items first go through ``items_utils.resolve_weighed_lines``: alternative
+    OCR keys (description / quantity / unit_price / total) are mapped, the
+    embedded "x30 RM11.5" form is parsed, and per-kg lines (chicken, meat,
+    fish) get qty = weight sold, using the line total, a weight in the name,
+    or — when the bill total says the lines as read are wrong — the
+    "price  line-total" columns of ``raw_text``.
     """
     if not isinstance(items, list):
         return []
+    items = resolve_weighed_lines(items, raw_text, receipt_total)
     out: list[dict] = []
     for item in items:
         if not isinstance(item, dict):

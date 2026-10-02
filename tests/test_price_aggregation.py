@@ -463,3 +463,97 @@ class SanityGate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WeighedLineTests(unittest.TestCase):
+    """AYAM BERLIAN invoices: per-kg lines must carry the weight as qty.
+    The five production bills below all add up to their printed total once
+    weights are used (they did not before)."""
+
+    def _sum(self, records):
+        return round(sum(r["line_total"] for r in records), 2)
+
+    def test_9970_counts_in_name_weights_in_raw_text(self):
+        items = [{"qty": None, "name": "AYAM x30 RM11.5", "price": None},
+                 {"qty": None, "name": "AYAM Tandori x10 RM11.5", "price": None},
+                 {"qty": None, "name": "W.LEG / WING / DRUMSTICK / THIGH x80 RM11.7", "price": None},
+                 {"qty": None, "name": "ISI / MINCED / CHOP / FILLET / B.LEG x4 RM12.2", "price": None}]
+        raw = ("Kuantiti Quantity Butiran Particulars KG / Qty Harga U.Price Jumlah (RM) Total (RM) "
+               "30 AYAM 47 11.50 540.50 AYAM 10 AYAM Tandori 16.6 11.50 190.90 W.LEG / WING / DRUMSTICK / "
+               "THIGH 22.7 11.70 265.59 W.LEG 1P ISI / MINCED / CHOP / FILLET / B.LEG 4kg 12.20 48.80 "
+               "Total Jumlah 1045.79")
+        recs = classify_and_extract_items(items, 1045.79, raw)
+        self.assertEqual([r["qty"] for r in recs], [47.0, 16.6, 22.7, 4.0])
+        self.assertEqual(self._sum(recs), 1045.79)
+
+    def test_9931_weight_in_name(self):
+        items = [{"qty": None, "name": "AYAM (47.2 KG) RM11.50", "price": None},
+                 {"qty": None, "name": "AYAM Tandori (15.10 KG) RM11.50", "price": None},
+                 {"qty": None, "name": "W.LFG / WING / DRUMSTICK / THIGH (11.30 KG) RM11.70", "price": None},
+                 {"qty": None, "name": "IF / MINCED / CHOP / FILLET / B.LEG (8kg) RM12.20", "price": None}]
+        recs = classify_and_extract_items(items, 946.26)
+        self.assertEqual([(r["qty"], r["unit_price"]) for r in recs],
+                         [(47.2, 11.5), (15.1, 11.5), (11.3, 11.7), (8.0, 12.2)])
+        self.assertEqual(self._sum(recs), 946.26)
+        self.assertEqual(recs[0]["canonical_item"], "ayam")
+
+    def test_9913_counts_with_bad_date_line(self):
+        items = [{"qty": None, "name": "AYAM x50 RM11.5", "price": None},
+                 {"qty": None, "name": "W.LEG / WING / DRUMSTICK / THIGH x80 RM11.7", "price": None},
+                 {"qty": None, "name": "ISI / MINCED / CHOP / FILLET / B.LEG x2 RM12.2", "price": None}]
+        raw = ("TEL: 014 648 7622 TARIKH: 30/18/2020 KG / Qty Harga U.Price Jumlah (RM) Total (RM) "
+               "50 AYAM 79.6 11.50 915.40 AYAM AYAM 80 W.LEG / WING / DRUMSTICK / THIGH 22.1 11.70 258.57 "
+               "W.LEG 2p ISI / MINCED 4kg 12.20 48.80 ISI Total Jumlah 1222.77")
+        recs = classify_and_extract_items(items, 1222.77, raw)
+        self.assertEqual([r["qty"] for r in recs], [79.6, 22.1, 4.0])
+        self.assertEqual(self._sum(recs), 1222.77)
+
+    def test_9866_alternative_keys(self):
+        items = [{"total": 143.91, "quantity": "12.3kg", "unit_price": 11.7,
+                  "description": "W.LEG / WING / DRUMSTICK / THIGH"},
+                 {"total": 97.6, "quantity": "8kg", "unit_price": 12.2,
+                  "description": "W.LEG / WING / DRUMSTICK / THIGH / MINCED / CHOP / FILLET / B.LEG"}]
+        recs = classify_and_extract_items(items, 241.51)
+        self.assertEqual([(r["raw_item_name"][:6], r["qty"], r["unit_price"]) for r in recs],
+                         [("W.LEG ", 12.3, 11.7), ("W.LEG ", 8.0, 12.2)])
+        self.assertEqual(self._sum(recs), 241.51)
+
+    def test_9788_bird_counts_replaced_by_weights(self):
+        items = [{"qty": 50, "name": "AYAM", "price": 11.5}, {"qty": 10, "name": "AYAM Tandoori", "price": 11.5},
+                 {"qty": 120, "name": "W.LEG / WING / DRUMSTICK / THIGH", "price": 11.7},
+                 {"qty": 29, "name": "ISI / MINCED / CHOP / FILLET / B.LEG", "price": 12.2}]
+        # OCR misread 403.65 as 402.65 on the third line; weight x price wins.
+        raw = ("KG / Qty Harga U.Price Jumlah (RM) Total (RM) 50 AYAM 80.5. 11.50 925.75 AYAM 10 AYAM Tandoori "
+               "15.0 11.50 172.50 120 W.LEG / WING / DRUMSTICK / THIGH 34.50 11.70 402.65 W.LEG 29 ISI / MINCED "
+               "/ CHOP / FILLET / B.LEG 440 12.20 48.80 ISI Total Jumlah 1550.70")
+        recs = classify_and_extract_items(items, 1550.70, raw)
+        self.assertEqual([r["qty"] for r in recs], [80.5, 15.0, 34.5, 4.0])
+        self.assertEqual(self._sum(recs), 1550.70)
+
+    def test_2504_invoice_layout_qty_price_weight_total(self):
+        # Vista invoice prints "Qty U/Price Weight Total"; the order count (30)
+        # happens to land within 5% of the bill, but the weight column is exact.
+        items = [{"qty": 30, "name": "AYAM BERSIH", "price": 11.7}, {"qty": 10, "name": "AYAM BERSIH", "price": 11.7},
+                 {"qty": 40, "name": "WHOLE LEG", "price": 11.9}, {"qty": 2, "name": "ISI AYAM", "price": 10.1}]
+        raw = ("Item Description Qty U/ Price Weight Disc. Total RM (KG) RM 1. AYAM BERSIH 30 11.70 50.00 585.00 "
+               "2. AYAM BERSIH 10 11.70 14.90 174.33 3. WHOLE LEG 40 11.90 12.50 148.75 "
+               "4. ISI AYAM 2 10.10 4.00 40.40 Total 948.48")
+        recs = classify_and_extract_items(items, 948.48, raw)
+        self.assertEqual([r["qty"] for r in recs], [50.0, 14.9, 12.5, 4.0])
+        self.assertEqual(self._sum(recs), 948.48)
+
+    def test_pack_sizes_and_matching_bills_untouched(self):
+        items = [{"name": "Santan 1 kg", "qty": 3, "price": 6.0}, {"name": "MINYAK 5KG", "qty": 5, "price": 29.0},
+                 {"name": "Ikan Kembung (1 KG)", "qty": 3, "price": 10.0}]
+        recs = classify_and_extract_items(items, 193.0, "Santan 1 kg 3 6.00 18.00 MINYAK 5KG 5 29.00 145.00")
+        self.assertEqual([r["qty"] for r in recs], [3.0, 5.0, 3.0])
+        # No bill total: a present qty is never second-guessed.
+        recs = classify_and_extract_items([{"name": "AYAM", "qty": 30, "price": 11.5}], None,
+                                          "30 AYAM 47 11.50 540.50")
+        self.assertEqual(recs[0]["qty"], 30.0)
+
+    def test_raw_text_correction_must_reach_the_total(self):
+        # Columns that don't add up to the bill are not trusted.
+        items = [{"qty": 30, "name": "AYAM", "price": 11.5}]
+        recs = classify_and_extract_items(items, 999.0, "30 AYAM 47 11.50 540.50")
+        self.assertEqual(recs[0]["qty"], 30.0)
