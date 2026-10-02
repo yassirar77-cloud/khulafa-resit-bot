@@ -217,6 +217,23 @@ class SaveItemPrices(unittest.TestCase):
             },
         ]
 
+    def test_undated_bill_gets_the_upload_day(self):
+        # Reports filter item_prices by receipt_date; a NULL date dropped the
+        # bill from all of them. The rows now carry the Malaysia upload day.
+        import price_aggregation
+
+        client = FakeSupabaseClient()
+        orig = price_aggregation._upload_day_my
+        price_aggregation._upload_day_my = lambda: "2026-10-02"
+        try:
+            count = save_item_prices(client, receipt_id=9, receipt_date=None, outlet_code="SEK6",
+                                     chat_id=-1, merchant="BESTARI FARM", price_records=self._records(),
+                                     check_history=False)
+        finally:
+            price_aggregation._upload_day_my = orig
+        self.assertEqual(count, 2)
+        self.assertEqual({r["receipt_date"] for r in client.last_insert_payload}, {"2026-10-02"})
+
     def test_inserts_rows_into_item_prices(self):
         client = FakeSupabaseClient()
         count = save_item_prices(

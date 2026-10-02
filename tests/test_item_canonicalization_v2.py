@@ -250,6 +250,8 @@ class ChickenCutTests(unittest.TestCase):
             "W.LEG / WING / DRUMSTICK / THIGH": "ayam_leg",
             "W.LFG / WING / DRUMSTICK / THIGH": "ayam_leg",
             "ISI AYAM": "ayam_isi",
+            "Isi Ayam 4 kg": "ayam_isi",
+            "isi Ayam 1kg": "ayam_isi",
             "ISI / MINCED / CHOP / FILLET / B.LEG": "ayam_isi",
             "IF / MINCED / CHOP / FILLET / B.LEG": "ayam_isi",
             "CHICKEN WING": "ayam_wing",

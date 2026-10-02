@@ -246,6 +246,19 @@ def _outlet_spending_week(client, now_my, limit=TOP_N) -> list:
         .lte("receipt_date", end)
         .execute()
     )
+    # Undated bills count on their upload day (Malaysia), not nowhere.
+    try:
+        rows += _rows(
+            client.table(RECEIPTS_TABLE)
+            .select("outlet, total, receipt_date")
+            .eq("receipt_type", SUPPLIER_PURCHASE)
+            .is_("receipt_date", "null")
+            .gte("created_at", f"{start}T00:00:00+08:00")
+            .lte("created_at", f"{end}T23:59:59.999999+08:00")
+            .execute()
+        )
+    except Exception:
+        logger.warning("digest: undated-receipt fallback read failed", exc_info=True)
     by: dict = {}
     for r in rows:
         raw = r.get("outlet")
