@@ -1812,11 +1812,22 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # `merchant` field but a sparse `raw_text` that omits the header,
     # which caused 132+ EVEREST/MYMOON/BABAS receipts to be mis-classified
     # as UNKNOWN because the whitelist never saw the merchant name.
+    # Shadow-week fix: a bill from an approved supplier or one of this
+    # outlet's active known merchants is a SUPPLIER_PURCHASE (price history,
+    # Pinpoint and the overbuy check all run on it). The lists come from the
+    # Pinpoint config, cached for two minutes.
+    try:
+        pinpoint_config = await asyncio.to_thread(outside_purchase.cached_config, supabase)
+        classifier_suppliers = outside_purchase.classifier_suppliers(pinpoint_config, outlet)
+    except Exception:
+        logger.exception("classifier: could not load supplier lists")
+        classifier_suppliers = None
     classification = classify_receipt(
         ocr_text=parsed.get("raw_text") or "",
         parsed_items=parsed.get("items"),
         total=_to_float(parsed.get("total")),
         merchant=parsed.get("merchant"),
+        suppliers=classifier_suppliers,
     )
 
     user = update.effective_user

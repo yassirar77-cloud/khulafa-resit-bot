@@ -112,6 +112,9 @@ RENT_LICENSE_KEYWORDS = [
 PETTY_CASH_KEYWORDS = [
     "RUNNER",
     "TAMBANG",
+    # Short tokens (<= 4 letters) match on word boundaries only — "TOL"
+    # used to fire on every "BOTOL" (bottle) line and routed drinks and
+    # fruit bills to petty cash.
     "TOL",
     "PARKING",
     "MINYAK KERETA",
@@ -119,8 +122,56 @@ PETTY_CASH_KEYWORDS = [
     "SHELL",
     "PETRONAS",
     "CALTEX",
+    "PETRON",
+    # Delivery runners and e-wallet reloads stay petty cash (shadow-week
+    # fix): never stock, never a Pinpoint question.
+    "LALAMOVE",
+    "TOUCH 'N GO",
+    "TOUCH N GO",
+    "TNG",
 ]
 PETTY_CASH_MAX_TOTAL = 200.0
+
+# Fuel lines. A bill made only of these is petty cash whatever the total
+# (a lorry fill can pass RM200). Covers pump products as printed on
+# Petronas / Shell / Caltex / Petron / BHP slips: "Primax 95", "Diesel
+# Euro (B10/B20)", "E5 B10 Tec 12.285L @ 4.070", "FuelSave 95", "FS
+# Diesel", "V-Power 97", "RON95". LPG cylinders ("Petronas 14kg –
+# Filled", "Silinder Bergas") are gas, not fuel, and never match.
+FUEL_LINE_RE = re.compile(
+    r"(\b(?:E5|E10|B7|B10|B20|RON\s?9[57]|DIESEL|PETROL|PRIMAX|V-?POWER|FUEL\s?SAVE|"
+    r"FS\s+DIESEL|DYNAMIC\s+DIESEL|BLAZE\s?9[57]|TECHRON|EURO\s?5|MINYAK\s+(?:KERETA|DIESEL|PETROL))\b"
+    r"|\d+(?:\.\d+)?\s?L(?:TR|ITER|ITRE)?\b\s*@)",
+    re.IGNORECASE,
+)
+_GAS_LINE_RE = re.compile(r"(\bLPG\b|\bGAS\b|BERGAS|SILINDER|CYLINDER|\d+\s?KG\b)", re.IGNORECASE)
+FUEL_BRANDS = ("PETRONAS", "SHELL", "CALTEX", "PETRON", "BHP")
+
+# Stock words that make a bill a purchase even when a petty-cash keyword
+# also appears: drinks, fruit, meat, dairy, bottles. Checked against the
+# item names only (not the OCR body), so a shop address never counts.
+STOCK_HINT_RE = re.compile(
+    r"\b(?:BOTOL|BOTTLE|AIR\b|DRINK|JUS|JUICE|SIRAP|SYRUP|SODA|MILO|TEH|KOPI|"
+    r"BUAH|HONEYDEW|TEMBIKAI|MELON|NENAS|NANAS|MANGGA|JAMBU|NAGA|PISANG|EPAL|OREN|ANGGUR|LIMAU|"
+    r"DAGING|AYAM|KAMBING|IKAN|UDANG|SOTONG|BEEF|CHICKEN|MUTTON|FISH|"
+    r"SUSU|MILK|YOGURT|YOGHURT|KEJU|CHEESE|MENTEGA|BUTTER|TELUR|EGG)\w*",
+    re.IGNORECASE,
+)
+
+# Business suffixes: a merchant carrying one is a shop, so a bare
+# "ADVANCE" in its name is a brand word, not a staff advance.
+BUSINESS_WORDS_RE = re.compile(
+    r"\b(?:ENTERPRISE|ENTERPRISES|SHOP|SDN|BHD|BERHAD|TRADING|ACCESSORIES|STORE|MART|KEDAI|"
+    r"RESOURCES|HOLDINGS|PLT|MARKETING|INDUSTRIES|SUPPLY|SUPPLIES|RESTORAN|RESTAURANT|CAFE)\b",
+    re.IGNORECASE,
+)
+# Context that turns "ADVANCE" into a staff payment.
+ADVANCE_CONTEXT_RE = re.compile(
+    r"(SALAR[YVI]|\bGAJI\b|\bSTAFF?\b|\bPEKERJA\b|VOUCHER|BAUCAR|BAUCER|\bFORM\b|BORANG|"
+    r"REQUEST|REQUIREMENT|\bPINJAM|PAYOUT|\bLOAN\b|\bCASH\b|\bUPAH\b|\bWAGES?\b)",
+    re.IGNORECASE,
+)
+_ADVANCE_RE = re.compile(r"\bADVAN[CS]E?S?\b", re.IGNORECASE)
 
 # Strict whitelist for SUPPLIER_PURCHASE — case-insensitive substring
 # match on the merchant header or combined OCR text. This is the ONLY
@@ -191,11 +242,106 @@ def _build_combined_text(
                     parts.append(str(name))
             elif it:
                 parts.append(str(it))
-    return " ".join(parts).upper()
+    text = " ".join(parts).upper()
+    # Malaysian e-invoices print "LHDN VALIDATED LINK" in the footer of every
+    # supplier invoice — that is the tax office's stamp, not a payment to it.
+    return _EINVOICE_FOOTER_RE.sub(" ", text)
+
+
+_EINVOICE_FOOTER_RE = re.compile(r"LHDN\s+VALIDATED(?:\s+LINK)?(?:\s+PAGE)?")
+_SHORT_KEYWORD_LEN = 4
+
+
+def _keyword_in(kw: str, text: str) -> bool:
+    """Substring match, except that short tokens (<= 4 letters: TOL, TNB,
+    LHDN, MBSA, KWSP, LOAN, SEWA...) must stand as whole words — "TOL" in
+    "BOTOL" and "SEWA" inside an address are not matches."""
+    if len(kw) <= _SHORT_KEYWORD_LEN and kw.isalnum():
+        return re.search(r"(?<![A-Z0-9])" + re.escape(kw) + r"(?![A-Z0-9])", text) is not None
+    return kw in text
 
 
 def _find_keywords(text: str, keywords: Iterable[str]) -> list[str]:
-    return [kw for kw in keywords if kw in text]
+    return [kw for kw in keywords if _keyword_in(kw, text)]
+
+
+def _item_names(parsed_items: Optional[Iterable[Any]]) -> list[str]:
+    names: list[str] = []
+    for it in parsed_items or []:
+        if isinstance(it, dict):
+            name = it.get("name") or it.get("item") or it.get("description")
+        else:
+            name = it
+        if isinstance(name, str) and name.strip():
+            names.append(name.strip())
+    return names
+
+
+def is_fuel_line(name: Any) -> bool:
+    """Pump fuel line (petrol / diesel / E5 / B10 / RON95 / Primax / V-Power
+    / FuelSave...). LPG cylinders are gas, not fuel."""
+    text = str(name or "")
+    if not text or _GAS_LINE_RE.search(text):
+        return False
+    return FUEL_LINE_RE.search(text) is not None
+
+
+def is_fuel_bill(parsed_items: Optional[Iterable[Any]], merchant: Optional[str] = None) -> bool:
+    """Every item line is fuel (at least one line). A fuel-brand merchant
+    with a single unparsed line is fuel too, unless that line is gas."""
+    names = _item_names(parsed_items)
+    if not names:
+        return False
+    if all(is_fuel_line(n) for n in names):
+        return True
+    brand = any(b in str(merchant or "").upper() for b in FUEL_BRANDS)
+    return brand and len(names) == 1 and not _GAS_LINE_RE.search(names[0]) \
+        and not STOCK_HINT_RE.search(names[0])
+
+
+def has_stock_items(parsed_items: Optional[Iterable[Any]]) -> bool:
+    """Any item line that reads as stock (drinks, fruit, meat, dairy,
+    bottles, or anything the canonical item list knows); fuel, transport
+    and LPG gas excluded."""
+    names = _item_names(parsed_items)
+    if not names:
+        return False
+    try:
+        from item_canonicalization_v2 import canonicalize_item
+    except Exception:  # pragma: no cover - defensive
+        canonicalize_item = None
+    for name in names:
+        if is_fuel_line(name):
+            continue
+        if STOCK_HINT_RE.search(name):
+            return True
+        if canonicalize_item is not None:
+            canon = canonicalize_item(name).get("canonical")
+            # LPG cylinders stay on the petty-cash path (gas is an allowed
+            # outside item, and most LPG slips carry no merchant line).
+            if canon and canon not in ("fuel", "transport", "gas"):
+                return True
+    return False
+
+
+def advance_is_staff(text: Any, merchant: Any = None) -> bool:
+    """Does an ADVANCE / ADVANS mention mean a staff advance?
+
+    Only with payroll context (SALARY, GAJI, STAF/STAFF, voucher or form
+    words, PINJAM, PAYOUT, CASH) or a person's name after it, and never
+    when the merchant is a business (ENTERPRISE, SHOP, SDN BHD, TRADING,
+    ACCESSORIES...). "ADVANCES ACCESSORIES SHOP" and "ADVANCE ENTERPRISE"
+    are shops; "SALARY ADVANCE REQUIREMENT FORM" and "ADVANCE KUMAR" are
+    staff payments."""
+    body = str(text or "")
+    if not _ADVANCE_RE.search(body):
+        return False
+    if merchant and BUSINESS_WORDS_RE.search(str(merchant)):
+        return False
+    if ADVANCE_CONTEXT_RE.search(body):
+        return True
+    name = extract_staff_name(body)
+    return bool(name) and not BUSINESS_WORDS_RE.search(name)
 
 
 # Patterns for `TO PINJAM TO <NAME>`, `PINJAM <NAME>`, `ADVANCE <NAME>`,
@@ -286,9 +432,25 @@ def _match_keywords_in_merchant(
         return None
     upper = str(merchant).upper()
     for kw in keywords:
-        if kw in upper:
+        if _keyword_in(kw, upper):
             return kw
     return None
+
+
+def match_known_supplier(merchant: Optional[str], suppliers) -> Optional[str]:
+    """Approved supplier or active known merchant (``outside_purchase``
+    rows: canonical_name / aliases / active) that ``merchant`` resolves to,
+    else None. Uses the Pinpoint matcher so one spelling tolerance applies
+    everywhere. Never raises."""
+    if not merchant or not suppliers:
+        return None
+    try:
+        from outside_purchase import APPROVED, match_supplier
+        result = match_supplier(merchant, suppliers)
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("match_known_supplier failed")
+        return None
+    return result.get("supplier") if result.get("decision") == APPROVED else None
 
 
 def _match_supplier_whitelist_in_merchant(merchant: Optional[str]) -> Optional[str]:
@@ -316,6 +478,7 @@ def classify_receipt(
     parsed_items: Optional[list[dict]] = None,
     total: Optional[float] = None,
     merchant: Optional[str] = None,
+    suppliers=None,
 ) -> ClassificationResult:
     """Classify a receipt into one of the ReceiptType buckets.
 
@@ -370,6 +533,10 @@ def classify_receipt(
 
     # --- 1. STAFF_ADVANCE ---
     matched = _find_keywords(text, STAFF_ADVANCE_KEYWORDS)
+    # "ADVANCE" alone is a shop's brand word unless payroll context or a
+    # staff name goes with it (shadow-week fix 4).
+    if matched and not advance_is_staff(text, merchant):
+        matched = [kw for kw in matched if kw not in ("ADVANCE", "ADVANS")]
     if matched:
         staff_name = extract_staff_name(text)
         issued_by = extract_issued_by(text)
@@ -410,6 +577,29 @@ def classify_receipt(
             extracted_vendor=kw,
         )
 
+    # --- 4b. PETTY_CASH: fuel-only bills, runners, e-wallet reloads ---
+    # Before the known-merchant rule so a Petronas pump slip at an outlet
+    # that buys its LPG from Petronas stays petty cash. No total cap on fuel.
+    elif is_fuel_bill(parsed_items, merchant):
+        result = ClassificationResult(
+            receipt_type=ReceiptType.PETTY_CASH,
+            confidence=0.90,
+            matched_keywords=["FUEL"],
+            extracted_vendor=(merchant or "FUEL"),
+        )
+
+    # --- 4c. SUPPLIER_PURCHASE: approved supplier or active known merchant ---
+    # Pinpoint's merchant lists (approved_suppliers + outlet_known_merchants
+    # for this outlet). Anything they recognise is a purchase, so price
+    # aggregation, Pinpoint and the overbuy check all run on it.
+    elif (supplier := match_known_supplier(merchant, suppliers)):
+        result = ClassificationResult(
+            receipt_type=ReceiptType.SUPPLIER_PURCHASE,
+            confidence=0.90,
+            matched_keywords=["KNOWN_MERCHANT"],
+            extracted_vendor=supplier,
+        )
+
     # --- 5. UTILITY (haystack fallback) ---
     elif (matched := _find_keywords(text, UTILITY_KEYWORDS)):
         logger.info("classify_receipt utility match: tier=haystack kw=%s", matched[0])
@@ -431,16 +621,26 @@ def classify_receipt(
         )
 
     # --- 7. PETTY_CASH ---
+    # A petty-cash keyword with stock lines on the bill (drinks, fruit, meat,
+    # dairy, bottles) is a purchase: Pinpoint and the overbuy check must see it.
     elif (
         (matched := _find_keywords(text, PETTY_CASH_KEYWORDS))
         and (total is None or total < PETTY_CASH_MAX_TOTAL)
     ):
-        result = ClassificationResult(
-            receipt_type=ReceiptType.PETTY_CASH,
-            confidence=0.90,
-            matched_keywords=matched,
-            extracted_vendor=matched[0],
-        )
+        if has_stock_items(parsed_items):
+            result = ClassificationResult(
+                receipt_type=ReceiptType.SUPPLIER_PURCHASE,
+                confidence=0.80,
+                matched_keywords=["STOCK_ITEMS"] + matched,
+                extracted_vendor=merchant,
+            )
+        else:
+            result = ClassificationResult(
+                receipt_type=ReceiptType.PETTY_CASH,
+                confidence=0.90,
+                matched_keywords=matched,
+                extracted_vendor=matched[0],
+            )
 
     # --- 8. SUPPLIER_PURCHASE (combined-haystack whitelist fallback) ---
     #

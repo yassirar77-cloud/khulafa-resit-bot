@@ -936,3 +936,146 @@ class UtilityKeywordTighteningTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ShadowWeekRoutingTests(unittest.TestCase):
+    """Shadow-week fixes: known merchants, fuel, stock items, short keywords,
+    e-invoice footers and the ADVANCE rule."""
+
+    SUPPLIERS = [
+        {"canonical_name": "BABAS", "aliases": ["BABAS PRODUCTS SDN BHD"], "active": True},
+        {"canonical_name": "PVS SANTAN MAJU ENTERPRISE", "aliases": [], "active": True},
+        {"canonical_name": "99 SPEED MART SDN. BHD.", "aliases": [], "active": False},
+    ]
+
+    def test_known_merchant_is_supplier_purchase(self):
+        r = classify_receipt("PVS SANTAN MAJU ENTERPRISE ... Santan 1kg 3 x 6.00",
+                             parsed_items=[{"name": "Santan 1 kg", "qty": 3, "price": 6.0}],
+                             total=18.0, merchant="PVS SANTAN MAJU ENTERPRISE", suppliers=self.SUPPLIERS)
+        self.assertEqual(r.receipt_type, ReceiptType.SUPPLIER_PURCHASE)
+        self.assertEqual(r.extracted_vendor, "PVS SANTAN MAJU ENTERPRISE")
+        self.assertIn("KNOWN_MERCHANT", r.matched_keywords)
+
+    def test_deactivated_known_merchant_stays_unknown(self):
+        r = classify_receipt("99 SPEED MART SDN. BHD. ... MILO 1KG 12.90",
+                             parsed_items=[{"name": "MILO 1KG", "qty": 1, "price": 12.9}],
+                             total=12.9, merchant="99 SPEED MART SDN. BHD.", suppliers=self.SUPPLIERS)
+        self.assertEqual(r.receipt_type, ReceiptType.UNKNOWN)
+
+    def test_no_supplier_list_keeps_old_behaviour(self):
+        r = classify_receipt("PVS SANTAN MAJU ENTERPRISE", parsed_items=[{"name": "Santan", "qty": 1, "price": 6.0}],
+                             total=6.0, merchant="PVS SANTAN MAJU ENTERPRISE")
+        self.assertEqual(r.receipt_type, ReceiptType.UNKNOWN)
+
+    def test_fuel_lines_are_petty_cash_whatever_the_total(self):
+        for name in ("E5 B10 Tec 12.285L @ 4.070 R", "Diesel Euro (B10/B20)", "Primax 95", "FS Diesel",
+                     "FuelSave 95 x13.812 RM3.620/L", "V-Power 97", "RON95", "RON 97 10.5L @ 3.47"):
+            r = classify_receipt("", parsed_items=[{"name": name, "qty": None, "price": None}],
+                                 total=250.0, merchant="CL WARISAN SYUKUR SDN BHD", suppliers=self.SUPPLIERS)
+            self.assertEqual(r.receipt_type, ReceiptType.PETTY_CASH, name)
+        for brand in ("CALTEX", "PETRONAS", "SHELL"):
+            r = classify_receipt("", parsed_items=[{"name": "Primax 95", "qty": 1, "price": 50.0}],
+                                 total=50.0, merchant=brand)
+            self.assertEqual(r.receipt_type, ReceiptType.PETTY_CASH, brand)
+
+    def test_lpg_from_known_petronas_is_a_purchase_not_fuel(self):
+        suppliers = self.SUPPLIERS + [{"canonical_name": "PETRONAS", "aliases": [], "active": True}]
+        r = classify_receipt("PETRONAS ... Petronas 14kg – Filled 20 x 27.00",
+                             parsed_items=[{"name": "Petronas 14kg – Filled", "qty": 20, "price": 27.0}],
+                             total=540.0, merchant="PETRONAS", suppliers=suppliers)
+        self.assertEqual(r.receipt_type, ReceiptType.SUPPLIER_PURCHASE)
+        r = classify_receipt("PETRONAS ... Primax 95 RM50", parsed_items=[{"name": "Primax 95", "qty": None, "price": None}],
+                             total=50.0, merchant="PETRONAS", suppliers=suppliers)
+        self.assertEqual(r.receipt_type, ReceiptType.PETTY_CASH)
+
+    def test_lalamove_and_touch_n_go_stay_petty_cash(self):
+        r = classify_receipt("LALAMOVE ... Delivery fee 16.30", parsed_items=[{"name": "Delivery fee", "qty": None, "price": None}],
+                             total=16.3, merchant="LALAMOVE", suppliers=self.SUPPLIERS)
+        self.assertEqual(r.receipt_type, ReceiptType.PETTY_CASH)
+        r = classify_receipt("TOUCH 'N GO ... Reload 10.00", parsed_items=[{"name": "Touch 'n Go Reload", "qty": 1, "price": 10.0}],
+                             total=10.0, merchant="TOUCH 'N GO", suppliers=self.SUPPLIERS)
+        self.assertEqual(r.receipt_type, ReceiptType.PETTY_CASH)
+
+    def test_botol_is_not_tol(self):
+        # "TOL" used to substring-match "BOTOL": drinks and fruit became petty cash.
+        r = classify_receipt("GOLDCREST MARKETING SDN BHD", merchant="GOLDCREST MARKETING SDN BHD", total=108.0,
+                             parsed_items=[{"name": "250ml Botol Boy Apple", "qty": 24, "price": 2.25}])
+        self.assertNotEqual(r.receipt_type, ReceiptType.PETTY_CASH)
+        r = classify_receipt("PLUS ... TOL 3.20", parsed_items=[{"name": "TOL", "qty": 1, "price": 3.2}], total=3.2)
+        self.assertEqual(r.receipt_type, ReceiptType.PETTY_CASH)
+
+    def test_stock_items_beat_a_petty_cash_keyword(self):
+        # A runner keyword on a bill full of fruit: it is a purchase, so
+        # Pinpoint and the overbuy check must see it.
+        r = classify_receipt("SWEETI FREEZE ENTERPRISE RUNNER", merchant="SWEETI FREEZE ENTERPRISE", total=189.1,
+                             parsed_items=[{"name": "Honeydew", "qty": 1, "price": 30.0}, {"name": "Jambu Botol", "qty": 4, "price": 30.0}])
+        self.assertEqual(r.receipt_type, ReceiptType.SUPPLIER_PURCHASE)
+        self.assertIn("STOCK_ITEMS", r.matched_keywords)
+        r = classify_receipt("DAIRY FRESH SDN BHD PARKING", merchant="DAIRY FRESH SDN BHD", total=28.0,
+                             parsed_items=[{"name": "Yogurt 1kg", "qty": 4, "price": 7.0}])
+        self.assertEqual(r.receipt_type, ReceiptType.SUPPLIER_PURCHASE)
+        r = classify_receipt("NURUN HOLDINGS SDN BHD", merchant="NURUN HOLDINGS SDN BHD", total=110.0,
+                             parsed_items=[{"name": "DAGING TOLKSIDIE", "qty": None, "price": None}])
+        self.assertNotEqual(r.receipt_type, ReceiptType.PETTY_CASH)
+
+    def test_einvoice_footer_is_not_lhdn(self):
+        # Every Malaysian e-invoice ends with "LHDN VALIDATED LINK": 100
+        # AYAM BERLIAN chicken invoices were logged as rent/licence.
+        text = ("DELIVERY ORDER / INVOICE NO:385384 AYAM BERLIAN SDN BHD (798175-M) PEMBORONG DAN PERUNCIT "
+                "AYAM SEGAR SHAH ALAM SELANGOR LHDN VALIDATED LINK PAGE 1 OF 1")
+        r = classify_receipt(text, parsed_items=[{"name": "AYAM", "qty": 47, "price": 11.5}], total=540.5,
+                             merchant="AYAM BERLIAN SDN BHD")
+        self.assertEqual(r.receipt_type, ReceiptType.UNKNOWN)
+        r = classify_receipt(text, parsed_items=[{"name": "AYAM", "qty": 47, "price": 11.5}], total=540.5,
+                             merchant="AYAM BERLIAN SDN BHD",
+                             suppliers=[{"canonical_name": "AYAM BERLIAN SDN BHD", "aliases": [], "active": True}])
+        self.assertEqual(r.receipt_type, ReceiptType.SUPPLIER_PURCHASE)
+        # A real LHDN payment still routes by its merchant header.
+        r = classify_receipt("LHDN ... CUKAI PENDAPATAN", merchant="LHDN", total=1200.0)
+        self.assertEqual(r.receipt_type, ReceiptType.RENT_LICENSE)
+
+    def test_short_keywords_need_word_boundaries(self):
+        r = classify_receipt("KEDAI RUNCIT ... BOTOL AIR 1.50 ... KWSPX", parsed_items=[{"name": "BOTOL AIR", "qty": 1, "price": 1.5}], total=1.5)
+        self.assertEqual(r.receipt_type, ReceiptType.UNKNOWN)
+        r = classify_receipt("KWSP CARUMAN BULAN OGOS", merchant="KWSP", total=2500.0)
+        self.assertEqual(r.receipt_type, ReceiptType.RENT_LICENSE)
+
+    def test_advance_needs_payroll_context_or_a_name(self):
+        shop = classify_receipt("ADVANCES ACCESSORIES SHOP ... PHONE CASE 15.00",
+                                parsed_items=[{"name": "PHONE CASE", "qty": 1, "price": 15.0}], total=15.0,
+                                merchant="ADVANCES ACCESSORIES SHOP")
+        self.assertNotEqual(shop.receipt_type, ReceiptType.STAFF_ADVANCE)
+        shop = classify_receipt("ADVANCE ENTERPRISE ... 120.00", parsed_items=[], total=120.0, merchant="ADVANCE ENTERPRISE")
+        self.assertNotEqual(shop.receipt_type, ReceiptType.STAFF_ADVANCE)
+        bare = classify_receipt("ADVANCE ... 200.00", parsed_items=[], total=200.0, merchant="ADVANCE")
+        self.assertNotEqual(bare.receipt_type, ReceiptType.STAFF_ADVANCE)
+        for text, merchant in (("SALARY ADVANCE REQUIREMENT FORM ... 300.00", "SALARY ADVANCE REQUIREMENT FORM"),
+                               ("STAF ADVANCE ... 150.00", "STAF ADVANCE"),
+                               ("ADVANCE KUMAR ... 200.00", None),
+                               ("GAJI ADVANCE ... 500.00", "GAJI ADVANCE"),
+                               ("ADVANCE VOUCHER BY CASH ... 100.00", None)):
+            r = classify_receipt(text, parsed_items=[], total=100.0, merchant=merchant)
+            self.assertEqual(r.receipt_type, ReceiptType.STAFF_ADVANCE, text)
+        self.assertEqual(classify_receipt("ADVANCE KUMAR ... 200.00", total=200.0).extracted_staff_name, "Kumar")
+        # Other advance words are unchanged.
+        self.assertEqual(classify_receipt("PINJAM SITI 100", total=100.0).receipt_type, ReceiptType.STAFF_ADVANCE)
+        self.assertEqual(classify_receipt("PENDAHULUAN ALI 100", total=100.0).receipt_type, ReceiptType.STAFF_ADVANCE)
+
+    def test_fuel_helpers(self):
+        from receipt_classifier import has_stock_items, is_fuel_bill, is_fuel_line
+        self.assertTrue(is_fuel_line("E5 B10 Tec 11.312L"))
+        self.assertFalse(is_fuel_line("Petronas 14kg – Filled"))
+        self.assertFalse(is_fuel_line("Silinder Bergas 14kg"))
+        self.assertTrue(is_fuel_bill([{"name": "Primax 95"}, {"name": "Diesel Euro (B10/B20)"}], "PETRONAS"))
+        self.assertFalse(is_fuel_bill([{"name": "Primax 95"}, {"name": "MILO 1KG"}], "PETRONAS"))
+        self.assertFalse(is_fuel_bill([], "SHELL"))
+        self.assertTrue(has_stock_items([{"name": "Buah Campur"}]))
+        self.assertTrue(has_stock_items([{"name": "Santan 1 kg"}]))
+        self.assertFalse(has_stock_items([{"name": "Delivery fee"}, {"name": "Primax 95"}]))
+        self.assertFalse(has_stock_items([{"name": "Petronas 14kg – Filled"}]))
+
+    def test_lpg_without_a_known_merchant_stays_petty_cash(self):
+        r = classify_receipt("PETRONAS 14KG FILLED 3 X 26.50 = 79.50", merchant=None, total=79.5,
+                             parsed_items=[{"name": "Petronas 14kg – Filled", "qty": 3, "price": 26.5}],
+                             suppliers=self.SUPPLIERS)
+        self.assertEqual(r.receipt_type, ReceiptType.PETTY_CASH)

@@ -478,10 +478,13 @@ class OverbuyFlowTests(unittest.TestCase):
 
 class StaffPaymentTests(unittest.TestCase):
     PAYROLL = ("LEAVE PAY", "LEEVE PAY.", "LENE PAY", "L TAVE PAY", "O.T PAY", "TONYAM GAJI", "SALARY TANGGARI",
-               "SALARV VOUCHER OVERTIME", "USTAD", "SURAU TAMAN PERANGSANG PERMAI", "RIZAL PINJAM", "ADVANCE",
-               "PAYOUT", "CUTI CASH", "SALARY ADVANCE REQUIREMENT FORM")
+               "SALARV VOUCHER OVERTIME", "USTAD", "SURAU TAMAN PERANGSANG PERMAI", "RIZAL PINJAM",
+               "PAYOUT", "CUTI CASH", "SALARY ADVANCE REQUIREMENT FORM", "ADVANCE KUMAR", "STAF ADVANCE",
+               "GAJI ADVANCE OGOS", "ADVANCE VOUCHER", "SALARY ADVANCE")
+    # Shops, and "ADVANCE" without payroll context / a name: a brand word.
     SHOPS = ("DAILY PAY", "PAY TO GRAB", "BESTARI FARM (M) SDN BHD", "PASAR MINI A M", "EVEREST AISVARAM SDN. BHD.",
-             "LOTUS'S STORES", "KEDAI HARDWARE ALI")
+             "LOTUS'S STORES", "KEDAI HARDWARE ALI", "ADVANCE", "ADVANCES ACCESSORIES SHOP", "ADVANCE ENTERPRISE",
+             "ADVANCE TRADING SDN BHD", "ADVANCE PLASTIC SDN. BHD.")
 
     def test_detection(self):
         for name in self.PAYROLL:
@@ -490,6 +493,10 @@ class StaffPaymentTests(unittest.TestCase):
             self.assertFalse(op.is_staff_payment(name), name)
         # A payroll line inside an otherwise blank receipt counts too.
         self.assertTrue(op.is_staff_payment(None, [{"name": "Gaji Ali September", "qty": 1, "price": 1800}]))
+        # Item names carry the advance context too; a shop's product line does not.
+        self.assertTrue(op.is_staff_payment("ADVANCE", [{"name": "Salary advance - Ravi", "qty": 1, "price": 300}]))
+        self.assertFalse(op.is_staff_payment("ADVANCE ENTERPRISE", [{"name": "Advance payment", "qty": 1, "price": 300}]))
+        self.assertFalse(op.is_staff_payment("ADVANCES ACCESSORIES SHOP", [{"name": "Phone case", "qty": 1, "price": 15}]))
 
     def test_payroll_is_outside_the_whole_flow(self):
         for name in ("LEAVE PAY", "USTAD", "TONYAM GAJI"):
