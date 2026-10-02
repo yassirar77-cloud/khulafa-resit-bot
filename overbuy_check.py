@@ -782,6 +782,8 @@ def process_bill(db, stored: dict, *, group_code: Any = None, roster=None,
     result = {"flags": [], "skipped": [], "sales_missing": False}
     try:
         receipt_id = stored.get("id")
+        if op.is_staff_payment(stored.get("merchant"), stored.get("items")):
+            return result
         outlet = op.resolve_outlet(stored, group_code)
         if not outlet or receipt_id is None:
             return result

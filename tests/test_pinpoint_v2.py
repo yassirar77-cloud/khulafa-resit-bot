@@ -476,6 +476,75 @@ class OverbuyFlowTests(unittest.TestCase):
         self.assertEqual(len(ob.counted_in_window(self.db.rows(ob.TABLE), "SEK-20", "Syed", date(2026, 9, 16), 30)), 2)
 
 
+class StaffPaymentTests(unittest.TestCase):
+    PAYROLL = ("LEAVE PAY", "LEEVE PAY.", "LENE PAY", "L TAVE PAY", "O.T PAY", "TONYAM GAJI", "SALARY TANGGARI",
+               "SALARV VOUCHER OVERTIME", "USTAD", "SURAU TAMAN PERANGSANG PERMAI", "RIZAL PINJAM", "ADVANCE",
+               "PAYOUT", "CUTI CASH", "SALARY ADVANCE REQUIREMENT FORM")
+    SHOPS = ("DAILY PAY", "PAY TO GRAB", "BESTARI FARM (M) SDN BHD", "PASAR MINI A M", "EVEREST AISVARAM SDN. BHD.",
+             "LOTUS'S STORES", "KEDAI HARDWARE ALI")
+
+    def test_detection(self):
+        for name in self.PAYROLL:
+            self.assertTrue(op.is_staff_payment(name), name)
+        for name in self.SHOPS:
+            self.assertFalse(op.is_staff_payment(name), name)
+        # A payroll line inside an otherwise blank receipt counts too.
+        self.assertTrue(op.is_staff_payment(None, [{"name": "Gaji Ali September", "qty": 1, "price": 1800}]))
+
+    def test_payroll_is_outside_the_whole_flow(self):
+        for name in ("LEAVE PAY", "USTAD", "TONYAM GAJI"):
+            res = op.evaluate(_receipt(merchant=name), CONFIG, group_code="SEK20", now=NOW)
+            self.assertEqual((res["action"], res["match"]["tier"]), ("skip", "payroll"), name)
+        db = FakeSupabase()
+        self.assertIsNone(op.process_receipt(db, _receipt(merchant="LEAVE PAY"), group_code="SEK20", now=NOW))
+        self.assertEqual(db.rows(op.TABLE), [])
+        res = ob.process_bill(db, _receipt(merchant="LEAVE PAY", items=[{"name": "AYAM", "qty": 99, "price": 1}]),
+                              group_code="SEK20", roster=ROSTER)
+        self.assertEqual(res, {"flags": [], "skipped": [], "sales_missing": False})
+        # Never seeded as a known merchant either.
+        agg = km.aggregate_receipts([{"chat_id": -500, "merchant": "LEAVE PAY", "receipt_date": f"2026-09-{d:02d}",
+                                      "receipt_type": "UNKNOWN"} for d in (1, 2, 3, 4)], group_codes={-500: "SEK20"})
+        self.assertEqual(agg, {})
+
+
+class OutletGroupSalesDataTests(unittest.TestCase):
+    """No outlet-group message carries units sold per dish or a food-cost %."""
+
+    def test_food_cost_never_leaves_the_director_chat(self):
+        import group_reports as gr
+
+        for env in ({}, {"GROUP_MONEY_REPORTS": "all"}):
+            with mock.patch.dict("os.environ", env, clear=True):
+                self.assertTrue(gr.blocked(gr.FOOD_COST, -500, -100))     # outlet group
+                self.assertTrue(gr.blocked(gr.FOOD_COST, 777, -100))      # manager DM
+                self.assertFalse(gr.blocked(gr.FOOD_COST, -100, -100))    # director chat
+
+    def test_kitchen_recap_shows_gaps_not_units_sold(self):
+        import kitchen_usage as ku
+
+        evals = [
+            ku.evaluate_usage("ayam_goreng", 100, 0, [{"item_name": "Ayam Goreng", "qty": 80}]),
+            ku.evaluate_usage("kambing", 5.0, 4.5, [{"item_name": "Kambing", "qty": 3}]),
+        ]
+        for lang in ("bm", "tamil", "english"):
+            text = ku.render_mini_summary("SEK-6", "2026-06-22", evals, lang)
+            for figure in ("100", "80", "0.5", "0.54"):
+                self.assertNotIn(figure, text, (lang, text))
+            self.assertIn("20 pcs", text)
+        pandari = ku.render_pandari_wastage("SEK-6", "2026-06-22", ku.leak_items(evals))
+        manager = ku.render_manager_wastage("SEK-6", "2026-06-22", ku.leak_items(evals))
+        for text in (pandari, manager):
+            self.assertNotIn("100", text)
+            self.assertNotIn("80", text)
+            self.assertNotIn("POS jual", text)
+        pos_only = ku.render_pos_only_summary("SEK-6", "2026-06-22", [
+            {"code": "ayam_goreng", "label": "Ayam Goreng", "unit": "pcs", "used": None, "pos": 96.0,
+             "flag": None, "source": "pos"}])
+        self.assertNotIn("96", pos_only)
+        # Management keeps the numbers.
+        self.assertIn("guna 100 vs POS 80 pcs", ku.render_mini_summary_full("SEK-6", "2026-06-22", evals))
+
+
 class AdminGateTests(unittest.TestCase):
     def test_admin_allowed(self):
         reviewers = {42}

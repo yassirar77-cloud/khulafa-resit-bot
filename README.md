@@ -157,7 +157,17 @@ outlet group and pick shift + name with buttons. The monthly close
   `/lebih_beli [outlet] [days]`; the monthly close gains an "Overbuy" block.
 * **Cashiers never see sales figures.** No sales RM, average or % in any
   cashier-facing text; their own purchase quantities and bill totals may
-  appear. Management texts keep the numbers.
+  appear. Management texts keep the numbers. The weekly food-cost % is
+  management-only (`group_reports.MANAGEMENT_ONLY`, never a group or a
+  manager DM), and the kitchen Used-vs-POS recap in the group shows only the
+  gap per item ("Ayam: guna lebih 4 pcs dari jangkaan" / "Ayam: OK") while
+  the full Used / POS numbers go to the director chat.
+* **Staff payments are not purchases.** Leave pay (and its OCR spellings),
+  gaji / salary / wages, advances and loans, overtime pay, allowances,
+  bonuses, EPF / SOCSO, ustad / surau / khairat payments
+  (`outside_purchase.is_staff_payment`) are outside the whole Pinpoint flow:
+  no outside-purchase check, no overbuy check, never a strike, never seeded
+  as a known merchant.
 
 Apply the migrations yourself (not done by the bot):
 

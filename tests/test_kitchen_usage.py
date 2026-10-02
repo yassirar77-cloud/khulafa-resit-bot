@@ -1507,12 +1507,20 @@ def test_render_mini_summary_flags_and_ok():
     assert "Ringkasan Guna vs POS" in text
     assert "Ayam Goreng" in text
     assert "🔴" in text  # the leak line
+    # Gap only on the shop floor: never the units sold or the units used.
+    assert "🔴 Ayam Goreng: guna lebih 20 pcs dari jangkaan" in text
+    assert "80" not in text and "100" not in text and "POS 80" not in text
+    # Management copy keeps the full numbers.
+    full = ku.render_mini_summary_full("SEK-6", "2026-06-22", evals)
+    assert "guna 100 vs POS 80 pcs" in full
 
 
 def test_render_mini_summary_all_match():
     evals = [ku.evaluate_usage("ayam_goreng", 80, 0, [{"item_name": "Ayam Goreng", "qty": 80}])]
     text = ku.render_mini_summary("SEK-6", "2026-06-22", evals)
     assert "Semua padan" in text
+    assert "✅ Ayam Goreng: OK" in text
+    assert "80" not in text
 
 
 def test_render_mini_summary_telur_ikan_purchase_wording():
@@ -2703,8 +2711,10 @@ def test_render_pos_only_summary_wording():
     text = ku.render_pos_only_summary("SEK-20", "2026-06-24", evals)
     assert "Jualan POS" in text and "SEK-20" in text and "2026-06-24" in text
     assert "tak dapat dibanding" in text
-    assert "Ayam Goreng: POS jual 96 pcs" in text
-    assert "Kambing: POS jual 1.8 kg" in text
+    # Item names only — the units sold stay with management.
+    assert "Ayam Goreng: tiada rekod masak/baki" in text
+    assert "Kambing: tiada rekod masak/baki" in text
+    assert "96" not in text and "1.8" not in text
     assert "🔴" not in text and "LEAK" not in text  # never a fabricated flag
 
 
@@ -2849,7 +2859,8 @@ def test_render_pandari_wastage_tamil_content():
     leaks = [_leak_ev(used=100, pos=80)]
     out = ku.render_pandari_wastage("SEK-20", "2026-08-06", leaks)
     assert "👨‍🍳 Untuk tukang masak — SEK-20 • 2026-08-06" in out
-    assert "Ayam Goreng: guna 100 pcs, POS jual 80 pcs — lebih 20 pcs" in out
+    assert "Ayam Goreng: guna lebih 20 pcs dari jangkaan" in out
+    assert "100" not in out and "80" not in out
     assert "!" not in out
     tamil = ku.render_pandari_wastage("SEK-20", "2026-08-06", leaks, "tamil")
     assert "சமையல்காரருக்கு" in tamil and "20 pcs அதிகம்" in tamil and "wastage" in tamil
@@ -2861,7 +2872,7 @@ def test_render_wastage_kg_and_purchase_wording():
     leaks = [_leak_ev(label="Telur Ikan", used=1.5, pos=0.4, unit="kg",
                       source="purchase")]
     out = ku.render_pandari_wastage("SEK-20", "2026-08-06", leaks)
-    assert "guna 1.5 kg, beli 0.4 kg — lebih 1.1 kg" in out
+    assert "guna lebih 1.1 kg dari beli" in out
     assert "POS jual" not in out
 
 
@@ -2911,9 +2922,11 @@ def test_stage2_manager_wastage_alert_routes_through_delivery_gate(monkeypatch):
     ]
     bot = _run(fake, enabled=False)
     owner_msgs = [t for c, t in bot.sent if c == 999]
-    assert len(owner_msgs) == 1
-    assert owner_msgs[0].startswith("[TEST")
-    assert "Wastage alert" in owner_msgs[0]
+    # Management gets the full-number recap, then the [TEST] preview.
+    assert len(owner_msgs) == 2
+    assert "Ringkasan Guna vs POS" in owner_msgs[0] and "guna 100 vs POS 80 pcs" in owner_msgs[0]
+    assert owner_msgs[1].startswith("[TEST")
+    assert "Wastage alert" in owner_msgs[1]
     assert not any(c == 555 for c, _ in bot.sent)
 
     # Gate ON -> straight to the registered manager (chat 555)
@@ -2927,7 +2940,10 @@ def test_stage2_manager_wastage_alert_routes_through_delivery_gate(monkeypatch):
     mgr_msgs = [t for c, t in bot2.sent if c == 555]
     assert len(mgr_msgs) == 1
     assert "Wastage alert" in mgr_msgs[0] and "பண்டாரி" in mgr_msgs[0]
-    assert not any(c == 999 for c, _ in bot2.sent)
+    assert "POS 80" not in mgr_msgs[0]        # the manager sees the gap, not the units sold
+    # Only the full recap reaches the owner when the gate is on.
+    owner2 = [t for c, t in bot2.sent if c == 999]
+    assert len(owner2) == 1 and "Ringkasan Guna vs POS" in owner2[0]
 
 
 def test_stage2_no_followups_when_nothing_over_used(monkeypatch):

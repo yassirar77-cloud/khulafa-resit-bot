@@ -274,6 +274,35 @@ def _date_label(value: Any) -> str:
         return str(value or "?")
 
 
+# --- staff payments -----------------------------------------------------------------
+
+# Payroll-type "merchants": leave pay (and its OCR spellings), gaji / salary /
+# wages, advances and loans, overtime pay, allowances, bonuses, EPF / SOCSO,
+# religious teacher / surau payments, khairat. None of these is a shop, so
+# they are outside the whole Pinpoint flow — no outside-purchase check, no
+# overbuy check, never a strike.
+_STAFF_PAYMENT_RE = re.compile(
+    r"(\b(?:le+a?v+e|lene|leone|leong|l\s*tave|liv+e)\s*pay\b|\bgaji\b|salar[yvi]|\bwages?\b|"
+    r"\badvance|\badvans|pendahuluan|pinjam|payout|\bo\.?t\.?\s*pay\b|overtime|"
+    r"\bustad|\bustaz|\bimam\b|zakat|sedekah|khairat|\bsurau\b|\bmasjid\b|tahlil|kenduri|"
+    r"\bbonus\b|komisen|commission|\bkwsp\b|\bepf\b|socso|perkeso|\belaun\b|allowance|"
+    r"\bcuti\b|\bupah\b|\bduit\s*raya\b)",
+    re.IGNORECASE,
+)
+PAYROLL = "payroll"
+
+
+def is_staff_payment(merchant: Any, items: Any = None) -> bool:
+    """True when the receipt is a staff / religious payment, not a purchase."""
+    if _STAFF_PAYMENT_RE.search(str(merchant or "")):
+        return True
+    for entry in items if isinstance(items, list) else []:
+        name = entry.get("name") or entry.get("item") or entry.get("raw_name") if isinstance(entry, dict) else entry
+        if isinstance(name, str) and _STAFF_PAYMENT_RE.search(name):
+            return True
+    return False
+
+
 # --- merchant matching -----------------------------------------------------------
 
 def is_own_outlet(merchant: Any) -> bool:
@@ -1053,6 +1082,9 @@ def evaluate(stored: dict, config: dict, *, group_code: Any = None,
     outlet), ``allowed_only`` (every item may be bought outside — recorded as
     excused, no strike), ``pending`` (grey zone) or ``count``.
     """
+    if is_staff_payment(stored.get("merchant"), stored.get("items")):
+        return {"action": "skip", "row": None, "attribution": None, "removed": [],
+                "match": {"decision": PAYROLL, "supplier": None, "score": 0.0, "tier": "payroll"}}
     outlet = resolve_outlet(stored, group_code)
     # Approved suppliers everywhere + the shops this outlet is known to use
     # (known_merchants): only a merchant that is neither is a pin target.

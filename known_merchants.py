@@ -112,6 +112,10 @@ def aggregate_receipts(rows, agg: dict | None = None, *, group_codes: dict | Non
         merchant = " ".join(str(r.get("merchant") or "").split()).upper()
         if not merchant or merchant == "UNKNOWN" or is_own_outlet(merchant):
             continue
+        from outside_purchase import is_staff_payment
+
+        if is_staff_payment(merchant):
+            continue
         d = _to_date(r.get("receipt_date"))
         if d is None or (since and d < since) or (until and d > until):
             continue
