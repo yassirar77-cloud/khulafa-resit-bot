@@ -23,7 +23,9 @@ class OutletGroupsWiring(unittest.TestCase):
 
     def test_bot_client_prefixes_names_and_cache_is_loaded_first(self):
         run = _block(self.src, "async def run_bot(")
-        self.assertIn(".bot(OutletGroupBot(token=TELEGRAM_BOT_TOKEN))", run)
+        self.assertIn(".bot(OutletGroupBot(token=TELEGRAM_BOT_TOKEN,", run)
+        # A real connection pool (the default one lost bills in a burst).
+        self.assertIn("request=telegram_io.build_request()", run)
         self.assertNotIn(".token(TELEGRAM_BOT_TOKEN)", run)
         self.assertLess(run.index("cashier_names.configure(supabase)"),
                         run.index("Application.builder()"))
@@ -252,7 +254,8 @@ class QuietReceiptWiring(unittest.TestCase):
         self.assertIn("quiet = cashier_names.outlet_for_chat(message.chat_id) is not None",
                       self.photo)
         self.assertIn('if not (quiet and await _react(context.bot, message, RECEIPT_READING)):\n'
-                      '        await message.reply_text(_receipt_text(message.chat_id, "reading"))',
+                      '            await telegram_io.best_effort(\n'
+                      '                lambda: message.reply_text(_receipt_text(message.chat_id, "reading")),',
                       self.photo)
 
     def test_saved_reaction_replaces_confirmation(self):

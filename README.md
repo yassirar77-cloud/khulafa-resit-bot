@@ -231,6 +231,19 @@ outlet group and pick shift + name with buttons. The monthly close
   `price_movements` view on `COALESCE(receipt_date, upload day)`.
 * Migration 0066 drops `audit_responses`' `anon_read` policy (the last table
   the anon key could still read after 0062).
+* **Photo bursts (`telegram_io`).** The bot client now has a real connection
+  pool (`TELEGRAM_POOL_SIZE`, default 32; `TELEGRAM_POOL_TIMEOUT`, default
+  30s) instead of PTB's default single connection with a 1s pool timeout,
+  which lost 6 of 13 photos in a Jakel burst on 2 Oct. Photo downloads retry
+  transient Telegram errors (1s, 2s, 4s; flood control waits as asked);
+  status replies and reactions are best-effort; a photo whose download
+  still fails is re-queued after 30s / 90s / 300s, then the sender is asked
+  to resend. Bills still wait their turn on `OCR_MAX_CONCURRENCY`.
+* Data log, 3 Oct: #13066 #13070 #13072 #13088 #13106 retyped UNKNOWN →
+  SUPPLIER_PURCHASE (known merchants missed while `classifier_suppliers`
+  raised NameError, 2 Oct ~09:18–21:3x UTC; no side rows to archive).
+  #13066's date (OCR'd 2026-10-21 from "21/10/22") is left as is: the bill
+  text doesn't show the real date.
 
 Apply the migrations yourself (not done by the bot):
 

@@ -121,6 +121,7 @@ import staff_ops
 import staff_orders
 import staff_voice
 from outlet_group_bot import OutletGroupBot
+import telegram_io
 import key_stock_daily
 import item_sales_watch
 import demand_forecast
@@ -1632,6 +1633,13 @@ _RECEIPT_TEXTS = {
         "bengali": "Bill porte parlam na. Aro porishkar chobi pathan 🙏",
         "indonesian": "Nota tidak terbaca. Tolong kirim foto yang lebih jelas 🙏",
     },
+    "resend": {
+        "english": "This photo didn't come through. Please send it again.",
+        "bm": "Gambar ini tak sampai. Tolong hantar semula 🙏",
+        "tamil": "இந்த photo வரல. மறுபடியும் அனுப்புங்க 🙏",
+        "bengali": "Ei chobi pouchhayni. Abar pathan 🙏",
+        "indonesian": "Foto ini tidak terkirim. Tolong kirim ulang 🙏",
+    },
     "save_failed": {
         "english": "Saved OCR locally but database write failed.",
         "bm": "Bil diterima tapi tak dapat disimpan. Pejabat akan semak.",
@@ -1690,12 +1698,49 @@ def _receipt_text(chat_id, key: str, **values) -> str:
 async def _react(bot, message, emoji) -> bool:
     """Set (or with ``None`` clear) the bot's reaction on a message."""
     try:
-        await bot.set_message_reaction(
-            chat_id=message.chat_id, message_id=message.message_id, reaction=emoji)
+        await telegram_io.with_retry(
+            lambda: bot.set_message_reaction(
+                chat_id=message.chat_id, message_id=message.message_id, reaction=emoji),
+            what="reaction", attempts=3)
         return True
     except Exception:
         logger.warning("reaction %s failed in chat %s", emoji, message.chat_id, exc_info=True)
         return False
+
+
+async def _download_photo(bot, file_id) -> bytes:
+    file = await bot.get_file(file_id)
+    return bytes(await file.download_as_bytearray())
+
+
+# (chat_id, message_id) -> how many times the photo was re-queued, while it
+# waits. In memory: a restart drops pending re-queues, and the bill then
+# shows up in /missing_bills like any other gap.
+_photo_requeues: dict[tuple, int] = {}
+_photo_requeue_tasks: set = set()
+
+
+def _requeue_photo(update, context, key, *, delays=None) -> bool:
+    """Run ``handle_photo`` for this photo again after a pause. False once
+    every delay in telegram_io.REQUEUE_DELAYS has been used."""
+    delays = telegram_io.REQUEUE_DELAYS if delays is None else delays
+    attempt = _photo_requeues.get(key, 0)
+    if attempt >= len(delays):
+        _photo_requeues.pop(key, None)
+        return False
+    _photo_requeues[key] = attempt + 1
+
+    async def _again():
+        await asyncio.sleep(delays[attempt])
+        try:
+            await handle_photo(update, context)
+        except Exception:
+            logger.exception("re-queued photo failed (chat %s, message %s)", *key)
+
+    task = asyncio.create_task(_again())
+    _photo_requeue_tasks.add(task)
+    task.add_done_callback(_photo_requeue_tasks.discard)
+    return True
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1723,8 +1768,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     ops_group = (quiet and staff_live.is_live(cashier_names.outlet_for_chat(message.chat_id))
                  and staff_chat.style() != staff_chat.CLASSIC)
     ops_candidates: dict = {}
-    if not (quiet and await _react(context.bot, message, RECEIPT_READING)):
-        await message.reply_text(_receipt_text(message.chat_id, "reading"))
+    # Burst safety: the status reply is best-effort (a timed-out "reading..."
+    # used to kill the handler before the photo was downloaded), and a
+    # re-queued photo doesn't announce itself twice.
+    photo_key = (message.chat_id, message.message_id)
+    if photo_key not in _photo_requeues:
+        if not (quiet and await _react(context.bot, message, RECEIPT_READING)):
+            await telegram_io.best_effort(
+                lambda: message.reply_text(_receipt_text(message.chat_id, "reading")),
+                what="reading reply")
 
     photo = message.photo[-1]
     photo_file_id = photo.file_id
@@ -1736,10 +1788,29 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # release them unconditionally even if get_file/download raises.
     image_bytes = None
     image_upload_task = None
+    # _ocr_semaphore is also the burst queue: its waiters are served in
+    # arrival order, OCR_MAX_CONCURRENCY at a time.
     await _ocr_semaphore.acquire()
     try:
-        file = await context.bot.get_file(photo.file_id)
-        image_bytes = bytes(await file.download_as_bytearray())
+        try:
+            image_bytes = await telegram_io.with_retry(
+                lambda: _download_photo(context.bot, photo.file_id), what="photo download")
+        except Exception:
+            # Nothing is saved yet, so the whole photo can safely run again.
+            if _requeue_photo(update, context, photo_key):
+                logger.warning("photo download failed in chat %s (message %s); re-queued",
+                               message.chat_id, message.message_id, exc_info=True)
+            else:
+                logger.error("photo download failed in chat %s (message %s) after all "
+                             "re-queues; asked the sender to resend",
+                             message.chat_id, message.message_id, exc_info=True)
+                if quiet:
+                    await _react(context.bot, message, None)
+                await telegram_io.best_effort(
+                    lambda: message.reply_text(_receipt_text(message.chat_id, "resend")),
+                    what="resend request")
+            return
+        _photo_requeues.pop(photo_key, None)
 
         # Persist the image for every receipt (re-OCR / model comparison /
         # debug). Kick off a best-effort Cloudinary archive of the ORIGINAL
@@ -1770,7 +1841,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             image_upload_task.cancel()
             if quiet:
                 await _react(context.bot, message, None)
-            await message.reply_text(_receipt_text(message.chat_id, "read_failed"))
+            await telegram_io.best_effort(
+                lambda: message.reply_text(_receipt_text(message.chat_id, "read_failed")),
+                what="read-failed reply")
             return
         ocr_latency = time.monotonic() - ocr_start
         logger.info(
@@ -1874,7 +1947,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         stored = await asyncio.to_thread(store_receipt, record)
     except Exception:
         logger.exception("Supabase insert failed")
-        await message.reply_text(_receipt_text(message.chat_id, "save_failed"))
+        await telegram_io.best_effort(
+            lambda: message.reply_text(_receipt_text(message.chat_id, "save_failed")),
+            what="save-failed reply")
         stored = record
 
     user_alert = format_alert(stored, parsed)
@@ -9395,7 +9470,11 @@ async def run_bot() -> None:
     cashier_names.configure(supabase)
     app = (
         Application.builder()
-        .bot(OutletGroupBot(token=TELEGRAM_BOT_TOKEN))
+        # A real connection pool: the default is ONE connection with a 1s
+        # pool timeout, which lost bills in a 13-photo burst (telegram_io).
+        .bot(OutletGroupBot(token=TELEGRAM_BOT_TOKEN,
+                            request=telegram_io.build_request(),
+                            get_updates_request=telegram_io.build_updates_request()))
         .concurrent_updates(True)
         .build()
     )
