@@ -524,13 +524,22 @@ def _kitchen_usage_block(usage):
             unit = it.get("unit")
             used = _fmt_qty(it.get("used_qty"), unit)
             flag = it.get("mismatch_flag")
+            label = _name(it.get("item_label"))
+            try:
+                negative = it.get("used_qty") is not None and float(it["used_qty"]) < 0
+            except (TypeError, ValueError):
+                negative = False
+            if flag == "BAD" or negative:
+                # guna < 0 is a key-in error: no status, never the bogus number.
+                flagged = True
+                lines.append(f"- ❌ {label}: Data salah – sila semak")
+                continue
             if flag == "LEAK":
                 mark, flagged = "🔴", True
             elif flag == "DATA":
                 mark, flagged = "⚠️", True
             else:
                 mark = "✅"
-            label = _name(it.get("item_label"))
             if it.get("item_code") in PURCHASE_COMPARE_CODES:
                 # Telur Ikan: consumption vs purchase (kg bought), not vs sales.
                 if it.get("pos_qty") is None:

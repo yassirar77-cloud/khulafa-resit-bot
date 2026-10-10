@@ -187,21 +187,27 @@ def read_shift_close_file(filepath) -> str:
 
 # --- shift classification ----------------------------------------------------
 
-def determine_shift_type_and_business_date(shift_close_datetime: datetime):
+def determine_shift_type_and_business_date(shift_close_datetime: datetime, received_at=None):
     """Classify a shift close into (shift_type, business_date).
 
     24/7 outlets close around 19:00 (the "day" shift) and 07:00 (the "overnight"
     shift that started the previous evening). A day shift can run late (23:xx
     close, same date) and an overnight shift can close any time from just after
-    midnight (production shows 00:09 closes that the D-file books to the
-    previous day) through mid-morning. Anything outside those windows is
-    ``unknown`` and keeps its own date so it is never silently merged.
+    midnight through mid-morning. Anything outside those windows is ``unknown``
+    and keeps its own date so it is never silently merged.
+
+    The overnight close is stamped by the POS with its BUSINESS date (the day
+    the shift opened), not the calendar date — so it is NOT shifted back a day
+    here; ``pos_dates.pos_business_date`` uses the email's arrival time
+    (``received_at``) to spot the one outlet that stamps the real date.
     """
+    import pos_dates
+
     hour = shift_close_datetime.hour
     if 17 <= hour <= 23:
         return "day", shift_close_datetime.date()
     if hour <= 10:
-        return "overnight", (shift_close_datetime - timedelta(days=1)).date()
+        return "overnight", pos_dates.pos_business_date(shift_close_datetime, received_at)
     return "unknown", shift_close_datetime.date()
 
 
@@ -537,7 +543,8 @@ NASI_KANDAR_BASES = ("ayam", "ikan", "kambing", "daging")
 
 def is_nasi_kandar_item(name) -> bool:
     """True when a POS dish name involves a tracked nasi kandar protein."""
-    n = re.sub(r"\s+", " ", str(name or "").lower())
+    from pos_names import normalize_pos_name
+    n = normalize_pos_name(name)  # "Briyani Awam Bawang" is still ayam
     return any(b in n for b in NASI_KANDAR_BASES)
 
 

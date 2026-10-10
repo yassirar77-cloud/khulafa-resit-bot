@@ -39,7 +39,6 @@ sales_email_fetcher.detect_email_type.
 from __future__ import annotations
 
 import re
-from datetime import timedelta
 
 from sales_parser import (
     _columns,
@@ -120,34 +119,24 @@ def _first_trailing_idx(lines, after=0):
 
 # --- header + label/value blocks --------------------------------------------
 
-# D-files are emitted at the end of the business day. A normal day shift closes
-# ~19:00 and prints same-day; the overnight shift closes ~00:00-07:00 and prints
-# AFTER midnight, so its print date is one day AHEAD of the business day it
-# summarises. Split on 17:00 (5pm): >=17:00 -> header date; earlier -> day before.
-_BUSINESS_DATE_HOUR_CUTOFF = 17
+# D-files are stamped by the POS with the BUSINESS date they summarise (a
+# D-file printed "09/Oct 07:00" was really printed at 07:00 on 10 Oct and covers
+# 9 Oct). The old "before 17:00 -> the day before" rule subtracted a day the
+# POS had already subtracted. See pos_dates for the evidence and the rule.
+def business_date_for_printed(printed_at, received_at=None):
+    """The business day a D-file covers, from its print stamp.
 
-
-def business_date_for_printed(printed_at):
-    """The business day a D-file covers, from its print timestamp (PR #61/#62).
-
-    >=17:00 (evening close) -> the header date; <17:00 (post-midnight overnight
-    close) -> the previous day. Returns ``None`` if ``printed_at`` is missing.
-
-    ``printed_at`` is the POS wall-clock time parsed straight from the header and
-    is ALREADY Asia/Kuala_Lumpur local (not UTC). The hour is read directly — we
-    must NOT apply any timezone conversion, which would double-shift the time and
-    mis-date the post-midnight overnight files. As a safety net, an
-    accidentally-tz-aware value has its tzinfo dropped (no conversion) so the
-    wall-clock hour is preserved.
-    """
+    ``printed_at`` is the POS wall-clock stamp parsed straight from the header
+    (Asia/Kuala_Lumpur local, never converted). ``received_at`` — the email's
+    arrival time — lets ``pos_dates`` tell a real-time stamp from a
+    business-date stamp; without it the business-date convention is assumed.
+    Returns ``None`` if ``printed_at`` is missing."""
     if printed_at is None:
         return None
     if printed_at.tzinfo is not None:
         printed_at = printed_at.replace(tzinfo=None)
-    day = printed_at.date()
-    if printed_at.hour >= _BUSINESS_DATE_HOUR_CUTOFF:
-        return day
-    return day - timedelta(days=1)
+    import pos_dates
+    return pos_dates.pos_business_date(printed_at, received_at)
 
 
 def _parse_header(lines):

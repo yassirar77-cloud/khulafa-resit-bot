@@ -1,0 +1,626 @@
+
+======================================================================
+Bistro (BISTRO7) — 2026-10-08
+======================================================================
+--- BEFORE (as posted) ---
+📊 Ringkasan Guna vs POS
+Bistro • 2026-10-08
+
+⚠️ Ayam Goreng: guna 189 vs POS 213 pcs
+🔴 Ayam Bawang: guna 168 vs POS 134 pcs
+✅ Ayam Rempah: guna 10 vs POS 14 pcs
+🔴 Ayam Kicap: guna 6 vs POS 0 pcs
+✅ Ayam Madu: guna 3 vs POS 0 pcs
+⚠️ Ayam Tandoori: guna 0 vs POS 51 pcs
+✅ Ikan Goreng: guna 6 vs POS 3 pcs
+✅ Ikan Kari: guna 8 vs POS 12 pcs
+➖ Telur Ikan: guna -128 kg vs tiada rekod beli
+⚠️ Kambing: guna -255 vs POS 5.04 kg
+⚠️ Daging: guna -137 vs POS 0.36 kg
+
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+--- AFTER (management copy) ---
+📊 Ringkasan Guna vs POS
+Bistro • 2026-10-08
+
+✅ Ayam Goreng: guna 189 vs POS 183 pcs
+🔴 Ayam Bawang: guna 168 vs POS 122 pcs
+🔴 Ayam Rempah: guna 10 vs POS 8 pcs
+🔴 Ayam Kicap: guna 6 vs POS 1 pcs
+🔴 Ayam Madu: guna 3 vs POS 0 pcs
+⚠️ Ayam Tandoori: guna 0 vs POS 32 pcs
+🔴 Ikan Goreng: guna 6 vs POS 2 pcs
+✅ Ikan Kari: guna 8 vs POS 9 pcs
+❌ Telur Ikan: Data salah – sila semak
+❌ Kambing: Data salah – sila semak
+❌ Daging: Data salah – sila semak
+
+❌ = guna kurang dari 0 — baki atau masak salah isi, sila semak
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+
+POS tiada butang: Rendang 7
+Dapur: 8/10 18:09 → 9/10 05:10 | POS: shift 1614+1615 (tutup 8/10 19:00, 9/10 07:00)
+--- AFTER (group copy, BM) ---
+📊 Ringkasan Guna vs POS
+Bistro • 2026-10-08
+
+✅ Ayam Goreng: OK
+🔴 Ayam Bawang: guna lebih 46 pcs dari jangkaan
+🔴 Ayam Rempah: guna lebih 2 pcs dari jangkaan
+🔴 Ayam Kicap: guna lebih 5 pcs dari jangkaan
+🔴 Ayam Madu: guna lebih 3 pcs dari jangkaan
+⚠️ Ayam Tandoori: guna kurang 32 pcs dari jangkaan (mungkin salah isi)
+🔴 Ikan Goreng: guna lebih 4 pcs dari jangkaan
+✅ Ikan Kari: OK
+❌ Telur Ikan: Data salah – sila semak
+❌ Kambing: Data salah – sila semak
+❌ Daging: Data salah – sila semak
+
+❌ = guna kurang dari 0 — baki atau masak salah isi, sila semak
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+
+POS tiada butang: Rendang
+Dapur: 8/10 18:09 → 9/10 05:10 | POS: shift 1614+1615 (tutup 8/10 19:00, 9/10 07:00)
+
+======================================================================
+D.U (D) — 2026-10-08
+======================================================================
+--- BEFORE (as posted) ---
+📊 Ringkasan Guna vs POS
+D.U • 2026-10-08
+
+🔴 Ayam Goreng: guna 132 vs POS 99 pcs
+⚠️ Ayam Bawang: guna 27 vs POS 41 pcs
+✅ Ayam Kicap: guna 5 vs POS 0 pcs
+✅ Ayam Madu: guna 1 vs POS 0 pcs
+✅ Ayam Tandoori: guna 0 vs POS 0 pcs
+✅ Ikan Goreng: guna 4 vs POS 1 pcs
+✅ Ikan Kari: guna 11 vs POS 13 pcs
+➖ Telur Ikan: guna 0 kg vs tiada rekod beli
+✅ Kambing: guna 2.5 vs POS 2.52 kg
+✅ Daging: guna 1.8 vs POS 0.3 kg
+
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+--- AFTER (management copy) ---
+📊 Ringkasan Guna vs POS
+D.U • 2026-10-08
+
+🔴 Ayam Goreng: guna 132 vs POS 94 pcs
+✅ Ayam Bawang: guna 27 vs POS 28 pcs
+🔴 Ayam Kicap: guna 5 vs POS 0 pcs
+🔴 Ayam Madu: guna 1 vs POS 0 pcs
+✅ Ayam Tandoori: guna 0 vs POS 0 pcs
+🔴 Ikan Goreng: guna 4 vs POS 0 pcs
+🔴 Ikan Kari: guna 11 vs POS 7 pcs
+✅ Telur Ikan: guna 0 vs POS 0 kg
+🔴 Kambing: guna 2.5 vs POS 1.98 kg
+🔴 Daging: guna 1.8 vs POS 0.48 kg
+
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+
+POS tiada butang: Rendang 9, Kari 3
+Dapur: 8/10 18:11 → 9/10 05:35 | POS: shift 2655+2656 (tutup 8/10 19:00, 9/10 07:00)
+--- AFTER (group copy, BM) ---
+📊 Ringkasan Guna vs POS
+D.U • 2026-10-08
+
+🔴 Ayam Goreng: guna lebih 38 pcs dari jangkaan
+✅ Ayam Bawang: OK
+🔴 Ayam Kicap: guna lebih 5 pcs dari jangkaan
+🔴 Ayam Madu: guna lebih 1 pcs dari jangkaan
+✅ Ayam Tandoori: OK
+🔴 Ikan Goreng: guna lebih 4 pcs dari jangkaan
+🔴 Ikan Kari: guna lebih 4 pcs dari jangkaan
+✅ Telur Ikan: OK
+🔴 Kambing: guna lebih 0.52 kg dari jangkaan
+🔴 Daging: guna lebih 1.32 kg dari jangkaan
+
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+
+POS tiada butang: Rendang, Kari
+Dapur: 8/10 18:11 → 9/10 05:35 | POS: shift 2655+2656 (tutup 8/10 19:00, 9/10 07:00)
+
+======================================================================
+Jakel (JAKEL) — 2026-10-08
+======================================================================
+--- BEFORE ---
+(not posted: the old dating had no 'complete' POS for this day yet)
+--- AFTER ---
+(kitchen record incomplete — no comparison)
+
+======================================================================
+Klang (KLANG) — 2026-10-08
+======================================================================
+--- BEFORE (as posted) ---
+📊 Ringkasan Guna vs POS
+Klang • 2026-10-08
+
+✅ Ayam Goreng: guna 243 vs POS 245 pcs
+🔴 Ayam Bawang: guna 58 vs POS 37 pcs
+🔴 Ayam Kicap: guna 9 vs POS 1 pcs
+✅ Ayam Madu: guna 2 vs POS 2 pcs
+✅ Ayam Tandoori: guna 17 vs POS 19 pcs
+✅ Ikan Goreng: guna 5 vs POS 0 pcs
+✅ Ikan Kari: guna 7 vs POS 9 pcs
+➖ Telur Ikan: guna 1100 kg vs tiada rekod beli
+🔴 Kambing: guna 3500 vs POS 4.68 kg
+🔴 Daging: guna 500 vs POS 0.78 kg
+
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+--- AFTER (management copy) ---
+📊 Ringkasan Guna vs POS
+Klang • 2026-10-08
+
+✅ Ayam Goreng: guna 243 vs POS 217 pcs
+🔴 Ayam Bawang: guna 58 vs POS 37 pcs
+🔴 Ayam Kicap: guna 9 vs POS 1 pcs
+✅ Ayam Madu: guna 2 vs POS 1 pcs
+✅ Ayam Tandoori: guna 17 vs POS 18 pcs
+🔴 Ikan Goreng: guna 5 vs POS 1 pcs
+⚠️ Ikan Kari: guna 7 vs POS 9 pcs
+➖ Telur Ikan: guna 1100 kg vs POS 5 pcs (berat porsi belum ditetapkan)
+🔴 Kambing: guna 3500 vs POS 3.42 kg
+🔴 Daging: guna 500 vs POS 0.42 kg
+
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+
+POS tiada butang: Rendang 7, Kari 1
+Dapur: 8/10 19:10 → 9/10 05:50 | POS: shift 1770+1771 (tutup 8/10 19:00, 9/10 07:00)
+--- AFTER (group copy, BM) ---
+📊 Ringkasan Guna vs POS
+Klang • 2026-10-08
+
+✅ Ayam Goreng: OK
+🔴 Ayam Bawang: guna lebih 21 pcs dari jangkaan
+🔴 Ayam Kicap: guna lebih 8 pcs dari jangkaan
+✅ Ayam Madu: OK
+✅ Ayam Tandoori: OK
+🔴 Ikan Goreng: guna lebih 4 pcs dari jangkaan
+⚠️ Ikan Kari: guna kurang 2 pcs dari jangkaan (mungkin salah isi)
+➖ Telur Ikan: belum boleh banding
+🔴 Kambing: guna lebih 3496.58 kg dari jangkaan
+🔴 Daging: guna lebih 499.58 kg dari jangkaan
+
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+
+POS tiada butang: Rendang, Kari
+Dapur: 8/10 19:10 → 9/10 05:50 | POS: shift 1770+1771 (tutup 8/10 19:00, 9/10 07:00)
+
+======================================================================
+KLRAZAK (KLRAZAK) — 2026-10-08
+======================================================================
+--- BEFORE ---
+(not posted: the old dating had no 'complete' POS for this day yet)
+--- AFTER ---
+(kitchen record incomplete — no comparison)
+
+======================================================================
+SEK-14 (SEK14) — 2026-10-08
+======================================================================
+--- BEFORE (as posted) ---
+📊 Ringkasan Guna vs POS
+SEK-14 • 2026-10-08
+
+🔴 Ayam Goreng: guna 188 vs POS 159 pcs
+✅ Ayam Bawang: guna 35 vs POS 39 pcs
+🔴 Ayam Kicap: guna 10 vs POS 0 pcs
+✅ Ayam Madu: guna 3 vs POS 0 pcs
+✅ Ayam Tandoori: guna 15 vs POS 16 pcs
+🔴 Ikan Goreng: guna 10 vs POS 1 pcs
+✅ Ikan Kari: guna 10 vs POS 10 pcs
+➖ Telur Ikan: guna -23 kg vs tiada rekod beli
+⚠️ Kambing: guna -495 vs POS 2.52 kg
+🔴 Daging: guna 3 vs POS 0.72 kg
+
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+--- AFTER (management copy) ---
+📊 Ringkasan Guna vs POS
+SEK-14 • 2026-10-08
+
+🔴 Ayam Goreng: guna 188 vs POS 148 pcs
+✅ Ayam Bawang: guna 35 vs POS 40 pcs
+🔴 Ayam Kicap: guna 10 vs POS 0 pcs
+🔴 Ayam Madu: guna 3 vs POS 0 pcs
+🔴 Ayam Tandoori: guna 15 vs POS 9 pcs
+🔴 Ikan Goreng: guna 10 vs POS 1 pcs
+⚠️ Ikan Kari: guna 10 vs POS 12 pcs
+❌ Telur Ikan: Data salah – sila semak
+❌ Kambing: Data salah – sila semak
+🔴 Daging: guna 3 vs POS 0.36 kg
+
+❌ = guna kurang dari 0 — baki atau masak salah isi, sila semak
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+
+POS tiada butang: Rendang 5, Kari 3, Kurma 1, Ayam 65 6
+Dapur: 8/10 18:14 → 9/10 02:17 | POS: shift 2094+2095 (tutup 8/10 19:00, 9/10 07:00)
+--- AFTER (group copy, BM) ---
+📊 Ringkasan Guna vs POS
+SEK-14 • 2026-10-08
+
+🔴 Ayam Goreng: guna lebih 40 pcs dari jangkaan
+✅ Ayam Bawang: OK
+🔴 Ayam Kicap: guna lebih 10 pcs dari jangkaan
+🔴 Ayam Madu: guna lebih 3 pcs dari jangkaan
+🔴 Ayam Tandoori: guna lebih 6 pcs dari jangkaan
+🔴 Ikan Goreng: guna lebih 9 pcs dari jangkaan
+⚠️ Ikan Kari: guna kurang 2 pcs dari jangkaan (mungkin salah isi)
+❌ Telur Ikan: Data salah – sila semak
+❌ Kambing: Data salah – sila semak
+🔴 Daging: guna lebih 2.64 kg dari jangkaan
+
+❌ = guna kurang dari 0 — baki atau masak salah isi, sila semak
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+
+POS tiada butang: Rendang, Kari, Kurma, Ayam 65
+Dapur: 8/10 18:14 → 9/10 02:17 | POS: shift 2094+2095 (tutup 8/10 19:00, 9/10 07:00)
+
+======================================================================
+One Bistro (SEK15) — 2026-10-08
+======================================================================
+--- BEFORE ---
+(not posted: the old dating had no 'complete' POS for this day yet)
+--- AFTER ---
+(kitchen record incomplete — no comparison)
+
+======================================================================
+SEK-20 (SEK20) — 2026-10-08
+======================================================================
+--- BEFORE ---
+(not posted: the old dating had no 'complete' POS for this day yet)
+--- AFTER ---
+(POS not complete: {'summary_present': False, 'total_shifts': None, 'has_day': False, 'has_overnight': False, 'shift_types': set(), 'shift_count': 0, 'summaries_cover_shifts': True, 'uncovered_shift_nos': [], 'itemwise_source': None, 'complete': False})
+
+======================================================================
+SEK-6 (SEK6) — 2026-10-08
+======================================================================
+--- BEFORE (as posted) ---
+📊 Ringkasan Guna vs POS
+SEK-6 • 2026-10-08
+
+🔴 Ayam Goreng: guna 205 vs POS 147 pcs
+✅ Ayam Bawang: guna 32 vs POS 36 pcs
+✅ Ayam Kicap: guna 10 vs POS 5 pcs
+✅ Ayam Madu: guna 4 vs POS 0 pcs
+⚠️ Ayam Tandoori: guna -16 vs POS 18 pcs
+✅ Ikan Goreng: guna 6 vs POS 1 pcs
+✅ Ikan Kari: guna 11 vs POS 14 pcs
+➖ Telur Ikan: guna 2 kg vs tiada rekod beli
+✅ Kambing: guna 3 vs POS 4.14 kg
+✅ Daging: guna 2 vs POS 0.54 kg
+
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+--- AFTER (management copy) ---
+📊 Ringkasan Guna vs POS
+SEK-6 • 2026-10-08
+
+🔴 Ayam Goreng: guna 205 vs POS 154 pcs
+✅ Ayam Bawang: guna 32 vs POS 33 pcs
+🔴 Ayam Kicap: guna 10 vs POS 1 pcs
+🔴 Ayam Madu: guna 4 vs POS 0 pcs
+❌ Ayam Tandoori: Data salah – sila semak
+🔴 Ikan Goreng: guna 6 vs POS 1 pcs
+⚠️ Ikan Kari: guna 11 vs POS 18 pcs
+➖ Telur Ikan: guna 2 kg vs POS 5 pcs (berat porsi belum ditetapkan)
+⚠️ Kambing: guna 3 vs POS 4.32 kg
+🔴 Daging: guna 2 vs POS 0.6 kg
+
+❌ = guna kurang dari 0 — baki atau masak salah isi, sila semak
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+
+POS tiada butang: Rendang 7, Kari 3, Kurma 1
+Dapur: 9/10 00:01 → 9/10 02:02 | POS: shift 2681+2682 (tutup 8/10 19:00, 9/10 07:00)
+--- AFTER (group copy, BM) ---
+📊 Ringkasan Guna vs POS
+SEK-6 • 2026-10-08
+
+🔴 Ayam Goreng: guna lebih 51 pcs dari jangkaan
+✅ Ayam Bawang: OK
+🔴 Ayam Kicap: guna lebih 9 pcs dari jangkaan
+🔴 Ayam Madu: guna lebih 4 pcs dari jangkaan
+❌ Ayam Tandoori: Data salah – sila semak
+🔴 Ikan Goreng: guna lebih 5 pcs dari jangkaan
+⚠️ Ikan Kari: guna kurang 7 pcs dari jangkaan (mungkin salah isi)
+➖ Telur Ikan: belum boleh banding
+⚠️ Kambing: guna kurang 1.32 kg dari jangkaan (mungkin salah isi)
+🔴 Daging: guna lebih 1.4 kg dari jangkaan
+
+❌ = guna kurang dari 0 — baki atau masak salah isi, sila semak
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+
+POS tiada butang: Rendang, Kari, Kurma
+Dapur: 9/10 00:01 → 9/10 02:02 | POS: shift 2681+2682 (tutup 8/10 19:00, 9/10 07:00)
+
+======================================================================
+Vista (VISTA) — 2026-10-08
+======================================================================
+--- BEFORE (as posted) ---
+📊 Ringkasan Guna vs POS
+Vista • 2026-10-08
+
+✅ Ayam Goreng: guna — vs POS 132 pcs
+✅ Ayam Bawang: guna — vs POS 25 pcs
+✅ Ayam Kicap: guna — vs POS 7 pcs
+✅ Ayam Madu: guna — vs POS 3 pcs
+✅ Ayam Tandoori: guna — vs POS 17 pcs
+✅ Ikan Goreng: guna — vs POS 4 pcs
+✅ Ikan Kari: guna — vs POS 5 pcs
+✅ Kambing: guna — vs POS 2.52 kg
+✅ Daging: guna — vs POS 0.36 kg
+
+Semua padan 👍
+--- AFTER ---
+(kitchen record incomplete — no comparison)
+
+======================================================================
+Bistro (BISTRO7) — 2026-10-09
+======================================================================
+--- BEFORE ---
+(not posted: the old dating had no 'complete' POS for this day yet)
+--- AFTER (management copy) ---
+📊 Ringkasan Guna vs POS
+Bistro • 2026-10-09
+
+✅ Ayam Goreng: guna 256 vs POS 224 pcs
+✅ Ayam Bawang: guna 196 vs POS 188 pcs
+🔴 Ayam Rempah: guna 45 vs POS 32 pcs
+🔴 Ayam Kicap: guna 8 vs POS 2 pcs
+🔴 Ayam Madu: guna 3 vs POS 0 pcs
+⚠️ Ayam Tandoori: guna 3 vs POS 51 pcs
+🔴 Ikan Goreng: guna 11 vs POS 3 pcs
+⚠️ Ikan Kari: guna 8 vs POS 13 pcs
+❌ Telur Ikan: Data salah – sila semak
+❌ Kambing: Data salah – sila semak
+❌ Daging: Data salah – sila semak
+
+❌ = guna kurang dari 0 — baki atau masak salah isi, sila semak
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+
+POS tiada butang: Rendang 11, Kari 1
+Dapur: 9/10 18:04 → 10/10 04:51 | POS: shift 1616+1617 (tutup 9/10 19:00, 10/10 07:00)
+--- AFTER (group copy, BM) ---
+📊 Ringkasan Guna vs POS
+Bistro • 2026-10-09
+
+✅ Ayam Goreng: OK
+✅ Ayam Bawang: OK
+🔴 Ayam Rempah: guna lebih 13 pcs dari jangkaan
+🔴 Ayam Kicap: guna lebih 6 pcs dari jangkaan
+🔴 Ayam Madu: guna lebih 3 pcs dari jangkaan
+⚠️ Ayam Tandoori: guna kurang 48 pcs dari jangkaan (mungkin salah isi)
+🔴 Ikan Goreng: guna lebih 8 pcs dari jangkaan
+⚠️ Ikan Kari: guna kurang 5 pcs dari jangkaan (mungkin salah isi)
+❌ Telur Ikan: Data salah – sila semak
+❌ Kambing: Data salah – sila semak
+❌ Daging: Data salah – sila semak
+
+❌ = guna kurang dari 0 — baki atau masak salah isi, sila semak
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+
+POS tiada butang: Rendang, Kari
+Dapur: 9/10 18:04 → 10/10 04:51 | POS: shift 1616+1617 (tutup 9/10 19:00, 10/10 07:00)
+
+======================================================================
+D.U (D) — 2026-10-09
+======================================================================
+--- BEFORE ---
+(not posted: the old dating had no 'complete' POS for this day yet)
+--- AFTER (management copy) ---
+📊 Ringkasan Guna vs POS
+D.U • 2026-10-09
+
+🔴 Ayam Goreng: guna 135 vs POS 100 pcs
+⚠️ Ayam Bawang: guna 37 vs POS 44 pcs
+🔴 Ayam Kicap: guna 5 vs POS 0 pcs
+🔴 Ayam Madu: guna 2 vs POS 0 pcs
+✅ Ayam Tandoori: guna 0 vs POS 0 pcs
+🔴 Ikan Goreng: guna 4 vs POS 2 pcs
+✅ Ikan Kari: guna 9 vs POS 9 pcs
+✅ Telur Ikan: guna 0 vs POS 0 kg
+🔴 Kambing: guna 2.7 vs POS 2.34 kg
+🔴 Daging: guna 1.7 vs POS 0.36 kg
+
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+
+POS tiada butang: Rendang 7
+Dapur: 9/10 18:01 → 10/10 05:34 | POS: shift 2657+2658 (tutup 9/10 19:00, 10/10 07:00)
+--- AFTER (group copy, BM) ---
+📊 Ringkasan Guna vs POS
+D.U • 2026-10-09
+
+🔴 Ayam Goreng: guna lebih 35 pcs dari jangkaan
+⚠️ Ayam Bawang: guna kurang 7 pcs dari jangkaan (mungkin salah isi)
+🔴 Ayam Kicap: guna lebih 5 pcs dari jangkaan
+🔴 Ayam Madu: guna lebih 2 pcs dari jangkaan
+✅ Ayam Tandoori: OK
+🔴 Ikan Goreng: guna lebih 2 pcs dari jangkaan
+✅ Ikan Kari: OK
+✅ Telur Ikan: OK
+🔴 Kambing: guna lebih 0.36 kg dari jangkaan
+🔴 Daging: guna lebih 1.34 kg dari jangkaan
+
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+
+POS tiada butang: Rendang
+Dapur: 9/10 18:01 → 10/10 05:34 | POS: shift 2657+2658 (tutup 9/10 19:00, 10/10 07:00)
+
+======================================================================
+Jakel (JAKEL) — 2026-10-09
+======================================================================
+--- BEFORE ---
+(not posted: the old dating had no 'complete' POS for this day yet)
+--- AFTER ---
+(POS not complete: {'summary_present': False, 'total_shifts': None, 'has_day': True, 'has_overnight': False, 'shift_types': {'day'}, 'shift_count': 1, 'summaries_cover_shifts': True, 'uncovered_shift_nos': [], 'itemwise_source': None, 'complete': False})
+
+======================================================================
+Klang (KLANG) — 2026-10-09
+======================================================================
+--- BEFORE ---
+(not posted: the old dating had no 'complete' POS for this day yet)
+--- AFTER (management copy) ---
+📊 Ringkasan Guna vs POS
+Klang • 2026-10-09
+
+✅ Ayam Goreng: guna 321 vs POS 284 pcs
+🔴 Ayam Bawang: guna 86 vs POS 62 pcs
+🔴 Ayam Kicap: guna 9 vs POS 0 pcs
+🔴 Ayam Madu: guna 3 vs POS 1 pcs
+✅ Ayam Tandoori: guna 18 vs POS 19 pcs
+🔴 Ikan Goreng: guna 3 vs POS 0 pcs
+⚠️ Ikan Kari: guna 10 vs POS 15 pcs
+➖ Telur Ikan: guna 900 kg vs POS 6 pcs (berat porsi belum ditetapkan)
+🔴 Kambing: guna 5100 vs POS 6.84 kg
+🔴 Daging: guna 1100 vs POS 0.84 kg
+
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+
+POS tiada butang: Rendang 9, Kari 2
+Dapur: 9/10 19:11 → 10/10 05:48 | POS: shift 1772+1773 (tutup 9/10 19:00, 10/10 07:00)
+--- AFTER (group copy, BM) ---
+📊 Ringkasan Guna vs POS
+Klang • 2026-10-09
+
+✅ Ayam Goreng: OK
+🔴 Ayam Bawang: guna lebih 24 pcs dari jangkaan
+🔴 Ayam Kicap: guna lebih 9 pcs dari jangkaan
+🔴 Ayam Madu: guna lebih 2 pcs dari jangkaan
+✅ Ayam Tandoori: OK
+🔴 Ikan Goreng: guna lebih 3 pcs dari jangkaan
+⚠️ Ikan Kari: guna kurang 5 pcs dari jangkaan (mungkin salah isi)
+➖ Telur Ikan: belum boleh banding
+🔴 Kambing: guna lebih 5093.16 kg dari jangkaan
+🔴 Daging: guna lebih 1099.16 kg dari jangkaan
+
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+
+POS tiada butang: Rendang, Kari
+Dapur: 9/10 19:11 → 10/10 05:48 | POS: shift 1772+1773 (tutup 9/10 19:00, 10/10 07:00)
+
+======================================================================
+KLRAZAK (KLRAZAK) — 2026-10-09
+======================================================================
+--- BEFORE ---
+(not posted: the old dating had no 'complete' POS for this day yet)
+--- AFTER ---
+(POS not complete: {'summary_present': False, 'total_shifts': None, 'has_day': False, 'has_overnight': False, 'shift_types': set(), 'shift_count': 0, 'summaries_cover_shifts': True, 'uncovered_shift_nos': [], 'itemwise_source': None, 'complete': False})
+
+======================================================================
+SEK-14 (SEK14) — 2026-10-09
+======================================================================
+--- BEFORE ---
+(not posted: the old dating had no 'complete' POS for this day yet)
+--- AFTER (management copy) ---
+📊 Ringkasan Guna vs POS
+SEK-14 • 2026-10-09
+
+🔴 Ayam Goreng: guna 205 vs POS 167 pcs
+⚠️ Ayam Bawang: guna 47 vs POS 61 pcs
+🔴 Ayam Kicap: guna 13 vs POS 0 pcs
+🔴 Ayam Madu: guna 7 vs POS 0 pcs
+🔴 Ayam Tandoori: guna 15 vs POS 13 pcs
+🔴 Ikan Goreng: guna 10 vs POS 1 pcs
+⚠️ Ikan Kari: guna 5 vs POS 10 pcs
+❌ Telur Ikan: Data salah – sila semak
+❌ Kambing: Data salah – sila semak
+🔴 Daging: guna 3 vs POS 0.42 kg
+
+❌ = guna kurang dari 0 — baki atau masak salah isi, sila semak
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+
+POS tiada butang: Rendang 5, Kari 9, Ayam 65 9
+Dapur: 9/10 18:24 → 10/10 02:20 | POS: shift 2096+2097 (tutup 9/10 19:00, 10/10 07:00)
+--- AFTER (group copy, BM) ---
+📊 Ringkasan Guna vs POS
+SEK-14 • 2026-10-09
+
+🔴 Ayam Goreng: guna lebih 38 pcs dari jangkaan
+⚠️ Ayam Bawang: guna kurang 14 pcs dari jangkaan (mungkin salah isi)
+🔴 Ayam Kicap: guna lebih 13 pcs dari jangkaan
+🔴 Ayam Madu: guna lebih 7 pcs dari jangkaan
+🔴 Ayam Tandoori: guna lebih 2 pcs dari jangkaan
+🔴 Ikan Goreng: guna lebih 9 pcs dari jangkaan
+⚠️ Ikan Kari: guna kurang 5 pcs dari jangkaan (mungkin salah isi)
+❌ Telur Ikan: Data salah – sila semak
+❌ Kambing: Data salah – sila semak
+🔴 Daging: guna lebih 2.58 kg dari jangkaan
+
+❌ = guna kurang dari 0 — baki atau masak salah isi, sila semak
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+
+POS tiada butang: Rendang, Kari, Ayam 65
+Dapur: 9/10 18:24 → 10/10 02:20 | POS: shift 2096+2097 (tutup 9/10 19:00, 10/10 07:00)
+
+======================================================================
+One Bistro (SEK15) — 2026-10-09
+======================================================================
+--- BEFORE (as posted) ---
+📊 Ringkasan Guna vs POS
+One Bistro • 2026-10-09
+
+✅ Ayam Goreng: guna — vs POS 53 pcs
+✅ Ayam Bawang: guna — vs POS 39 pcs
+✅ Ayam Kicap: guna — vs POS 0 pcs
+✅ Ayam Madu: guna — vs POS 0 pcs
+✅ Ayam Tandoori: guna — vs POS 0 pcs
+✅ Ikan Goreng: guna — vs POS 0 pcs
+✅ Ikan Kari: guna — vs POS 4 pcs
+➖ Telur Ikan: guna — kg vs tiada rekod beli
+✅ Kambing: guna — vs POS 2.34 kg
+✅ Daging: guna — vs POS 0.18 kg
+
+Semua padan 👍
+--- AFTER ---
+(kitchen record incomplete — no comparison)
+
+======================================================================
+SEK-20 (SEK20) — 2026-10-09
+======================================================================
+--- BEFORE ---
+(not posted: the old dating had no 'complete' POS for this day yet)
+--- AFTER ---
+(POS not complete: {'summary_present': True, 'total_shifts': 2, 'has_day': False, 'has_overnight': True, 'shift_types': {'overnight'}, 'shift_count': 1, 'summaries_cover_shifts': True, 'uncovered_shift_nos': [], 'itemwise_source': 'summary', 'complete': False})
+
+======================================================================
+SEK-6 (SEK6) — 2026-10-09
+======================================================================
+--- BEFORE ---
+(not posted: the old dating had no 'complete' POS for this day yet)
+--- AFTER (management copy) ---
+📊 Ringkasan Guna vs POS
+SEK-6 • 2026-10-09
+
+🔴 Ayam Goreng: guna 230 vs POS 148 pcs
+✅ Ayam Bawang: guna 25 vs POS 29 pcs
+🔴 Ayam Kicap: guna 10 vs POS 0 pcs
+🔴 Ayam Madu: guna 4 vs POS 0 pcs
+❌ Ayam Tandoori: Data salah – sila semak
+🔴 Ikan Goreng: guna 7 vs POS 0 pcs
+🔴 Ikan Kari: guna 17 vs POS 9 pcs
+🔴 Telur Ikan: guna 2 vs POS 0 kg
+🔴 Kambing: guna 3 vs POS 1.98 kg
+🔴 Daging: guna 2 vs POS 0.48 kg
+
+❌ = guna kurang dari 0 — baki atau masak salah isi, sila semak
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+
+POS tiada butang: Rendang 8
+Dapur: 10/10 00:08 → 10/10 02:02 | POS: shift 2683+2684 (tutup 9/10 19:00, 10/10 07:00)
+--- AFTER (group copy, BM) ---
+📊 Ringkasan Guna vs POS
+SEK-6 • 2026-10-09
+
+🔴 Ayam Goreng: guna lebih 82 pcs dari jangkaan
+✅ Ayam Bawang: OK
+🔴 Ayam Kicap: guna lebih 10 pcs dari jangkaan
+🔴 Ayam Madu: guna lebih 4 pcs dari jangkaan
+❌ Ayam Tandoori: Data salah – sila semak
+🔴 Ikan Goreng: guna lebih 7 pcs dari jangkaan
+🔴 Ikan Kari: guna lebih 8 pcs dari jangkaan
+🔴 Telur Ikan: guna lebih 2 kg dari jangkaan
+🔴 Kambing: guna lebih 1.02 kg dari jangkaan
+🔴 Daging: guna lebih 1.52 kg dari jangkaan
+
+❌ = guna kurang dari 0 — baki atau masak salah isi, sila semak
+🔴 = guna lebih dari POS  ⚠️ = guna kurang dari POS (mungkin salah isi)
+
+POS tiada butang: Rendang
+Dapur: 10/10 00:08 → 10/10 02:02 | POS: shift 2683+2684 (tutup 9/10 19:00, 10/10 07:00)

@@ -1,0 +1,509 @@
+outlet_code,business_date,item_code,unit,cooked_qty,left_qty,used_qty,pos_qty,old_flag,likely_cause
+BISTRO7,2026-09-23,ayam_bawang,pcs,80,110,-30,,,leftover > cooked
+BISTRO7,2026-09-23,ayam_goreng,pcs,202,280,-78,,,leftover > cooked
+BISTRO7,2026-09-23,ikan_kari,pcs,11,22,-11,,,leftover > cooked
+BISTRO7,2026-09-23,kambing,kg,5.0,6.0,-1.0,,,leftover > cooked
+BISTRO7,2026-09-25,daging,kg,4.0,180.0,-176.0,,,grams keyed in kg field
+BISTRO7,2026-09-25,kambing,kg,5.0,90.0,-85.0,,,grams keyed in kg field
+BISTRO7,2026-09-25,telur_ikan,kg,2.0,120.0,-118.0,,,grams keyed in kg field
+BISTRO7,2026-09-27,daging,kg,3.0,200.0,-197.0,0.6,DATA,grams keyed in kg field
+BISTRO7,2026-09-27,kambing,kg,7.0,120.0,-113.0,6.48,DATA,grams keyed in kg field
+BISTRO7,2026-09-27,telur_ikan,kg,4.0,160.0,-156.0,,,grams keyed in kg field
+BISTRO7,2026-09-28,daging,kg,3.0,210.0,-207.0,0.9,DATA,grams keyed in kg field
+BISTRO7,2026-09-28,kambing,kg,4.0,180.0,-176.0,4.5,DATA,grams keyed in kg field
+BISTRO7,2026-10-04,daging,kg,3.0,90.0,-87.0,0.48,DATA,grams keyed in kg field
+BISTRO7,2026-10-04,kambing,kg,6.0,120.0,-114.0,3.42,DATA,grams keyed in kg field
+BISTRO7,2026-10-04,telur_ikan,kg,2.0,60.0,-58.0,,,grams keyed in kg field
+BISTRO7,2026-10-05,ayam_tandoori,pcs,4,6,-2,25.0,DATA,leftover > cooked
+BISTRO7,2026-10-05,daging,kg,3.0,180.0,-177.0,0.42,DATA,grams keyed in kg field
+BISTRO7,2026-10-05,kambing,kg,5.0,520.0,-515.0,3.78,DATA,grams keyed in kg field
+BISTRO7,2026-10-05,telur_ikan,kg,2.0,130.0,-128.0,,,grams keyed in kg field
+BISTRO7,2026-10-06,ayam_tandoori,pcs,2,8,-6,31.0,DATA,leftover > cooked
+BISTRO7,2026-10-06,daging,kg,4.0,130.0,-126.0,0.84,DATA,grams keyed in kg field
+BISTRO7,2026-10-06,kambing,kg,5.0,530.0,-525.0,4.14,DATA,grams keyed in kg field
+BISTRO7,2026-10-06,telur_ikan,kg,2.0,110.0,-108.0,,,grams keyed in kg field
+BISTRO7,2026-10-07,ayam_tandoori,pcs,2,3,-1,28.0,DATA,leftover > cooked
+BISTRO7,2026-10-07,daging,kg,3.0,110.0,-107.0,0.36,DATA,grams keyed in kg field
+BISTRO7,2026-10-07,kambing,kg,5.0,190.0,-185.0,2.88,DATA,grams keyed in kg field
+BISTRO7,2026-10-07,telur_ikan,kg,2.0,360.0,-358.0,,,grams keyed in kg field
+BISTRO7,2026-10-08,daging,kg,3.0,140.0,-137.0,0.36,DATA,grams keyed in kg field
+BISTRO7,2026-10-08,kambing,kg,5.0,260.0,-255.0,5.04,DATA,grams keyed in kg field
+BISTRO7,2026-10-08,telur_ikan,kg,2.0,130.0,-128.0,,,grams keyed in kg field
+BISTRO7,2026-10-09,daging,kg,3.0,260.0,-257.0,,,grams keyed in kg field
+BISTRO7,2026-10-09,kambing,kg,5.0,120.0,-115.0,,,grams keyed in kg field
+BISTRO7,2026-10-09,telur_ikan,kg,2.0,30.0,-28.0,,,leftover keyed x10?
+D,2026-06-26,kambing,kg,3.0,300.0,-297.0,,,grams keyed in kg field
+D,2026-06-27,daging,kg,2.0,800.0,-798.0,0.3,DATA,grams keyed in kg field
+D,2026-06-27,kambing,kg,3.0,500.0,-497.0,1.8,DATA,grams keyed in kg field
+D,2026-06-28,daging,kg,2.0,300.0,-298.0,0.24,DATA,grams keyed in kg field
+D,2026-06-28,kambing,kg,3.0,300.0,-297.0,1.44,DATA,grams keyed in kg field
+D,2026-06-29,daging,kg,2.0,600.0,-598.0,0.18,DATA,grams keyed in kg field
+D,2026-06-29,kambing,kg,3.0,400.0,-397.0,1.8,DATA,grams keyed in kg field
+D,2026-07-03,kambing,kg,3.0,500.0,-497.0,2.7,DATA,grams keyed in kg field
+D,2026-07-04,daging,kg,2.0,225.0,-223.0,0.54,DATA,grams keyed in kg field
+D,2026-07-25,ikan_kari,pcs,1,2,-1,,,leftover > cooked
+D,2026-08-16,ayam_goreng,pcs,0,1,-1,,,leftover keyed x10?
+JAKEL,2026-06-27,kambing,kg,1.5,300.0,-298.5,1.98,DATA,grams keyed in kg field
+JAKEL,2026-06-28,daging,kg,1.0,500.0,-499.0,0.3,DATA,grams keyed in kg field
+JAKEL,2026-06-28,telur_ikan,kg,250.0,350.0,-100.0,,,grams keyed in kg field
+JAKEL,2026-06-29,daging,kg,1.5,450.0,-448.5,0.42,DATA,grams keyed in kg field
+JAKEL,2026-06-29,kambing,kg,1.5,250.0,-248.5,1.08,DATA,grams keyed in kg field
+JAKEL,2026-06-29,telur_ikan,kg,250.0,400.0,-150.0,,,grams keyed in kg field
+JAKEL,2026-06-30,daging,kg,1.0,450.0,-449.0,0.24,DATA,grams keyed in kg field
+JAKEL,2026-06-30,kambing,kg,1.5,250.0,-248.5,1.62,DATA,grams keyed in kg field
+JAKEL,2026-07-01,daging,kg,1.0,700.0,-699.0,0.42,DATA,grams keyed in kg field
+JAKEL,2026-07-01,kambing,kg,1.5,500.0,-498.5,1.62,DATA,grams keyed in kg field
+JAKEL,2026-07-01,telur_ikan,kg,250.0,400.0,-150.0,,,grams keyed in kg field
+JAKEL,2026-07-02,daging,kg,1.0,200.0,-199.0,0.36,DATA,grams keyed in kg field
+JAKEL,2026-07-02,kambing,kg,1.5,150.0,-148.5,1.98,DATA,grams keyed in kg field
+JAKEL,2026-07-03,daging,kg,1.5,200.0,-198.5,,,grams keyed in kg field
+JAKEL,2026-07-03,kambing,kg,2.0,800.0,-798.0,,,grams keyed in kg field
+JAKEL,2026-07-05,daging,kg,1.5,400.0,-398.5,,,grams keyed in kg field
+JAKEL,2026-07-05,kambing,kg,1.5,150.0,-148.5,,,grams keyed in kg field
+JAKEL,2026-07-06,daging,kg,1.0,400.0,-399.0,,,grams keyed in kg field
+JAKEL,2026-07-06,kambing,kg,1.5,200.0,-198.5,,,grams keyed in kg field
+JAKEL,2026-07-07,daging,kg,1.0,700.0,-699.0,,,grams keyed in kg field
+JAKEL,2026-07-07,kambing,kg,1.5,100.0,-98.5,,,grams keyed in kg field
+JAKEL,2026-07-08,kambing,kg,1.5,300.0,-298.5,1.62,DATA,grams keyed in kg field
+JAKEL,2026-07-09,daging,kg,1.0,700.0,-699.0,0.42,DATA,grams keyed in kg field
+JAKEL,2026-07-09,kambing,kg,1.5,250.0,-248.5,1.44,DATA,grams keyed in kg field
+JAKEL,2026-07-10,daging,kg,1.5,300.0,-298.5,0.6,DATA,grams keyed in kg field
+JAKEL,2026-07-10,kambing,kg,2.0,400.0,-398.0,2.34,DATA,grams keyed in kg field
+JAKEL,2026-07-11,kambing,kg,1.5,900.0,-898.5,1.62,DATA,grams keyed in kg field
+JAKEL,2026-07-13,daging,kg,1.0,100.0,-99.0,,,grams keyed in kg field
+JAKEL,2026-07-14,kambing,kg,1.5,200.0,-198.5,,,grams keyed in kg field
+JAKEL,2026-07-14,telur_ikan,kg,250.0,300.0,-50.0,,,grams keyed in kg field
+JAKEL,2026-07-16,ayam_bawang,pcs,10,11,-1,,,leftover > cooked
+JAKEL,2026-07-18,daging,kg,1.5,800.0,-798.5,0.78,DATA,grams keyed in kg field
+JAKEL,2026-07-18,kambing,kg,1.5,100.0,-98.5,2.34,DATA,grams keyed in kg field
+JAKEL,2026-07-18,telur_ikan,kg,250.0,400.0,-150.0,,,grams keyed in kg field
+JAKEL,2026-07-20,kambing,kg,1.0,200.0,-199.0,,,grams keyed in kg field
+JAKEL,2026-07-22,daging,kg,1.0,50.0,-49.0,0.3,DATA,grams keyed in kg field
+JAKEL,2026-07-22,kambing,kg,1.5,50.0,-48.5,0.72,DATA,grams keyed in kg field
+JAKEL,2026-07-23,daging,kg,1.0,250.0,-249.0,0.6,DATA,grams keyed in kg field
+JAKEL,2026-07-23,kambing,kg,1.5,450.0,-448.5,1.8,DATA,grams keyed in kg field
+JAKEL,2026-07-26,daging,kg,1.0,300.0,-299.0,0.3,DATA,grams keyed in kg field
+JAKEL,2026-07-27,daging,kg,1.0,300.0,-299.0,0.54,DATA,grams keyed in kg field
+JAKEL,2026-07-28,kambing,kg,1.5,200.0,-198.5,1.62,DATA,grams keyed in kg field
+JAKEL,2026-07-28,telur_ikan,kg,250.0,300.0,-50.0,,,grams keyed in kg field
+JAKEL,2026-07-30,daging,kg,1.0,100.0,-99.0,0.3,DATA,grams keyed in kg field
+JAKEL,2026-07-31,daging,kg,1.0,400.0,-399.0,0.36,DATA,grams keyed in kg field
+JAKEL,2026-07-31,kambing,kg,1.5,200.0,-198.5,2.16,DATA,grams keyed in kg field
+JAKEL,2026-08-01,kambing,kg,1.5,50.0,-48.5,2.34,DATA,grams keyed in kg field
+JAKEL,2026-08-02,daging,kg,1.0,600.0,-599.0,0.66,DATA,grams keyed in kg field
+JAKEL,2026-08-04,daging,kg,1.0,100.0,-99.0,0.48,DATA,grams keyed in kg field
+JAKEL,2026-08-04,kambing,kg,1.5,300.0,-298.5,0.36,DATA,grams keyed in kg field
+JAKEL,2026-08-05,kambing,kg,1.0,400.0,-399.0,2.52,DATA,grams keyed in kg field
+JAKEL,2026-08-06,daging,kg,1.0,200.0,-199.0,0.48,DATA,grams keyed in kg field
+JAKEL,2026-08-06,kambing,kg,1.5,300.0,-298.5,2.16,DATA,grams keyed in kg field
+JAKEL,2026-08-07,daging,kg,1.0,200.0,-199.0,0.3,DATA,grams keyed in kg field
+JAKEL,2026-08-07,kambing,kg,1.0,50.0,-49.0,1.08,DATA,grams keyed in kg field
+JAKEL,2026-08-09,kambing,kg,1.5,800.0,-798.5,1.08,DATA,grams keyed in kg field
+JAKEL,2026-08-09,telur_ikan,kg,250.0,400.0,-150.0,,,grams keyed in kg field
+JAKEL,2026-08-11,daging,kg,1.0,400.0,-399.0,0.24,DATA,grams keyed in kg field
+JAKEL,2026-08-11,kambing,kg,1.0,250.0,-249.0,1.26,DATA,grams keyed in kg field
+JAKEL,2026-08-14,kambing,kg,1.5,100.0,-98.5,2.52,DATA,grams keyed in kg field
+JAKEL,2026-08-15,daging,kg,1.0,300.0,-299.0,0.42,DATA,grams keyed in kg field
+JAKEL,2026-08-15,kambing,kg,1.7,300.0,-298.3,1.98,DATA,grams keyed in kg field
+JAKEL,2026-08-15,telur_ikan,kg,250.0,400.0,-150.0,,,grams keyed in kg field
+JAKEL,2026-08-16,daging,kg,1.0,100.0,-99.0,0.66,DATA,grams keyed in kg field
+JAKEL,2026-08-16,kambing,kg,1.5,600.0,-598.5,1.26,DATA,grams keyed in kg field
+JAKEL,2026-08-17,kambing,kg,1.5,600.0,-598.5,1.44,DATA,grams keyed in kg field
+JAKEL,2026-08-20,daging,kg,1.0,200.0,-199.0,0.66,DATA,grams keyed in kg field
+JAKEL,2026-08-20,kambing,kg,1.5,400.0,-398.5,1.62,DATA,grams keyed in kg field
+JAKEL,2026-08-21,daging,kg,1.0,200.0,-199.0,0.42,DATA,grams keyed in kg field
+JAKEL,2026-08-21,telur_ikan,kg,1.5,200.0,-198.5,3.0,DATA,grams keyed in kg field
+JAKEL,2026-08-22,daging,kg,1.0,200.0,-199.0,0.36,DATA,grams keyed in kg field
+JAKEL,2026-08-22,kambing,kg,1.5,700.0,-698.5,1.08,DATA,grams keyed in kg field
+JAKEL,2026-08-22,telur_ikan,kg,250.0,400.0,-150.0,,,grams keyed in kg field
+JAKEL,2026-08-23,kambing,kg,1.5,300.0,-298.5,0.72,DATA,grams keyed in kg field
+JAKEL,2026-08-24,kambing,kg,1.7,300.0,-298.3,3.24,DATA,grams keyed in kg field
+JAKEL,2026-08-25,daging,kg,1.0,400.0,-399.0,0.48,DATA,grams keyed in kg field
+JAKEL,2026-08-25,kambing,kg,1.5,300.0,-298.5,1.8,DATA,grams keyed in kg field
+JAKEL,2026-08-29,daging,kg,1.0,300.0,-299.0,0.66,DATA,grams keyed in kg field
+JAKEL,2026-08-29,kambing,kg,1.5,300.0,-298.5,1.8,DATA,grams keyed in kg field
+JAKEL,2026-08-31,daging,kg,1.0,100.0,-99.0,0.42,DATA,grams keyed in kg field
+JAKEL,2026-08-31,kambing,kg,1.0,100.0,-99.0,1.8,DATA,grams keyed in kg field
+JAKEL,2026-09-01,daging,kg,1.0,400.0,-399.0,0.12,DATA,grams keyed in kg field
+JAKEL,2026-09-02,daging,kg,1.0,500.0,-499.0,0.48,DATA,grams keyed in kg field
+JAKEL,2026-09-03,daging,kg,1.0,400.0,-399.0,0.36,DATA,grams keyed in kg field
+JAKEL,2026-09-06,daging,kg,1.0,50.0,-49.0,0.18,DATA,grams keyed in kg field
+JAKEL,2026-09-06,kambing,kg,1.5,200.0,-198.5,1.44,DATA,grams keyed in kg field
+JAKEL,2026-09-08,daging,kg,1.0,100.0,-99.0,0.18,DATA,grams keyed in kg field
+JAKEL,2026-09-08,kambing,kg,1.0,100.0,-99.0,1.08,DATA,grams keyed in kg field
+JAKEL,2026-09-09,daging,kg,1.0,400.0,-399.0,0.36,DATA,grams keyed in kg field
+JAKEL,2026-09-10,daging,kg,1.0,300.0,-299.0,0.66,DATA,grams keyed in kg field
+JAKEL,2026-09-12,daging,kg,1.0,500.0,-499.0,0.06,DATA,grams keyed in kg field
+JAKEL,2026-09-12,kambing,kg,1.5,400.0,-398.5,0.9,DATA,grams keyed in kg field
+JAKEL,2026-09-13,daging,kg,1.0,300.0,-299.0,0.54,DATA,grams keyed in kg field
+JAKEL,2026-09-13,kambing,kg,1.5,400.0,-398.5,1.26,DATA,grams keyed in kg field
+JAKEL,2026-09-14,daging,kg,1.0,100.0,-99.0,0.36,DATA,grams keyed in kg field
+JAKEL,2026-09-14,kambing,kg,1.5,400.0,-398.5,1.44,DATA,grams keyed in kg field
+JAKEL,2026-09-16,daging,kg,1.0,400.0,-399.0,0.24,DATA,grams keyed in kg field
+JAKEL,2026-09-16,telur_ikan,kg,250.0,300.0,-50.0,,,grams keyed in kg field
+JAKEL,2026-09-17,daging,kg,1.0,300.0,-299.0,0.6,DATA,grams keyed in kg field
+JAKEL,2026-09-17,kambing,kg,2.0,400.0,-398.0,1.62,DATA,grams keyed in kg field
+JAKEL,2026-09-18,daging,kg,1.0,500.0,-499.0,0.36,DATA,grams keyed in kg field
+JAKEL,2026-09-18,kambing,kg,2.0,300.0,-298.0,1.8,DATA,grams keyed in kg field
+JAKEL,2026-09-19,kambing,kg,1.5,200.0,-198.5,,,grams keyed in kg field
+JAKEL,2026-09-20,daging,kg,1.5,500.0,-498.5,0.18,DATA,grams keyed in kg field
+JAKEL,2026-09-20,kambing,kg,1.5,100.0,-98.5,1.08,DATA,grams keyed in kg field
+JAKEL,2026-09-20,telur_ikan,kg,250.0,400.0,-150.0,,,grams keyed in kg field
+JAKEL,2026-09-21,daging,kg,1.0,500.0,-499.0,0.3,DATA,grams keyed in kg field
+JAKEL,2026-09-21,kambing,kg,1.5,100.0,-98.5,1.98,DATA,grams keyed in kg field
+JAKEL,2026-09-21,telur_ikan,kg,250.0,300.0,-50.0,,,grams keyed in kg field
+JAKEL,2026-09-22,daging,kg,1.0,400.0,-399.0,0.18,DATA,grams keyed in kg field
+JAKEL,2026-09-22,kambing,kg,1.5,100.0,-98.5,0.9,DATA,grams keyed in kg field
+JAKEL,2026-09-23,daging,kg,1.5,500.0,-498.5,0.36,DATA,grams keyed in kg field
+JAKEL,2026-09-23,kambing,kg,1.5,600.0,-598.5,1.26,DATA,grams keyed in kg field
+JAKEL,2026-09-23,telur_ikan,kg,250.0,300.0,-50.0,,,grams keyed in kg field
+JAKEL,2026-09-25,ayam_kicap,pcs,0,1,-1,,,leftover keyed x10?
+JAKEL,2026-09-25,daging,kg,1.0,50.0,-49.0,,,grams keyed in kg field
+JAKEL,2026-09-26,kambing,kg,2.0,600.0,-598.0,1.98,DATA,grams keyed in kg field
+JAKEL,2026-09-27,kambing,kg,1.0,100.0,-99.0,0.9,DATA,grams keyed in kg field
+JAKEL,2026-10-02,daging,kg,1.0,800.0,-799.0,0.3,DATA,grams keyed in kg field
+JAKEL,2026-10-04,daging,kg,1.5,200.0,-198.5,0.6,DATA,grams keyed in kg field
+JAKEL,2026-10-04,kambing,kg,1.5,400.0,-398.5,1.62,DATA,grams keyed in kg field
+JAKEL,2026-10-06,daging,kg,1.0,50.0,-49.0,0.42,DATA,grams keyed in kg field
+JAKEL,2026-10-06,telur_ikan,kg,250.0,300.0,-50.0,,,grams keyed in kg field
+JAKEL,2026-10-07,daging,kg,1.0,400.0,-399.0,0.36,DATA,grams keyed in kg field
+JAKEL,2026-10-07,kambing,kg,1.5,100.0,-98.5,2.34,DATA,grams keyed in kg field
+JAKEL,2026-10-09,daging,kg,1.0,200.0,-199.0,,,grams keyed in kg field
+JAKEL,2026-10-09,kambing,kg,1.0,50.0,-49.0,,,grams keyed in kg field
+KLANG,2026-06-30,daging,kg,160.0,800.0,-640.0,0.06,DATA,grams keyed in kg field
+KLANG,2026-07-16,ayam_kicap,pcs,0,5,-5,0.0,,leftover keyed x10?
+KLANG,2026-07-16,daging,kg,0,600.0,-600.0,0.18,DATA,grams keyed in kg field
+KLANG,2026-07-16,ikan_kari,pcs,0,5,-5,1.0,DATA,leftover keyed x10?
+KLANG,2026-07-16,telur_ikan,kg,0,600.0,-600.0,,,grams keyed in kg field
+KLANG,2026-07-22,daging,kg,1200.0,4600.0,-3400.0,0.12,DATA,grams keyed in kg field
+KLANG,2026-08-06,ikan_kari,pcs,6,500,-494,0.0,DATA,leftover keyed x10?
+KLANG,2026-09-12,ayam_bawang,pcs,0,7,-7,42.0,,leftover keyed x10?
+KLRAZAK,2026-06-30,daging,kg,1.0,250.0,-249.0,,,grams keyed in kg field
+KLRAZAK,2026-06-30,kambing,kg,2.2,750.0,-747.8,,,grams keyed in kg field
+KLRAZAK,2026-07-03,ayam_tandoori,pcs,3,6,-3,,,leftover > cooked
+KLRAZAK,2026-07-08,ayam_bawang,pcs,12,13,-1,,,leftover > cooked
+KLRAZAK,2026-07-08,ayam_goreng,pcs,80,120,-40,,,leftover > cooked
+KLRAZAK,2026-07-08,ayam_madu,pcs,1,2,-1,,,leftover > cooked
+KLRAZAK,2026-07-08,ikan_kari,pcs,5,8,-3,,,leftover > cooked
+KLRAZAK,2026-07-10,ayam_bawang,pcs,15,17,-2,,,leftover > cooked
+KLRAZAK,2026-07-10,ayam_goreng,pcs,70,110,-40,,,leftover > cooked
+KLRAZAK,2026-07-10,ayam_madu,pcs,1,3,-2,,,leftover > cooked
+KLRAZAK,2026-07-10,ayam_tandoori,pcs,1,3,-2,,,leftover > cooked
+KLRAZAK,2026-07-10,kambing,kg,2.0,2.5,-0.5,,,leftover > cooked
+KLRAZAK,2026-07-18,ayam_goreng,pcs,110,130,-20,,,leftover > cooked
+KLRAZAK,2026-07-18,ayam_madu,pcs,2,3,-1,,,leftover > cooked
+KLRAZAK,2026-07-18,daging,kg,1.0,1.5,-0.5,,,leftover > cooked
+KLRAZAK,2026-07-22,ayam_bawang,pcs,13,17,-4,,,leftover > cooked
+KLRAZAK,2026-08-03,ayam_tandoori,pcs,0,1,-1,,,leftover keyed x10?
+KLRAZAK,2026-08-03,ikan_kari,pcs,5,7,-2,,,leftover > cooked
+KLRAZAK,2026-08-06,ayam_bawang,pcs,15,16,-1,,,leftover > cooked
+KLRAZAK,2026-08-06,daging,kg,1.2,1.5,-0.3,,,leftover > cooked
+KLRAZAK,2026-08-06,telur_ikan,kg,2.0,3.0,-1.0,,,leftover > cooked
+KLRAZAK,2026-08-10,ayam_tandoori,pcs,0,4,-4,,,leftover keyed x10?
+KLRAZAK,2026-08-15,ayam_kicap,pcs,5,8,-3,,,leftover > cooked
+KLRAZAK,2026-08-15,kambing,kg,2.5,2.6,-0.1,,,leftover > cooked
+KLRAZAK,2026-08-22,ayam_bawang,pcs,10,14,-4,,,leftover > cooked
+KLRAZAK,2026-08-22,ayam_goreng,pcs,70,80,-10,,,leftover > cooked
+KLRAZAK,2026-09-03,ayam_goreng,pcs,70,90,-20,,,leftover > cooked
+KLRAZAK,2026-09-03,daging,kg,1.2,1.5,-0.3,,,leftover > cooked
+KLRAZAK,2026-09-03,kambing,kg,2.5,2.6,-0.1,,,leftover > cooked
+KLRAZAK,2026-09-05,ayam_bawang,pcs,10,12,-2,,,leftover > cooked
+KLRAZAK,2026-09-05,ayam_goreng,pcs,70,90,-20,,,leftover > cooked
+KLRAZAK,2026-09-19,ayam_bawang,pcs,10,15,-5,,,leftover > cooked
+KLRAZAK,2026-09-19,ayam_goreng,pcs,80,100,-20,,,leftover > cooked
+KLRAZAK,2026-09-24,ayam_tandoori,pcs,0,8,-8,,,leftover keyed x10?
+KLRAZAK,2026-09-24,kambing,kg,2.5,600.0,-597.5,,,grams keyed in kg field
+KLRAZAK,2026-09-25,kambing,kg,2.8,200.0,-197.2,,,grams keyed in kg field
+KLRAZAK,2026-10-04,kambing,kg,2.5,5.0,-2.5,,,leftover > cooked
+KLRAZAK,2026-10-09,daging,kg,1.5,600.0,-598.5,,,grams keyed in kg field
+KLRAZAK,2026-10-09,kambing,kg,2.5,400.0,-397.5,,,grams keyed in kg field
+SEK14,2026-06-27,ayam_tandoori,pcs,0,7,-7,3.0,DATA,leftover keyed x10?
+SEK14,2026-06-27,kambing,kg,5.0,600.0,-595.0,2.88,DATA,grams keyed in kg field
+SEK14,2026-06-28,kambing,kg,5.0,400.0,-395.0,0.72,DATA,grams keyed in kg field
+SEK14,2026-06-29,ayam_tandoori,pcs,0,18,-18,12.0,DATA,leftover keyed x10?
+SEK14,2026-06-29,kambing,kg,5.0,1000.0,-995.0,1.98,DATA,grams keyed in kg field
+SEK14,2026-06-29,telur_ikan,kg,1.0,7.0,-6.0,,,leftover > cooked
+SEK14,2026-06-30,ayam_tandoori,pcs,0,5,-5,15.0,DATA,leftover keyed x10?
+SEK14,2026-06-30,kambing,kg,5.0,600.0,-595.0,2.34,DATA,grams keyed in kg field
+SEK14,2026-06-30,telur_ikan,kg,1.0,7.0,-6.0,,,leftover > cooked
+SEK14,2026-07-01,ayam_tandoori,pcs,0,1,-1,15.0,DATA,leftover keyed x10?
+SEK14,2026-07-01,kambing,kg,5.0,700.0,-695.0,3.24,DATA,grams keyed in kg field
+SEK14,2026-07-01,telur_ikan,kg,1.0,13.0,-12.0,,,leftover keyed x10?
+SEK14,2026-07-02,kambing,kg,5.0,400.0,-395.0,3.06,DATA,grams keyed in kg field
+SEK14,2026-07-02,telur_ikan,kg,1.0,14.0,-13.0,,,leftover keyed x10?
+SEK14,2026-07-03,kambing,kg,5.0,400.0,-395.0,,,grams keyed in kg field
+SEK14,2026-07-03,telur_ikan,kg,0,4.0,-4.0,,,leftover keyed x10?
+SEK14,2026-07-04,ikan_kari,pcs,1,4,-3,,,leftover > cooked
+SEK14,2026-07-04,kambing,kg,5.0,600.0,-595.0,,,grams keyed in kg field
+SEK14,2026-07-05,kambing,kg,5.0,200.0,-195.0,,,grams keyed in kg field
+SEK14,2026-07-06,kambing,kg,5.0,1000.0,-995.0,,,grams keyed in kg field
+SEK14,2026-07-06,telur_ikan,kg,1.0,11.0,-10.0,,,leftover keyed x10?
+SEK14,2026-07-07,kambing,kg,5.0,400.0,-395.0,,,grams keyed in kg field
+SEK14,2026-07-07,telur_ikan,kg,1.0,14.0,-13.0,,,leftover keyed x10?
+SEK14,2026-07-18,kambing,kg,5.0,1000.0,-995.0,,,grams keyed in kg field
+SEK14,2026-07-19,kambing,kg,5.0,200.0,-195.0,,,grams keyed in kg field
+SEK14,2026-07-20,kambing,kg,5.0,200.0,-195.0,3.78,DATA,grams keyed in kg field
+SEK14,2026-07-20,telur_ikan,kg,1.0,12.0,-11.0,,,leftover keyed x10?
+SEK14,2026-07-21,kambing,kg,5.0,100.0,-95.0,1.98,DATA,grams keyed in kg field
+SEK14,2026-07-21,telur_ikan,kg,1.0,11.0,-10.0,,,leftover keyed x10?
+SEK14,2026-07-22,kambing,kg,5.0,300.0,-295.0,2.52,DATA,grams keyed in kg field
+SEK14,2026-07-22,telur_ikan,kg,1.0,5.0,-4.0,,,leftover > cooked
+SEK14,2026-07-23,kambing,kg,5.0,300.0,-295.0,1.98,DATA,grams keyed in kg field
+SEK14,2026-07-23,telur_ikan,kg,1.0,5.0,-4.0,,,leftover > cooked
+SEK14,2026-07-24,kambing,kg,5.0,300.0,-295.0,3.06,DATA,grams keyed in kg field
+SEK14,2026-07-24,telur_ikan,kg,1.0,4.0,-3.0,0.0,DATA,leftover > cooked
+SEK14,2026-07-25,kambing,kg,5.0,400.0,-395.0,2.16,DATA,grams keyed in kg field
+SEK14,2026-07-26,kambing,kg,5.0,400.0,-395.0,,,grams keyed in kg field
+SEK14,2026-07-27,kambing,kg,5.0,300.0,-295.0,,,grams keyed in kg field
+SEK14,2026-07-27,telur_ikan,kg,1.0,8.0,-7.0,,,leftover > cooked
+SEK14,2026-07-28,kambing,kg,5.0,200.0,-195.0,,,grams keyed in kg field
+SEK14,2026-07-28,telur_ikan,kg,1.0,8.0,-7.0,,,leftover > cooked
+SEK14,2026-07-29,kambing,kg,5.0,300.0,-295.0,,,grams keyed in kg field
+SEK14,2026-07-29,telur_ikan,kg,1.0,9.0,-8.0,,,leftover > cooked
+SEK14,2026-07-30,kambing,kg,5.0,200.0,-195.0,,,grams keyed in kg field
+SEK14,2026-07-30,telur_ikan,kg,1.0,10.0,-9.0,,,leftover keyed x10?
+SEK14,2026-07-31,kambing,kg,5.0,200.0,-195.0,,,grams keyed in kg field
+SEK14,2026-07-31,telur_ikan,kg,1.0,6.0,-5.0,,,leftover > cooked
+SEK14,2026-08-01,kambing,kg,5.0,200.0,-195.0,,,grams keyed in kg field
+SEK14,2026-08-05,ayam_tandoori,pcs,0,6,-6,13.0,DATA,leftover keyed x10?
+SEK14,2026-08-05,kambing,kg,5.0,200.0,-195.0,1.8,DATA,grams keyed in kg field
+SEK14,2026-08-05,telur_ikan,kg,2.0,15.0,-13.0,,,leftover > cooked
+SEK14,2026-08-06,ayam_tandoori,pcs,0,4,-4,1.0,,leftover keyed x10?
+SEK14,2026-08-06,ikan_kari,pcs,0,5,-5,0.0,,leftover keyed x10?
+SEK14,2026-08-06,kambing,kg,5.0,400.0,-395.0,3.06,DATA,grams keyed in kg field
+SEK14,2026-08-06,telur_ikan,kg,1.0,5.0,-4.0,,,leftover > cooked
+SEK14,2026-08-10,kambing,kg,5.0,600.0,-595.0,,,grams keyed in kg field
+SEK14,2026-08-10,telur_ikan,kg,1.0,17.0,-16.0,,,leftover keyed x10?
+SEK14,2026-08-11,kambing,kg,5.0,200.0,-195.0,,,grams keyed in kg field
+SEK14,2026-08-11,telur_ikan,kg,1.0,9.0,-8.0,,,leftover > cooked
+SEK14,2026-08-13,kambing,kg,5.0,500.0,-495.0,,,grams keyed in kg field
+SEK14,2026-08-13,telur_ikan,kg,1.0,12.0,-11.0,,,leftover keyed x10?
+SEK14,2026-08-14,kambing,kg,5.0,500.0,-495.0,,,grams keyed in kg field
+SEK14,2026-08-14,telur_ikan,kg,1.0,10.0,-9.0,,,leftover keyed x10?
+SEK14,2026-08-16,kambing,kg,5.0,400.0,-395.0,1.26,DATA,grams keyed in kg field
+SEK14,2026-08-17,kambing,kg,5.0,400.0,-395.0,2.52,DATA,grams keyed in kg field
+SEK14,2026-08-17,telur_ikan,kg,1.0,6.0,-5.0,,,leftover > cooked
+SEK14,2026-08-18,kambing,kg,5.0,500.0,-495.0,,,grams keyed in kg field
+SEK14,2026-08-18,telur_ikan,kg,1.0,20.0,-19.0,,,leftover keyed x10?
+SEK14,2026-08-19,kambing,kg,5.0,600.0,-595.0,1.98,DATA,grams keyed in kg field
+SEK14,2026-08-19,telur_ikan,kg,1.0,6.0,-5.0,,,leftover > cooked
+SEK14,2026-08-20,kambing,kg,5.0,600.0,-595.0,3.06,DATA,grams keyed in kg field
+SEK14,2026-08-20,telur_ikan,kg,1.0,6.0,-5.0,,,leftover > cooked
+SEK14,2026-08-21,kambing,kg,5.0,200.0,-195.0,2.88,DATA,grams keyed in kg field
+SEK14,2026-08-21,telur_ikan,kg,1.0,10.0,-9.0,,,leftover keyed x10?
+SEK14,2026-08-22,kambing,kg,5.0,500.0,-495.0,1.08,DATA,grams keyed in kg field
+SEK14,2026-08-22,telur_ikan,kg,1.0,6.0,-5.0,,,leftover > cooked
+SEK14,2026-08-24,kambing,kg,5.0,600.0,-595.0,1.98,DATA,grams keyed in kg field
+SEK14,2026-08-24,telur_ikan,kg,1.0,5.0,-4.0,,,leftover > cooked
+SEK14,2026-08-25,kambing,kg,5.0,700.0,-695.0,1.62,DATA,grams keyed in kg field
+SEK14,2026-08-26,kambing,kg,5.0,600.0,-595.0,1.44,DATA,grams keyed in kg field
+SEK14,2026-08-26,telur_ikan,kg,1.0,12.0,-11.0,,,leftover keyed x10?
+SEK14,2026-08-27,ayam_kicap,pcs,1,5,-4,0.0,,leftover > cooked
+SEK14,2026-08-27,kambing,kg,5.0,700.0,-695.0,1.8,DATA,grams keyed in kg field
+SEK14,2026-08-27,telur_ikan,kg,1.0,8.0,-7.0,,,leftover > cooked
+SEK14,2026-08-29,kambing,kg,5.0,400.0,-395.0,1.98,DATA,grams keyed in kg field
+SEK14,2026-09-02,kambing,kg,5.0,200.0,-195.0,2.7,DATA,grams keyed in kg field
+SEK14,2026-09-02,telur_ikan,kg,1.0,15.0,-14.0,,,leftover keyed x10?
+SEK14,2026-09-03,kambing,kg,5.0,1000.0,-995.0,1.26,DATA,grams keyed in kg field
+SEK14,2026-09-03,telur_ikan,kg,1.0,10.0,-9.0,,,leftover keyed x10?
+SEK14,2026-09-04,telur_ikan,kg,1.0,8.0,-7.0,,,leftover > cooked
+SEK14,2026-09-05,kambing,kg,5.0,500.0,-495.0,1.8,DATA,grams keyed in kg field
+SEK14,2026-09-05,telur_ikan,kg,0.0,14.0,-14.0,,,leftover keyed x10?
+SEK14,2026-09-07,telur_ikan,kg,1.0,10.0,-9.0,,,leftover keyed x10?
+SEK14,2026-09-08,kambing,kg,5.0,100.0,-95.0,2.52,DATA,grams keyed in kg field
+SEK14,2026-09-08,telur_ikan,kg,1.0,8.0,-7.0,,,leftover > cooked
+SEK14,2026-09-09,kambing,kg,5.0,500.0,-495.0,1.44,DATA,grams keyed in kg field
+SEK14,2026-09-09,telur_ikan,kg,1.0,4.0,-3.0,,,leftover > cooked
+SEK14,2026-09-10,kambing,kg,5.0,200.0,-195.0,2.34,DATA,grams keyed in kg field
+SEK14,2026-09-10,telur_ikan,kg,1.0,10.0,-9.0,,,leftover keyed x10?
+SEK14,2026-09-11,kambing,kg,5.0,300.0,-295.0,2.7,DATA,grams keyed in kg field
+SEK14,2026-09-11,telur_ikan,kg,1.0,3.0,-2.0,6.0,DATA,leftover > cooked
+SEK14,2026-09-12,kambing,kg,5.0,300.0,-295.0,2.34,DATA,grams keyed in kg field
+SEK14,2026-09-14,kambing,kg,5.0,300.0,-295.0,1.98,DATA,grams keyed in kg field
+SEK14,2026-09-14,telur_ikan,kg,1.0,13.0,-12.0,,,leftover keyed x10?
+SEK14,2026-09-15,telur_ikan,kg,1.0,15.0,-14.0,,,leftover keyed x10?
+SEK14,2026-09-16,kambing,kg,5.0,400.0,-395.0,1.62,DATA,grams keyed in kg field
+SEK14,2026-09-16,telur_ikan,kg,1.0,9.0,-8.0,,,leftover > cooked
+SEK14,2026-09-17,kambing,kg,5.0,400.0,-395.0,2.34,DATA,grams keyed in kg field
+SEK14,2026-09-17,telur_ikan,kg,1.0,6.0,-5.0,,,leftover > cooked
+SEK14,2026-09-18,kambing,kg,5.0,300.0,-295.0,2.88,DATA,grams keyed in kg field
+SEK14,2026-09-25,ayam_madu,pcs,0,1,-1,,,leftover keyed x10?
+SEK14,2026-09-25,kambing,kg,5.0,300.0,-295.0,,,grams keyed in kg field
+SEK14,2026-09-29,kambing,kg,5.0,600.0,-595.0,,,grams keyed in kg field
+SEK14,2026-09-29,telur_ikan,kg,1.0,18.0,-17.0,,,leftover keyed x10?
+SEK14,2026-09-30,kambing,kg,5.0,600.0,-595.0,,,grams keyed in kg field
+SEK14,2026-09-30,telur_ikan,kg,1.0,13.0,-12.0,,,leftover keyed x10?
+SEK14,2026-10-01,kambing,kg,5.0,500.0,-495.0,,,grams keyed in kg field
+SEK14,2026-10-01,telur_ikan,kg,1.0,14.0,-13.0,,,leftover keyed x10?
+SEK14,2026-10-02,kambing,kg,5.0,600.0,-595.0,2.34,DATA,grams keyed in kg field
+SEK14,2026-10-02,telur_ikan,kg,1.0,10.0,-9.0,,,leftover keyed x10?
+SEK14,2026-10-04,kambing,kg,5.0,600.0,-595.0,0.9,DATA,grams keyed in kg field
+SEK14,2026-10-05,kambing,kg,5.0,600.0,-595.0,1.44,DATA,grams keyed in kg field
+SEK14,2026-10-05,telur_ikan,kg,1.0,11.0,-10.0,,,leftover keyed x10?
+SEK14,2026-10-06,kambing,kg,5.0,700.0,-695.0,1.62,DATA,grams keyed in kg field
+SEK14,2026-10-06,telur_ikan,kg,1.0,14.0,-13.0,,,leftover keyed x10?
+SEK14,2026-10-07,kambing,kg,5.0,600.0,-595.0,1.62,DATA,grams keyed in kg field
+SEK14,2026-10-07,telur_ikan,kg,1.0,14.0,-13.0,,,leftover keyed x10?
+SEK14,2026-10-08,kambing,kg,5.0,500.0,-495.0,2.52,DATA,grams keyed in kg field
+SEK14,2026-10-08,telur_ikan,kg,1.0,24.0,-23.0,,,leftover keyed x10?
+SEK14,2026-10-09,kambing,kg,5.0,400.0,-395.0,,,grams keyed in kg field
+SEK14,2026-10-09,telur_ikan,kg,1.0,13.0,-12.0,,,leftover keyed x10?
+SEK15,2026-08-13,daging,kg,1.0,3000.0,-2999.0,0.48,DATA,grams keyed in kg field
+SEK15,2026-08-15,kambing,kg,153.0,200.0,-47.0,,,grams keyed in kg field
+SEK15,2026-08-19,daging,kg,2.0,350.0,-348.0,,,grams keyed in kg field
+SEK15,2026-08-19,kambing,kg,5.0,500.0,-495.0,,,grams keyed in kg field
+SEK15,2026-08-20,daging,kg,2.0,400.0,-398.0,,,grams keyed in kg field
+SEK15,2026-08-20,kambing,kg,2.5,250.0,-247.5,,,grams keyed in kg field
+SEK15,2026-08-24,daging,kg,2.0,400.0,-398.0,,,grams keyed in kg field
+SEK15,2026-08-24,kambing,kg,4.0,250.0,-246.0,,,grams keyed in kg field
+SEK15,2026-08-28,daging,kg,2.0,500.0,-498.0,0.3,,grams keyed in kg field
+SEK15,2026-08-28,kambing,kg,4.0,350.0,-346.0,3.24,,grams keyed in kg field
+SEK15,2026-08-31,daging,kg,2.0,750.0,-748.0,,,grams keyed in kg field
+SEK15,2026-08-31,kambing,kg,2.0,600.0,-598.0,,,grams keyed in kg field
+SEK15,2026-09-11,daging,kg,2.0,450.0,-448.0,0.3,DATA,grams keyed in kg field
+SEK15,2026-09-11,kambing,kg,7.0,650.0,-643.0,3.24,DATA,grams keyed in kg field
+SEK15,2026-09-28,daging,kg,402.0,450.0,-48.0,,,grams keyed in kg field
+SEK20,2026-06-29,ayam_madu,pcs,3,4,-1,1.0,,leftover > cooked
+SEK20,2026-06-29,telur_ikan,kg,1.0,1.5,-0.5,,,leftover > cooked
+SEK20,2026-07-04,ayam_tandoori,pcs,8,9,-1,7.0,DATA,leftover > cooked
+SEK20,2026-07-06,ayam_tandoori,pcs,8,9,-1,,,leftover > cooked
+SEK20,2026-07-08,ayam_tandoori,pcs,8,12,-4,9.0,DATA,leftover > cooked
+SEK20,2026-07-12,ayam_tandoori,pcs,8,10,-2,9.0,DATA,leftover > cooked
+SEK20,2026-07-13,ayam_goreng,pcs,20,50,-30,28.0,DATA,leftover > cooked
+SEK20,2026-07-13,ayam_tandoori,pcs,8,9,-1,11.0,DATA,leftover > cooked
+SEK20,2026-07-17,ayam_tandoori,pcs,8,12,-4,19.0,DATA,leftover > cooked
+SEK20,2026-07-18,ayam_tandoori,pcs,16,19,-3,11.0,DATA,leftover > cooked
+SEK20,2026-07-20,ayam_tandoori,pcs,8,10,-2,,,leftover > cooked
+SEK20,2026-07-21,ayam_tandoori,pcs,8,9,-1,5.0,DATA,leftover > cooked
+SEK20,2026-07-25,ayam_tandoori,pcs,8,13,-5,8.0,DATA,leftover > cooked
+SEK20,2026-07-29,ayam_tandoori,pcs,8,9,-1,12.0,DATA,leftover > cooked
+SEK20,2026-07-30,ayam_tandoori,pcs,8,12,-4,12.0,DATA,leftover > cooked
+SEK20,2026-07-31,ayam_tandoori,pcs,8,12,-4,15.0,DATA,leftover > cooked
+SEK20,2026-08-05,ayam_tandoori,pcs,6,7,-1,13.0,DATA,leftover > cooked
+SEK20,2026-08-11,ayam_tandoori,pcs,6,7,-1,8.0,DATA,leftover > cooked
+SEK20,2026-08-22,ayam_tandoori,pcs,6,7,-1,6.0,DATA,leftover > cooked
+SEK20,2026-09-07,ayam_tandoori,pcs,6,7,-1,10.0,DATA,leftover > cooked
+SEK20,2026-09-26,ayam_tandoori,pcs,6,8,-2,,,leftover > cooked
+SEK6,2026-06-25,ayam_tandoori,pcs,15,39,-24,0.0,DATA,leftover > cooked
+SEK6,2026-06-27,ayam_tandoori,pcs,20,40,-20,12.0,DATA,leftover > cooked
+SEK6,2026-06-28,ayam_tandoori,pcs,35,41,-6,13.0,DATA,leftover > cooked
+SEK6,2026-06-29,ayam_tandoori,pcs,26,53,-27,12.0,DATA,leftover > cooked
+SEK6,2026-07-02,ayam_tandoori,pcs,24,40,-16,18.0,DATA,leftover > cooked
+SEK6,2026-07-02,telur_ikan,kg,302.0,400.0,-98.0,,,grams keyed in kg field
+SEK6,2026-07-03,telur_ikan,kg,402.0,500.0,-98.0,,,grams keyed in kg field
+SEK6,2026-07-04,ayam_tandoori,pcs,22,46,-24,17.0,DATA,leftover > cooked
+SEK6,2026-07-05,ayam_tandoori,pcs,10,34,-24,26.0,DATA,leftover > cooked
+SEK6,2026-07-05,daging,kg,702.0,7000.0,-6298.0,0.24,DATA,grams keyed in kg field
+SEK6,2026-07-05,kambing,kg,603.0,800.0,-197.0,1.98,DATA,grams keyed in kg field
+SEK6,2026-07-06,ayam_tandoori,pcs,31,48,-17,,,leftover > cooked
+SEK6,2026-07-06,daging,kg,402.0,600.0,-198.0,,,grams keyed in kg field
+SEK6,2026-07-06,kambing,kg,603.0,800.0,-197.0,,,grams keyed in kg field
+SEK6,2026-07-07,ayam_tandoori,pcs,20,22,-2,17.0,DATA,leftover > cooked
+SEK6,2026-07-08,ayam_tandoori,pcs,21,44,-23,21.0,DATA,leftover > cooked
+SEK6,2026-07-10,ayam_tandoori,pcs,22,38,-16,19.0,DATA,leftover > cooked
+SEK6,2026-07-10,daging,kg,502.0,550.0,-48.0,0.24,DATA,grams keyed in kg field
+SEK6,2026-07-12,ayam_tandoori,pcs,20,41,-21,21.0,DATA,leftover > cooked
+SEK6,2026-07-13,daging,kg,502.0,600.0,-98.0,,,grams keyed in kg field
+SEK6,2026-07-14,ayam_tandoori,pcs,0,48,-48,19.0,DATA,leftover keyed x10?
+SEK6,2026-07-14,daging,kg,2.0,400.0,-398.0,0.24,DATA,grams keyed in kg field
+SEK6,2026-07-14,kambing,kg,3.0,500.0,-497.0,1.26,DATA,grams keyed in kg field
+SEK6,2026-07-14,telur_ikan,kg,2.0,300.0,-298.0,,,grams keyed in kg field
+SEK6,2026-07-16,ayam_tandoori,pcs,21,49,-28,15.0,DATA,leftover > cooked
+SEK6,2026-07-16,daging,kg,1.0,600.0,-599.0,0.18,DATA,grams keyed in kg field
+SEK6,2026-07-16,kambing,kg,400.0,500.0,-100.0,3.06,DATA,grams keyed in kg field
+SEK6,2026-07-17,ayam_tandoori,pcs,18,35,-17,29.0,DATA,leftover > cooked
+SEK6,2026-07-18,daging,kg,502.0,600.0,-98.0,0.6,DATA,grams keyed in kg field
+SEK6,2026-07-18,telur_ikan,kg,402.0,4000.0,-3598.0,,,grams keyed in kg field
+SEK6,2026-07-19,ayam_tandoori,pcs,25,35,-10,18.0,DATA,leftover > cooked
+SEK6,2026-07-19,kambing,kg,603.0,700.0,-97.0,3.06,DATA,grams keyed in kg field
+SEK6,2026-07-20,ayam_tandoori,pcs,28,51,-23,14.0,DATA,leftover > cooked
+SEK6,2026-07-21,ayam_tandoori,pcs,25,34,-9,10.0,DATA,leftover > cooked
+SEK6,2026-07-22,ayam_tandoori,pcs,23,24,-1,26.0,DATA,leftover > cooked
+SEK6,2026-07-22,kambing,kg,603.0,700.0,-97.0,2.7,DATA,grams keyed in kg field
+SEK6,2026-07-23,ayam_tandoori,pcs,24,40,-16,19.0,DATA,leftover > cooked
+SEK6,2026-07-24,ayam_tandoori,pcs,18,21,-3,17.0,DATA,leftover > cooked
+SEK6,2026-07-25,ayam_tandoori,pcs,21,44,-23,14.0,DATA,leftover > cooked
+SEK6,2026-07-26,ayam_tandoori,pcs,22,30,-8,18.0,DATA,leftover > cooked
+SEK6,2026-07-27,ayam_tandoori,pcs,26,48,-22,17.0,DATA,leftover > cooked
+SEK6,2026-07-27,daging,kg,502.0,600.0,-98.0,0.18,DATA,grams keyed in kg field
+SEK6,2026-07-28,daging,kg,602.0,4000.0,-3398.0,0.3,DATA,grams keyed in kg field
+SEK6,2026-07-29,ayam_tandoori,pcs,25,57,-32,21.0,DATA,leftover > cooked
+SEK6,2026-07-31,ayam_tandoori,pcs,18,60,-42,21.0,DATA,leftover > cooked
+SEK6,2026-08-01,ayam_tandoori,pcs,18,38,-20,21.0,DATA,leftover > cooked
+SEK6,2026-08-01,daging,kg,702.0,800.0,-98.0,0.12,DATA,grams keyed in kg field
+SEK6,2026-08-03,ayam_tandoori,pcs,16,41,-25,10.0,DATA,leftover > cooked
+SEK6,2026-08-03,daging,kg,502.0,600.0,-98.0,0.24,DATA,grams keyed in kg field
+SEK6,2026-08-04,ayam_tandoori,pcs,19,30,-11,19.0,DATA,leftover > cooked
+SEK6,2026-08-05,ayam_tandoori,pcs,26,48,-22,14.0,DATA,leftover > cooked
+SEK6,2026-08-06,ayam_tandoori,pcs,25,36,-11,11.0,DATA,leftover > cooked
+SEK6,2026-08-07,ayam_tandoori,pcs,29,62,-33,12.0,DATA,leftover > cooked
+SEK6,2026-08-07,telur_ikan,kg,702.0,800.0,-98.0,,,grams keyed in kg field
+SEK6,2026-08-08,ayam_tandoori,pcs,19,46,-27,15.0,DATA,leftover > cooked
+SEK6,2026-08-08,daging,kg,702.0,6000.0,-5298.0,0.24,DATA,grams keyed in kg field
+SEK6,2026-08-09,ayam_tandoori,pcs,21,28,-7,20.0,DATA,leftover > cooked
+SEK6,2026-08-10,ayam_tandoori,pcs,21,50,-29,11.0,DATA,leftover > cooked
+SEK6,2026-08-10,daging,kg,702.0,7000.0,-6298.0,0.66,DATA,grams keyed in kg field
+SEK6,2026-08-11,ayam_tandoori,pcs,22,35,-13,16.0,DATA,leftover > cooked
+SEK6,2026-08-12,ayam_tandoori,pcs,24,60,-36,15.0,DATA,leftover > cooked
+SEK6,2026-08-13,ayam_tandoori,pcs,20,45,-25,15.0,DATA,leftover > cooked
+SEK6,2026-08-14,ayam_tandoori,pcs,23,27,-4,24.0,DATA,leftover > cooked
+SEK6,2026-08-14,telur_ikan,kg,702.0,8000.0,-7298.0,10.0,DATA,grams keyed in kg field
+SEK6,2026-08-15,ayam_tandoori,pcs,27,44,-17,13.0,DATA,leftover > cooked
+SEK6,2026-08-16,ayam_tandoori,pcs,21,25,-4,18.0,DATA,leftover > cooked
+SEK6,2026-08-17,ayam_tandoori,pcs,25,46,-21,15.0,DATA,leftover > cooked
+SEK6,2026-08-18,ayam_tandoori,pcs,25,27,-2,,,leftover > cooked
+SEK6,2026-08-19,ayam_goreng,pcs,210,510,-300,152.0,DATA,leftover > cooked
+SEK6,2026-08-19,ayam_tandoori,pcs,28,69,-41,30.0,DATA,leftover > cooked
+SEK6,2026-08-23,ayam_tandoori,pcs,30,52,-22,22.0,DATA,leftover > cooked
+SEK6,2026-08-25,ayam_tandoori,pcs,23,47,-24,17.0,DATA,leftover > cooked
+SEK6,2026-08-26,ayam_tandoori,pcs,22,49,-27,18.0,DATA,leftover > cooked
+SEK6,2026-08-27,ayam_tandoori,pcs,29,50,-21,20.0,DATA,leftover > cooked
+SEK6,2026-08-28,ayam_tandoori,pcs,26,30,-4,15.0,DATA,leftover > cooked
+SEK6,2026-08-29,ayam_tandoori,pcs,26,53,-27,23.0,DATA,leftover > cooked
+SEK6,2026-08-30,ayam_tandoori,pcs,28,30,-2,20.0,DATA,leftover > cooked
+SEK6,2026-08-31,ayam_tandoori,pcs,24,52,-28,16.0,DATA,leftover > cooked
+SEK6,2026-09-01,ayam_tandoori,pcs,23,32,-9,13.0,DATA,leftover > cooked
+SEK6,2026-09-01,daging,kg,502.0,600.0,-98.0,0.48,DATA,grams keyed in kg field
+SEK6,2026-09-02,ayam_tandoori,pcs,25,60,-35,21.0,DATA,leftover > cooked
+SEK6,2026-09-02,telur_ikan,kg,402.0,600.0,-198.0,,,grams keyed in kg field
+SEK6,2026-09-03,ayam_tandoori,pcs,31,33,-2,32.0,DATA,leftover > cooked
+SEK6,2026-09-04,daging,kg,3.0,800.0,-797.0,0.66,DATA,grams keyed in kg field
+SEK6,2026-09-04,telur_ikan,kg,402.0,4000.0,-3598.0,10.0,DATA,grams keyed in kg field
+SEK6,2026-09-05,kambing,kg,4.0,800.0,-796.0,1.8,DATA,grams keyed in kg field
+SEK6,2026-09-06,ayam_tandoori,pcs,21,40,-19,18.0,DATA,leftover > cooked
+SEK6,2026-09-06,telur_ikan,kg,3.0,800.0,-797.0,,,grams keyed in kg field
+SEK6,2026-09-07,ayam_tandoori,pcs,19,25,-6,6.0,DATA,leftover > cooked
+SEK6,2026-09-08,ayam_tandoori,pcs,23,57,-34,25.0,DATA,leftover > cooked
+SEK6,2026-09-09,ayam_tandoori,pcs,26,29,-3,25.0,DATA,leftover > cooked
+SEK6,2026-09-12,ayam_tandoori,pcs,25,45,-20,12.0,DATA,leftover > cooked
+SEK6,2026-09-14,ayam_tandoori,pcs,27,50,-23,31.0,DATA,leftover > cooked
+SEK6,2026-09-14,kambing,kg,603.0,700.0,-97.0,2.16,DATA,grams keyed in kg field
+SEK6,2026-09-16,ayam_tandoori,pcs,20,45,-25,12.0,DATA,leftover > cooked
+SEK6,2026-09-17,ayam_tandoori,pcs,22,29,-7,11.0,DATA,leftover > cooked
+SEK6,2026-09-18,ayam_tandoori,pcs,15,53,-38,26.0,DATA,leftover > cooked
+SEK6,2026-09-18,kambing,kg,4.0,500.0,-496.0,3.06,DATA,grams keyed in kg field
+SEK6,2026-09-20,telur_ikan,kg,402.0,4000.0,-3598.0,,,grams keyed in kg field
+SEK6,2026-09-21,ayam_tandoori,pcs,15,29,-14,,,leftover > cooked
+SEK6,2026-09-22,ayam_tandoori,pcs,29,52,-23,13.0,DATA,leftover > cooked
+SEK6,2026-09-23,ayam_tandoori,pcs,26,29,-3,,,leftover > cooked
+SEK6,2026-09-24,daging,kg,502.0,700.0,-198.0,1.02,DATA,grams keyed in kg field
+SEK6,2026-09-25,ayam_tandoori,pcs,25,36,-11,,,leftover > cooked
+SEK6,2026-09-26,ayam_tandoori,pcs,0,13,-13,13.0,DATA,leftover keyed x10?
+SEK6,2026-09-29,ayam_tandoori,pcs,20,52,-32,27.0,DATA,leftover > cooked
+SEK6,2026-09-30,daging,kg,3.0,900.0,-897.0,0.9,DATA,grams keyed in kg field
+SEK6,2026-10-01,ayam_tandoori,pcs,26,46,-20,16.0,DATA,leftover > cooked
+SEK6,2026-10-02,ayam_tandoori,pcs,24,32,-8,13.0,DATA,leftover > cooked
+SEK6,2026-10-03,ayam_tandoori,pcs,32,54,-22,20.0,DATA,leftover > cooked
+SEK6,2026-10-04,ayam_tandoori,pcs,25,36,-11,18.0,DATA,leftover > cooked
+SEK6,2026-10-04,telur_ikan,kg,3.0,500.0,-497.0,,,grams keyed in kg field
+SEK6,2026-10-05,ayam_tandoori,pcs,24,52,-28,17.0,DATA,leftover > cooked
+SEK6,2026-10-06,ayam_tandoori,pcs,15,44,-29,26.0,DATA,leftover > cooked
+SEK6,2026-10-08,ayam_tandoori,pcs,24,40,-16,18.0,DATA,leftover > cooked
+SEK6,2026-10-09,ayam_tandoori,pcs,18,60,-42,,,leftover > cooked
+VISTA,2026-06-28,ayam_madu,pcs,3,4,-1,2.0,,leftover > cooked
+VISTA,2026-06-28,ikan_goreng,pcs,0,5,-5,0.0,,leftover keyed x10?
+VISTA,2026-06-28,telur_ikan,kg,0,4.0,-4.0,,,leftover keyed x10?
+VISTA,2026-06-30,daging,kg,1.0,5.0,-4.0,0.36,DATA,leftover > cooked
+VISTA,2026-06-30,kambing,kg,2.0,5.0,-3.0,2.7,DATA,leftover > cooked
+VISTA,2026-07-19,ayam_kicap,pcs,6,8,-2,,,leftover > cooked
+VISTA,2026-07-19,ikan_goreng,pcs,0,6,-6,,,leftover keyed x10?

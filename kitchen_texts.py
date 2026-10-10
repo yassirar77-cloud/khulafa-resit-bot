@@ -310,6 +310,65 @@ T: dict[str, dict[str, str]] = {
         "english": "🔴 = used more than POS  ⚠️ = used less than POS (maybe entered wrong)",
         "indonesian": "🔴 = terpakai lebih dari POS  ⚠️ = terpakai kurang dari POS (mungkin salah isi)",
     },
+    "mini_bad": {
+        "bm": "❌ {label}: Data salah – sila semak",
+        "tamil": "❌ {label}: Data தப்பு – சரிபாருங்க",
+        "bengali": "❌ {label}: Data bhul – check korun",
+        "english": "❌ {label}: Wrong data – please check",
+        "indonesian": "❌ {label}: Data salah – mohon dicek",
+    },
+    # Telur Ikan while no portion weight is set: POS pieces, no status.
+    "mini_line_pcs": {
+        "bm": "➖ {label}: guna {used} {unit} vs POS {pcs} pcs (berat porsi belum ditetapkan)",
+        "tamil": "➖ {label}: பயன்பாடு {used} {unit} vs POS {pcs} pcs (portion எடை இன்னும் set ஆகல)",
+        "bengali": "➖ {label}: byabohar {used} {unit} vs POS {pcs} pcs (portion ojon set hoy nai)",
+        "english": "➖ {label}: used {used} {unit} vs POS {pcs} pcs (portion weight not set)",
+        "indonesian": "➖ {label}: terpakai {used} {unit} vs POS {pcs} pcs (berat porsi belum diatur)",
+    },
+    "mini_nocompare": {
+        "bm": "➖ {label}: belum boleh banding",
+        "tamil": "➖ {label}: இன்னும் ஒப்பிட முடியாது",
+        "bengali": "➖ {label}: ekhono tulona kora jay na",
+        "english": "➖ {label}: can't compare yet",
+        "indonesian": "➖ {label}: belum bisa dibandingkan",
+    },
+    "mini_unmapped": {
+        "bm": "POS tiada butang: {items}",
+        "tamil": "POS-ல button இல்லாதது: {items}",
+        "bengali": "POS-e button nai: {items}",
+        "english": "POS items with no button: {items}",
+        "indonesian": "POS tanpa tombol: {items}",
+    },
+    "mini_window": {
+        "bm": "Dapur: {kitchen} | POS: {pos}",
+        "tamil": "சமையலறை: {kitchen} | POS: {pos}",
+        "bengali": "Ranna ghor: {kitchen} | POS: {pos}",
+        "english": "Kitchen: {kitchen} | POS: {pos}",
+        "indonesian": "Dapur: {kitchen} | POS: {pos}",
+    },
+    "mini_bad_legend": {
+        "bm": "❌ = guna kurang dari 0 — baki atau masak salah isi, sila semak",
+        "tamil": "❌ = பயன்பாடு 0-க்கு கீழ — மீதம் அல்லது சமையல் தப்பா போட்டிருக்கு, சரிபாருங்க",
+        "bengali": "❌ = byabohar 0-er kom — baki ba ranna bhul likha, check korun",
+        "english": "❌ = used below 0 — leftover or cooked entered wrong, please check",
+        "indonesian": "❌ = terpakai di bawah 0 — sisa atau masak salah isi, mohon dicek",
+    },
+    # --- key-in checks (always BM + Tamil, whatever the group's language) ---
+    "left_gt_cooked": {
+        "bm": "⚠️ {label}: baki {left} {unit} lebih dari masak {cooked} {unit}. Baki tak boleh lebih dari masak — sila taip semula.",
+        "tamil": "⚠️ {label}: மீதம் {left} {unit}, சமைச்சது {cooked} {unit}-ஐ விட அதிகம். மீதம் சமைச்சதை விட அதிகமா இருக்க முடியாது — மறுபடி போடுங்க.",
+    },
+    "left_gt_cooked_alert": {
+        "bm": "Baki lebih dari masak — sila taip semula",
+        "tamil": "மீதம் சமைச்சதை விட அதிகம் — மறுபடி போடுங்க",
+    },
+    "grams_ask": {
+        "bm": "{label}: Maksud {g} g = {kg} kg?",
+        "tamil": "{label}: {g} g = {kg} kg-ஆ?",
+    },
+    "grams_yes": {"bm": "✅ Ya, {kg} kg", "tamil": "✅ ஆமா, {kg} kg"},
+    "grams_keep": {"bm": "{g} kg (betul)", "tamil": "{g} kg (சரி)"},
+    "grams_retype": {"bm": "✏️ Taip semula", "tamil": "✏️ மறுபடி போடு"},
     "pos_wait_head": {
         "bm": "⏳ POS belum lengkap — {outlet} {date}",
         "tamil": "⏳ POS இன்னும் முழுசா வரல — {outlet} {date}",
@@ -426,6 +485,17 @@ T: dict[str, dict[str, str]] = {
         "indonesian": "Mungkin dimasak lebih dari kebutuhan. Masak sesuai penjualan supaya sisa dan rugi berkurang 🙏",
     },
 }
+
+
+def bm_tamil(key: str, **values) -> str:
+    """BM line with the Tamil line under it — for key-in checks every cashier
+    must understand, whatever language the group is set to."""
+    return "\n".join(T[key][lang].format(**values) for lang in ("bm", "tamil"))
+
+
+def bm_tamil_short(key: str, **values) -> str:
+    """BM / Tamil on one line (buttons, pop-ups)."""
+    return " / ".join(T[key][lang].format(**values) for lang in ("bm", "tamil"))
 
 
 def text(key: str, language: str, **values) -> str:

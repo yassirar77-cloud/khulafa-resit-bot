@@ -23,43 +23,53 @@ def _parsed(code):
 
 
 class BusinessDateTests(unittest.TestCase):
-    """PR #61: a D-file's business day is the print date only for an evening
-    (>=17:00) close; post-midnight overnight prints belong to the previous day."""
+    """The POS stamps a morning D-file with the BUSINESS date it summarises
+    (live: "D-SEK14 ON 09/Oct/2026 07:00:03" arrived 10 Oct 07:00 and lists
+    shifts 2096 + 2097 = 9 Oct 07:00 -> 10 Oct 07:00). The old "before 17:00 ->
+    previous day" rule subtracted that day twice. See pos_dates."""
 
-    def test_business_date_morning_returns_previous_day(self):
-        # Header date 26 May, printed 00:09 / 07:00 -> business day is 25 May.
+    def test_morning_print_is_the_stamped_business_date(self):
         self.assertEqual(business_date_for_printed(datetime(2026, 5, 26, 0, 9, 19)),
-                         datetime(2026, 5, 25).date())
+                         datetime(2026, 5, 26).date())
         self.assertEqual(business_date_for_printed(datetime(2026, 5, 26, 7, 0, 2)),
-                         datetime(2026, 5, 25).date())
-        self.assertEqual(business_date_for_printed(datetime(2026, 5, 26, 16, 59)),
-                         datetime(2026, 5, 25).date())
-        # Real D-SEK20 (printed 00:09) -> 2026-05-25.
-        self.assertEqual(str(_parsed("D-SEK20")["header"]["business_date"]), "2026-05-25")
+                         datetime(2026, 5, 26).date())
+        self.assertEqual(str(_parsed("D-SEK20")["header"]["business_date"]), "2026-05-26")
+
+    def test_live_sek14_9_oct_d_file(self):
+        # Arrived 24h after its stamp -> the stamp carries the business date.
+        self.assertEqual(
+            business_date_for_printed(datetime(2026, 10, 9, 7, 0, 3),
+                                      "2026-10-10T07:00:16+08:00"),
+            datetime(2026, 10, 9).date())
+        # SEK15 prints "09/Oct 00:02" and the email lands 10 Oct 07:00 (31h).
+        self.assertEqual(
+            business_date_for_printed(datetime(2026, 10, 9, 0, 2, 11),
+                                      "2026-10-09T23:00:19+00:00"),
+            datetime(2026, 10, 9).date())
+
+    def test_morning_print_that_arrived_on_time_is_the_real_date(self):
+        # A stamp that arrived within minutes is the real wall clock: a 07:00
+        # print on 26 May closes the business day of 25 May.
+        self.assertEqual(
+            business_date_for_printed(datetime(2026, 5, 26, 7, 0, 2),
+                                      "2026-05-26T07:00:20+08:00"),
+            datetime(2026, 5, 25).date())
 
     def test_business_date_evening_returns_same_day(self):
-        # 17:00 cutoff inclusive; 19:00 close prints same-day.
         self.assertEqual(business_date_for_printed(datetime(2026, 5, 26, 17, 0)),
                          datetime(2026, 5, 26).date())
         self.assertEqual(business_date_for_printed(datetime(2026, 5, 26, 19, 0, 4)),
                          datetime(2026, 5, 26).date())
-        # Real D-Damansara (printed 19:00) -> 2026-05-26.
         self.assertEqual(str(_parsed("D-DAMANSARA")["header"]["business_date"]), "2026-05-26")
 
-    def test_sek14_morning_print_is_previous_business_day(self):
-        # PR #62 regression: D-SEK14 header "ON 26/May/2026 07:00:02". The hour is
-        # read directly from the (naive, MY-local) timestamp — NO tz conversion —
-        # so the 07:00 overnight close belongs to 2026-05-25, NOT 2026-05-26.
-        self.assertEqual(str(_parsed("D-SEK14")["header"]["business_date"]), "2026-05-25")
+    def test_sek14_morning_print_is_its_stamped_business_day(self):
+        self.assertEqual(str(_parsed("D-SEK14")["header"]["business_date"]), "2026-05-26")
 
     def test_business_date_ignores_timezone_no_double_shift(self):
-        # A tz-aware value must read its wall-clock hour, never convert. 07:00 +08
-        # stays the 07:00 business day (previous day), not shifted to UTC 23:00.
+        # A tz-aware stamp reads its wall-clock hour, never converts.
         from datetime import timedelta, timezone
         my = timezone(timedelta(hours=8))
         aware = datetime(2026, 5, 26, 7, 0, 0, tzinfo=my)
-        self.assertEqual(business_date_for_printed(aware), datetime(2026, 5, 25).date())
-        # And it matches the naive result for the same wall clock.
         self.assertEqual(business_date_for_printed(aware),
                          business_date_for_printed(datetime(2026, 5, 26, 7, 0, 0)))
 

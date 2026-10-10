@@ -53,12 +53,13 @@ def _klang_content():
     return read_shift_close_file(path_for_code("S-KLANG"))
 
 
-def make_email(subject, content_str, *, filename="SHIFTCLOSE.TXT", message_id="<m1>", empty=False):
+def make_email(subject, content_str, *, filename="SHIFTCLOSE.TXT", message_id="<m1>", empty=False,
+               date="Tue, 26 May 2026 19:30:00 +0800"):
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = "myposkhulafa@gmail.com"
     msg["Message-ID"] = message_id
-    msg["Date"] = "Tue, 26 May 2026 19:30:00 +0800"
+    msg["Date"] = date
     msg.set_content("Shift close report attached.")
     data = b"" if empty else content_str.encode("utf-16")
     msg.add_attachment(data, maintype="application", subtype="octet-stream", filename=filename)
@@ -124,7 +125,9 @@ class FakeStore:
         return len(self.saved)
 
     def exists_daily(self, outlet_canonical, business_date, printed_at=None):
-        return (outlet_canonical, business_date, printed_at) in self._dkeys
+        if printed_at is None:
+            return (outlet_canonical, business_date, None) in self._dkeys
+        return any(k[0] == outlet_canonical and k[2] == printed_at for k in self._dkeys)
 
     def exists_daily_message_id(self, message_id):
         return message_id in self._dmids
@@ -544,7 +547,9 @@ class TwoDailyClosesTests(unittest.TestCase):
                               message_id="<d-eve>")),
             (b"2", make_email(f"D-SEK20 ON {self.MORNING}",
                               _mini_d_content(self.MORNING, 9002, sales="2,100.00"),
-                              message_id="<d-morn>")),
+                              message_id="<d-morn>",
+                              # stamped with the real time: arrived seconds later
+                              date="Sat, 08 Aug 2026 07:00:20 +0800")),
         ])
 
     def test_both_closes_ingest_onto_same_business_date(self):

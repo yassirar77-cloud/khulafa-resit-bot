@@ -32,9 +32,12 @@ import logging
 import os
 import re
 import time
+import datetime as _dt_mod
 from datetime import date, datetime, timedelta
 
 import kitchen_texts
+from config import kitchen_compare as cfg
+from pos_names import normalize_pos_name
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
@@ -429,9 +432,13 @@ def outlets_match(code_a, code_b) -> bool:
 # "not" lists words that disqualify a dish even when the rule otherwise matches
 # (a fried "...berempah" dish is a goreng dish, not a rempah dish).
 #
-# NOTE: Telur Ikan is NOT here — it is not sold as a POS dish, it is BOUGHT by
-# weight. It is compared against kg purchased (from receipts), not POS. See
-# PURCHASE_COMPARE_CODES / purchased_kg_from_receipts below.
+# Telur Ikan is compared against the POS like every other item: the POS sells
+# it as sized portions ("Telur Ikan M", "Telur Ikan (b)", "Telur Ikan Ikut
+# Saiz", ...), converted to kg via ``cfg.TELUR_IKAN_PORTION_GRAMS``.
+#
+# Ayam Tandoori counts every name with "ayam" + "tandoori"/"tandori" (minus
+# staff meals). "Ayam 65" / "Chicken 65" is NOT tandoori — it is listed under
+# "POS tiada butang" instead (live SEK-14 8 Oct: POS 16 = Ayam Tandoori only).
 
 # Style words that stop a dish being "plain" ayam: any of these means the dish
 # is another tracked style's (or an untracked style's) chicken, not the default
@@ -440,6 +447,7 @@ def outlets_match(code_a, code_b) -> bool:
 _AYAM_STYLE_WORDS = (
     "bawang", "kicap", "madu", "tandoori", "tandori", "rempah",
     "goreng", "masak", "kari", "kurma", "rendang", "merah", "pedas",
+    "65",  # "Nasiputih+ Ayam65" is Ayam 65, not the plain fried piece
 )
 
 ITEM_POS_KEYWORDS: dict[str, dict] = {
@@ -471,6 +479,8 @@ ITEM_POS_KEYWORDS: dict[str, dict] = {
     # "not": susu — Susu Kambing / goat-milk drinks are not the kitchen's meat.
     "kambing": {"base": "kambing", "styles": [], "not": ["susu"]},
     "daging": {"base": "daging", "styles": []},
+    # Every sized portion ("telur ikan m", "telur ikan (b)", "nasi telur ikan").
+    "telur_ikan": {"base": "telur ikan", "styles": []},
 }
 
 # Dishes excluded from EVERY item: staff meals and anything in the POS "THAI
@@ -490,12 +500,14 @@ _POS_STAFF_SUBSTR = "staff"
 # Ayam-only exclusions: Thai-chef isi-ayam noodle/rice dishes and the
 # rendang/kurma styles that are not tracked in the kitchen log. NOT applied to
 # kambing/daging — those count ALL dishes (minus staff / Thai category).
-AYAM_EXCLUDE_SUBSTRINGS = (
+# Isi-ayam noodle / fried-rice dishes: never a whole-cut piece.
+AYAM_NOODLE_SUBSTRINGS = (
     "paprik", "tomyam", "tom yam", "maggi",
     "indomee", "indo mee",
     "kuey teow", "kuey tiaw", "koay teow", "kuetiau", "kuey tiau",
-    "mee ", "rendang", "kurma",
+    "mee ",
 )
+AYAM_EXCLUDE_SUBSTRINGS = AYAM_NOODLE_SUBSTRINGS + ("rendang", "kurma")
 
 
 def _pos_dish_excluded(name: str, category, base: str) -> bool:
@@ -538,17 +550,13 @@ def _pos_dish_matches(spec: dict, name: str) -> bool:
 # weighed Used. Kambing 180 g/portion, Daging 60 g/portion (owner-locked).
 # Telur Ikan is deliberately ABSENT — it is compared vs kg purchased, not POS,
 # so it needs no portion-size guess.
-KG_PORTION_GRAMS: dict[str, float] = {
-    "kambing": 180.0,
-    "daging": 60.0,
-}
+KG_PORTION_GRAMS: dict[str, float] = cfg.KG_PORTION_GRAMS
 
 # Items compared against kg PURCHASED (from receipts) instead of POS sold.
-# Telur Ikan (fish roe) is bought by weight; the resit pipeline already stores
-# every supplier purchase, so Used (cooked − left) is compared with what was
-# bought that day. v1 uses approach (b): show both numbers and only flag when a
-# same-day purchase exists (purchases aren't daily, so absence is NOT a flag).
-PURCHASE_COMPARE_CODES = frozenset({"telur_ikan"})
+# Empty since Oct 2026: Telur Ikan is sold on the POS by the portion, so it is
+# compared against the POS like every other item (owner decision). The
+# purchase helpers below are kept for the digest's historical rows.
+PURCHASE_COMPARE_CODES: frozenset = frozenset()
 
 
 def compare_source(item_code: str) -> str:
@@ -557,12 +565,12 @@ def compare_source(item_code: str) -> str:
     return "purchase" if item_code in PURCHASE_COMPARE_CODES else "pos"
 
 
-# Dual-gate thresholds (mamak-tuned): a flag needs BOTH the % gate and the
-# absolute gate to trip, so tiny outlets don't false-alarm on a few pcs.
-PCS_PCT_GATE = 8.0     # > 8 %
-PCS_ABS_GATE = 5.0     # AND > 5 pcs
-KG_PCT_GATE = 10.0     # > 10 %
-KG_ABS_GATE = 1.5      # AND > 1.5 kg
+# Flag values stored in kitchen_daily_usage.mismatch_flag:
+#   LEAK -> 🔴 guna more than POS     DATA -> ⚠️ guna less than POS
+#   BAD  -> ❌ guna < 0 (impossible: a key-in error, never given a status)
+FLAG_LEAK = "LEAK"
+FLAG_DATA = "DATA"
+FLAG_BAD = "BAD"
 
 
 def used_qty(cooked, left):
@@ -570,6 +578,55 @@ def used_qty(cooked, left):
     if cooked is None or left is None:
         return None
     return cooked - left
+
+
+def _row_counts_for(item_code: str, name: str, category) -> bool:
+    """True when one (normalised) POS dish name counts toward ``item_code``."""
+    spec = ITEM_POS_KEYWORDS.get(item_code)
+    if not spec:
+        return False
+    base = spec["base"]
+    if base not in name:
+        return False
+    if _pos_dish_excluded(name, category, base):
+        return False
+    return _pos_dish_matches(spec, name)
+
+
+def _row_qty(row) -> float:
+    try:
+        return float(row.get("qty") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def pos_pcs_for_item(item_code: str, itemwise_rows: list) -> float:
+    """POS portions sold for an item (pieces, before any kg conversion)."""
+    total = 0.0
+    for row in itemwise_rows or []:
+        name = normalize_pos_name(row.get("item_name"))
+        if _row_counts_for(item_code, name, row.get("category")):
+            total += _row_qty(row)
+    return total
+
+
+def _telur_ikan_kg(itemwise_rows: list):
+    """kg of Telur Ikan sold, or None while a sold variant has no portion
+    weight in ``cfg.TELUR_IKAN_PORTION_GRAMS`` (never a guessed weight)."""
+    grams = cfg.TELUR_IKAN_PORTION_GRAMS
+    total_g = 0.0
+    for row in itemwise_rows or []:
+        name = normalize_pos_name(row.get("item_name"))
+        if not _row_counts_for("telur_ikan", name, row.get("category")):
+            continue
+        qty = _row_qty(row)
+        if not qty:
+            continue
+        g = grams.get(name)
+        if g is None:
+            return None
+        total_g += qty * float(g)
+    return round(total_g / 1000.0, 2)
 
 
 def pos_qty_for_item(item_code: str, itemwise_rows: list) -> float:
@@ -580,26 +637,14 @@ def pos_qty_for_item(item_code: str, itemwise_rows: list) -> float:
     styles / base-only), and is not excluded (Thai-chef isi-ayam, staff meals;
     see ``_pos_dish_excluded``). For kg items the summed POS piece-count is
     converted to kg via ``KG_PORTION_GRAMS``."""
-    spec = ITEM_POS_KEYWORDS.get(item_code)
-    if not spec:
+    if item_code not in ITEM_POS_KEYWORDS:
         return 0.0
-    base = spec["base"]
-    total = 0.0
-    for row in itemwise_rows or []:
-        # Collapse whitespace runs before matching: the POS pads names with
-        # doubled spaces ("Ikan  Goreng", "Teh  O"), which silently broke every
-        # adjacency-phrase match and read those dishes as 0 sold.
-        name = re.sub(r"\s+", " ", str(row.get("item_name") or "")).strip().lower()
-        if base not in name:
-            continue
-        if _pos_dish_excluded(name, row.get("category"), base):
-            continue
-        if not _pos_dish_matches(spec, name):
-            continue
-        try:
-            total += float(row.get("qty") or 0)
-        except (TypeError, ValueError):
-            continue
+    if item_code == "telur_ikan":
+        return _telur_ikan_kg(itemwise_rows)
+    # Names are normalised first (``pos_names``): the POS pads names with
+    # doubled spaces ("Ikan  Goreng"), uses "_" ("Ayam_goreng") and carries
+    # typos ("Briyani Awam Bawang") that silently read as 0 sold.
+    total = pos_pcs_for_item(item_code, itemwise_rows)
     unit = ITEM_BY_CODE.get(item_code, {}).get("unit")
     if unit == "kg":
         grams = KG_PORTION_GRAMS.get(item_code, 0.0)
@@ -608,31 +653,63 @@ def pos_qty_for_item(item_code: str, itemwise_rows: list) -> float:
 
 
 def mismatch_flag(used, pos, unit) -> str | None:
-    """Dual-gate mismatch flag for one item, or ``None`` when within tolerance.
+    """Status for one item (thresholds in ``config/kitchen_compare.py``).
 
-    Returns:
-      * 'LEAK' when Used > POS past both gates — possible leakage / unrecorded
-        sale / over-portioning.
-      * 'DATA' when Used < POS past both gates — likely a key-in error or
-        carryover.
-    Gates (BOTH must trip): pcs -> |Δ| > 8 % AND > 5 pcs; kg -> > 10 % AND
-    > 1.5 kg. The % gate is relative to POS; when POS is 0 the % gate is treated
-    as exceeded so a non-trivial Used still flags."""
+    diff = guna − POS, pct = diff / POS:
+      * guna < 0                         -> 'BAD'  (❌ key-in error, no status)
+      * POS = 0 and guna > 0             -> 'LEAK' (🔴) always
+      * guna = 0 and POS > 0             -> 'DATA' (⚠️) always
+      * pct > +15 % and diff ≥ floor     -> 'LEAK' (🔴)
+      * pct < −15 % and |diff| ≥ floor   -> 'DATA' (⚠️)
+      * otherwise                        -> None   (✅)
+    floor: pcs 2, kg 0.3. ``None`` when either side is missing."""
     if used is None or pos is None:
         return None
-    delta = used - pos
-    abs_delta = abs(delta)
-    if pos > 0:
-        pct = abs_delta / pos * 100.0
-    else:
-        pct = float("inf")
-    if unit == "pcs":
-        pct_gate, abs_gate = PCS_PCT_GATE, PCS_ABS_GATE
-    else:
-        pct_gate, abs_gate = KG_PCT_GATE, KG_ABS_GATE
-    if pct > pct_gate and abs_delta > abs_gate:
-        return "LEAK" if delta > 0 else "DATA"
+    try:
+        used, pos = float(used), float(pos)
+    except (TypeError, ValueError):
+        return None
+    if used < 0:
+        return FLAG_BAD
+    if pos <= 0:
+        return FLAG_LEAK if used > 0 else None
+    if used == 0:
+        return FLAG_DATA
+    diff = used - pos
+    pct = diff / pos
+    floor = cfg.STATUS_FLOOR.get(unit, cfg.STATUS_FLOOR["pcs"])
+    # Round away float noise (1.8 − 1.5 = 0.30000000000000004 / 0.2999…).
+    big_enough = round(abs(diff), 6) >= floor
+    if pct > cfg.STATUS_PCT and big_enough:
+        return FLAG_LEAK
+    if pct < -cfg.STATUS_PCT and big_enough:
+        return FLAG_DATA
     return None
+
+
+def unmapped_ayam_counts(itemwise_rows: list) -> dict:
+    """Chicken dishes the POS sold that count toward NO kitchen button, grouped
+    by ``cfg.UNMAPPED_AYAM_BUCKETS`` (Rendang, Kari, ...): {label: qty}. Only
+    non-zero buckets, in config order. Thai-chef / staff / noodle dishes are
+    skipped (they never were whole-cut pieces)."""
+    out: dict = {}
+    for row in itemwise_rows or []:
+        name = normalize_pos_name(row.get("item_name"))
+        # "Nasiputih+65 Sayur" is an Ayam 65 plate without the word ayam.
+        if "ayam" not in name and "chicken" not in name and not re.search(r"\b65\b", name):
+            continue
+        cat = str(row.get("category") or "").lower()
+        if "thai" in cat or _POS_STAFF_SUBSTR in name:
+            continue
+        if any(x in name for x in AYAM_NOODLE_SUBSTRINGS):
+            continue
+        if any(_row_counts_for(code, name, row.get("category")) for code in ITEM_POS_KEYWORDS):
+            continue
+        for label, keys in cfg.UNMAPPED_AYAM_BUCKETS.items():
+            if any(re.search(k, name) for k in keys):
+                out[label] = out.get(label, 0.0) + _row_qty(row)
+                break
+    return {k: out[k] for k in cfg.UNMAPPED_AYAM_BUCKETS if out.get(k)}
 
 
 # Telur Ikan purchase lines: the resit pipeline canonicalises "TELUR IKAN" to the
@@ -697,12 +774,13 @@ def evaluate_usage(item_code: str, cooked, left, itemwise_rows: list,
         compared = purchased_kg
     else:
         compared = pos_qty_for_item(item_code, itemwise_rows)
-    flag = (
-        mismatch_flag(used, compared, unit)
-        if used is not None and compared is not None
-        else None
-    )
-    return {
+    if used is not None and used < 0:
+        flag = FLAG_BAD  # never a status for an impossible guna
+    elif used is not None and compared is not None:
+        flag = mismatch_flag(used, compared, unit)
+    else:
+        flag = None
+    ev = {
         "code": item_code,
         "label": meta.get("label", item_code),
         "unit": unit,
@@ -713,6 +791,10 @@ def evaluate_usage(item_code: str, cooked, left, itemwise_rows: list,
         "flag": flag,
         "source": source,
     }
+    if item_code == "telur_ikan" and source == "pos":
+        # POS portions sold; shown as pcs while no portion weight is set.
+        ev["pos_pcs"] = pos_pcs_for_item(item_code, itemwise_rows)
+    return ev
 
 
 # --- form / numpad copy ------------------------------------------------------
@@ -842,6 +924,71 @@ def build_numpad_keyboard(session_id, item_code, unit: str, language: str = "bm"
     # Per-item clear — reset this item back to "—" if the wrong item was tapped.
     rows.append([b(kitchen_texts.short("btn_clear", language), "clr")])
     return InlineKeyboardMarkup(rows)
+
+
+# --- key-in checks (pure) ------------------------------------------------------
+
+def grams_suspect(value, unit) -> bool:
+    """A kg value this large was almost certainly keyed in grams ("500")."""
+    return (unit == "kg" and value is not None
+            and float(value) >= cfg.KG_GRAMS_SUSPECT_AT)
+
+
+def grams_to_kg(value) -> float:
+    return round(float(value) / 1000.0, 2)
+
+
+def left_exceeds_cooked(left, cooked, carry=0) -> bool:
+    """Leftover can never exceed what was available: cooked today (the evening
+    form plus the night top-up, both already in cooked_qty) plus the
+    carry-over — yesterday's leftover still on hand. ``False`` when cooked
+    isn't known yet (nothing to check against)."""
+    if left is None or cooked is None:
+        return False
+    try:
+        return float(left) > float(cooked) + float(carry or 0) + 1e-9
+    except (TypeError, ValueError):
+        return False
+
+
+def left_violations(entries: dict, limits: dict, outlet_code) -> list:
+    """Items whose keyed leftover exceeds cooked + carry-over.
+    ``limits``: {code: {"cooked", "carry"}} (``left_limits``)."""
+    out = []
+    for it in items_for_outlet(outlet_code):
+        code = it["code"]
+        lim = limits.get(code) or {}
+        left = entries.get(code)
+        if left_exceeds_cooked(left, lim.get("cooked"), lim.get("carry")):
+            out.append({**it, "left": left, "cooked": lim.get("cooked"),
+                        "carry": lim.get("carry") or 0})
+    return out
+
+
+def left_violation_text(v: dict) -> str:
+    unit = v["unit"]
+    cooked = format_value(v["cooked"], unit)
+    if v.get("carry"):
+        cooked = f"{cooked} + baki semalam {format_value(v['carry'], unit)}"
+    return kitchen_texts.bm_tamil(
+        "left_gt_cooked", label=v["label"], unit=unit,
+        left=format_value(v["left"], unit), cooked=cooked)
+
+
+def build_grams_keyboard(session_id, item_code, buffer: str):
+    """Confirm a suspicious kg value: ✅ X g -> kg / keep as kg / retype."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    g = buffer
+    kg = format_value(grams_to_kg(buffer), "kg")
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(kitchen_texts.bm_tamil_short("grams_yes", kg=kg),
+                              callback_data=_cb(session_id, item_code, f"gy{g}"))],
+        [InlineKeyboardButton(kitchen_texts.bm_tamil_short("grams_keep", g=g),
+                              callback_data=_cb(session_id, item_code, f"gk{g}"))],
+        [InlineKeyboardButton(kitchen_texts.bm_tamil_short("grams_retype"),
+                              callback_data=_cb(session_id, item_code, "open"))],
+    ])
 
 
 def parse_callback(data: str) -> dict | None:
@@ -1284,6 +1431,15 @@ def pos_shift_coverage(client, outlet_code, business_date) -> dict:
             if covered_ids and shift_nos:
                 uncovered = sorted(shift_nos - covered_ids)
                 summaries_cover = not uncovered
+            # Never compare against a D-file that lists ANOTHER day's shifts
+            # (live: SEK-14's "8 Oct" D-file held 2096+2097 = 9 Oct).
+            foreign = _foreign_shift_ids(client, outlet_code, business_date, covered_ids)
+            if foreign:
+                logger.warning(
+                    "kitchen: %s %s D-file lists shifts %s booked to another "
+                    "business day — not used", outlet_code, business_date, foreign)
+                summaries_cover = False
+                uncovered = sorted(set(uncovered) | set(foreign))
         except Exception:
             logger.warning(
                 "kitchen: summary shift-coverage check failed for %s %s",
@@ -1301,7 +1457,8 @@ def pos_shift_coverage(client, outlet_code, business_date) -> dict:
         core_shifts = [r for r in shifts
                        if r.get("shift_type") in ("day", "overnight")]
         core_ids = [r.get("id") for r in core_shifts]
-        if core_ids and all(i is not None for i in core_ids):
+        if core_ids and all(i is not None for i in core_ids) and \
+                _shifts_are_one_day(core_shifts):
             with_itemwise = _shift_ids_with_itemwise(client, core_ids)
             if all(i in with_itemwise for i in core_ids):
                 itemwise_source = "shift"
@@ -1327,6 +1484,62 @@ def pos_shift_coverage(client, outlet_code, business_date) -> dict:
         # shifts carry their own S-file itemwise, which IS the full 24h).
         "complete": has_day and has_overnight and itemwise_source is not None,
     }
+
+
+def _foreign_shift_ids(client, outlet_code, business_date, shift_ids) -> list:
+    """Shift ids a D-file lists whose own S-file is booked to a DIFFERENT
+    business date. Empty when they agree or nothing can be checked."""
+    ids = sorted(i for i in (shift_ids or ()) if i)
+    if not ids:
+        return []
+    try:
+        rows = _rows(
+            client.table(SALES_DAILY_TABLE)
+            .select("outlet_code, outlet_canonical, shift_no, shift_business_date")
+            .in_("shift_no", ids)
+            .execute()
+        )
+    except Exception:
+        logger.warning("kitchen: foreign-shift check failed", exc_info=True)
+        return []
+    keys = outlet_join_keys(outlet_code)
+    date_str = str(business_date)[:10]
+    out = set()
+    for r in rows:
+        if not ((outlet_join_keys(r.get("outlet_code")) & keys)
+                or (outlet_join_keys(r.get("outlet_canonical")) & keys)):
+            continue
+        sid = _norm_shift_id(r.get("shift_no"))
+        bd = str(r.get("shift_business_date") or "")[:10]
+        if sid in ids and bd and bd != date_str:
+            out.add(sid)
+    return sorted(out)
+
+
+# The overnight shift directly follows the day shift it closes the business day
+# with (SEK-15 runs three: 3743 day, 3744 + 3745 night). A bigger jump means
+# the two S-files belong to different POS days.
+_MAX_SHIFT_NO_GAP = 2
+
+
+def _shifts_are_one_day(shift_rows: list) -> bool:
+    """True when the day + overnight S-files are consecutive POS shifts, so
+    summing their itemwise is one business day — never 8 Oct's day shift
+    plus 9 Oct's night shift."""
+    day = [_norm_shift_id(r.get("shift_no")) for r in shift_rows if r.get("shift_type") == "day"]
+    night = [_norm_shift_id(r.get("shift_no")) for r in shift_rows
+             if r.get("shift_type") == "overnight"]
+    try:
+        d = [int(x) for x in day if x]
+        n = [int(x) for x in night if x]
+    except ValueError:
+        return True
+    if not d or not n:
+        return True  # nothing to compare (parse variance) — don't block
+    ok = all(0 < x - max(d) <= _MAX_SHIFT_NO_GAP for x in n)
+    if not ok:
+        logger.warning("kitchen: S-file shifts %s + %s are not one POS day", d, n)
+    return ok
 
 
 def missing_pos_shifts(coverage: dict) -> list:
@@ -1626,6 +1839,38 @@ def finalize_submission(client, session: dict, submitter: str):
     return gather_usage_rollup(client, outlet_code, business_date)
 
 
+def left_limits(client, outlet_code, business_date) -> dict:
+    """{item_code: {"cooked": today's cooked_qty, "carry": yesterday's
+    left_qty}} — the most leftover a cashier can key. Items with no cooked
+    figure yet are absent (no check). Empty on failure."""
+    def _read(day, col):
+        return _rows(
+            client.table(USAGE_TABLE)
+            .select(f"item_code, {col}")
+            .eq("outlet_code", outlet_code)
+            .eq("business_date", str(day))
+            .execute()
+        )
+    try:
+        today = _read(business_date, "cooked_qty")
+        prev_day = date.fromisoformat(str(business_date)[:10]) - timedelta(days=1)
+        prev = {r.get("item_code"): r.get("left_qty") for r in _read(prev_day, "left_qty")}
+    except Exception:
+        logger.warning("kitchen: cooked read for key-in check failed", exc_info=True)
+        return {}
+    out = {}
+    for r in today:
+        if r.get("cooked_qty") is None:
+            continue
+        carry = prev.get(r.get("item_code"))
+        try:
+            carry = max(float(carry), 0.0) if carry is not None else 0.0
+        except (TypeError, ValueError):
+            carry = 0.0
+        out[r.get("item_code")] = {"cooked": r.get("cooked_qty"), "carry": carry}
+    return out
+
+
 def gather_usage_rollup(client, outlet_code, business_date) -> list:
     """Per-item usage (cooked / left / used) for an outlet's business_date — the
     STAGE 1 (02:00) save-confirmation data, with NO POS comparison and NO flags.
@@ -1715,6 +1960,102 @@ def evaluate_outlet_day(client, outlet_code, business_date) -> list:
         except Exception:
             logger.exception("kitchen: flag update failed for %s", code)
     return evaluations
+
+
+def _fmt_dm_hm(dt) -> str:
+    return f"{dt.day}/{dt.month} {dt:%H:%M}"
+
+
+def _parse_ts(value):
+    if not value:
+        return None
+    try:
+        dt = _dt_mod.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return dt.astimezone(MY_TZ) if dt.tzinfo is not None else dt
+
+
+def kitchen_window(client, outlet_code, business_date) -> str | None:
+    """"8/10 18:11 → 9/10 02:17": first cooked key-in to last leftover key-in."""
+    try:
+        rows = _rows(
+            client.table(USAGE_TABLE)
+            .select("cooked_at, left_at")
+            .eq("outlet_code", outlet_code)
+            .eq("business_date", str(business_date))
+            .execute()
+        )
+    except Exception:
+        logger.warning("kitchen: window read failed", exc_info=True)
+        return None
+    cooked = [t for t in (_parse_ts(r.get("cooked_at")) for r in rows) if t]
+    left = [t for t in (_parse_ts(r.get("left_at")) for r in rows) if t]
+    if not cooked or not left:
+        return None
+    return f"{_fmt_dm_hm(min(cooked))} → {_fmt_dm_hm(max(left))}"
+
+
+def pos_window(client, outlet_code, business_date) -> str | None:
+    """"shift 2094+2095 (tutup 8/10 19:00, 9/10 07:00)": the POS shifts the
+    comparison used, with their real close times (``pos_dates``)."""
+    import pos_dates
+    try:
+        cov = pos_shift_coverage(client, outlet_code, business_date)
+        shifts = [r for r in _matching_shift_rows(client, outlet_code, business_date)
+                  if r.get("shift_type") in ("day", "overnight")]
+        ids = set()
+        if cov.get("itemwise_source") == "summary":
+            ids = _summary_shift_ids(
+                client, _matching_summary_ids(client, outlet_code, business_date))
+        if not ids:
+            ids = {_norm_shift_id(r.get("shift_no")) for r in shifts} - {None}
+    except Exception:
+        logger.warning("kitchen: POS window read failed", exc_info=True)
+        return None
+    if not ids:
+        return None
+    ordered = sorted(ids, key=lambda x: int(x) if x.isdigit() else 0)
+    closes = []
+    by_no = {_norm_shift_id(r.get("shift_no")): r for r in shifts}
+    for sid in ordered:
+        r = by_no.get(sid)
+        t = pos_dates.real_close_time(_parse_ts(r.get("shift_close_at")) if r else None,
+                                      r.get("received_at") if r else None)
+        if t is not None:
+            closes.append(_fmt_dm_hm(t))
+    text = "shift " + "+".join(ordered)
+    if closes:
+        text += f" (tutup {', '.join(closes)})"
+    if cov.get("itemwise_source") == "shift":
+        text += " [S-file]"
+    return text
+
+
+def comparison_extras(client, outlet_code, business_date, itemwise=None) -> dict:
+    """Footer data for a summary: dishes with no button + both time windows.
+    Never raises — a footer problem must not stop the summary."""
+    try:
+        return _comparison_extras(client, outlet_code, business_date, itemwise)
+    except Exception:
+        logger.exception("kitchen: summary footer failed for %s %s", outlet_code, business_date)
+        return {}
+
+
+def _comparison_extras(client, outlet_code, business_date, itemwise=None) -> dict:
+    if itemwise is None:
+        try:
+            itemwise = _fetch_itemwise(client, outlet_code, business_date)
+        except Exception:
+            logger.warning("kitchen: itemwise read for extras failed", exc_info=True)
+            itemwise = []
+    return {
+        "unmapped": unmapped_ayam_counts(itemwise),
+        "window": {
+            "kitchen": kitchen_window(client, outlet_code, business_date),
+            "pos": pos_window(client, outlet_code, business_date),
+        },
+    }
 
 
 def pos_only_snapshot(client, outlet_code, business_date) -> list:
@@ -1954,8 +2295,54 @@ def _gap(ev: dict):
             format_value(-diff, unit) if diff < 0 else None)
 
 
+def _is_bad(ev: dict) -> bool:
+    """guna < 0 — a key-in error that never gets a status."""
+    if ev.get("flag") == FLAG_BAD:
+        return True
+    try:
+        return ev.get("used") is not None and float(ev["used"]) < 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _fmt_qty_plain(q) -> str:
+    try:
+        return f"{float(q):g}"
+    except (TypeError, ValueError):
+        return "?"
+
+
+def _summary_footer(extras, language: str, with_counts: bool) -> list:
+    """The "POS tiada butang" line and the "Dapur … | POS …" window line.
+
+    ``with_counts`` False (the shop-floor copy) names the dishes only — units
+    sold per dish are management's number."""
+    extras = extras or {}
+    out = []
+    unmapped = extras.get("unmapped") or {}
+    if unmapped:
+        items = ", ".join(
+            f"{k} {_fmt_qty_plain(v)}" if with_counts else k for k, v in unmapped.items())
+        out.append(kitchen_texts.short("mini_unmapped", language, items=items))
+    window = extras.get("window") or {}
+    if window.get("kitchen") or window.get("pos"):
+        out.append(kitchen_texts.short(
+            "mini_window", language, kitchen=window.get("kitchen") or "?",
+            pos=window.get("pos") or "?"))
+    return out
+
+
+def _legend_lines(flagged: int, bad: int, language: str) -> list:
+    out = []
+    if bad:
+        out.append(kitchen_texts.text("mini_bad_legend", language))
+    out.append(kitchen_texts.text("mini_all_ok" if flagged == 0 and bad == 0 else "mini_legend",
+                                  language))
+    return out
+
+
 def render_mini_summary(outlet_label, business_date, evaluations: list,
-                        language: str = "bm") -> str:
+                        language: str = "bm", extras: dict | None = None) -> str:
     """The short Used-vs-POS recap (STAGE 2) posted in the group at 09:00.
 
     Shop-floor version: only the GAP per item ("Ayam: guna lebih 4 ekor dari
@@ -1966,52 +2353,66 @@ def render_mini_summary(outlet_label, business_date, evaluations: list,
         f"{outlet_label} • {business_date}",
         "",
     ]
-    flagged = 0
+    flagged = bad = 0
     for ev in evaluations:
         unit = ev["unit"]
         buy = ev.get("source") == "purchase"
+        if _is_bad(ev):
+            bad += 1
+            lines.append(kitchen_texts.short("mini_bad", language, label=ev["label"]))
+            continue
         if buy and ev["pos"] is None:
             lines.append(kitchen_texts.short("mini_line_nobuy", language, label=ev["label"],
                                              used=format_value(ev["used"], unit), unit=unit))
             continue
+        if ev["pos"] is None:
+            lines.append(kitchen_texts.short("mini_nocompare", language, label=ev["label"]))
+            continue
         over, under = _gap(ev)
-        if ev["flag"] == "LEAK" and over is not None:
+        if ev["flag"] == FLAG_LEAK and over is not None:
             flagged += 1
             lines.append(kitchen_texts.short("mini_over_buy" if buy else "mini_over", language,
                                              label=ev["label"], over=over, unit=unit))
-        elif ev["flag"] == "DATA" and under is not None:
+        elif ev["flag"] == FLAG_DATA and under is not None:
             flagged += 1
             lines.append(kitchen_texts.short("mini_under_buy" if buy else "mini_under", language,
                                              label=ev["label"], under=under, unit=unit))
         else:
             lines.append(kitchen_texts.short("mini_ok_buy" if buy else "mini_ok", language, label=ev["label"]))
     lines.append("")
-    lines.append(kitchen_texts.text("mini_all_ok" if flagged == 0 else "mini_legend", language))
+    lines += _legend_lines(flagged, bad, language)
+    foot = _summary_footer(extras, language, with_counts=False)
+    if foot:
+        lines += [""] + foot
     return "\n".join(lines)
 
 
 def render_mini_summary_full(outlet_label, business_date, evaluations: list,
-                             language: str = "bm") -> str:
+                             language: str = "bm", extras: dict | None = None) -> str:
     """Management copy of the recap with the full Used vs POS numbers."""
     lines = [
         kitchen_texts.short("mini_head", language),
         f"{outlet_label} • {business_date}",
         "",
     ]
-    flagged = 0
+    flagged = bad = 0
     for ev in evaluations:
         used = format_value(ev["used"], ev["unit"])
         unit = ev["unit"]
-        if ev["flag"] == "LEAK":
+        if _is_bad(ev):
+            # Never a status for an impossible guna, and never the bogus number.
+            bad += 1
+            lines.append(kitchen_texts.short("mini_bad", language, label=ev["label"]))
+            continue
+        if ev["flag"] == FLAG_LEAK:
             mark = "🔴"
             flagged += 1
-        elif ev["flag"] == "DATA":
+        elif ev["flag"] == FLAG_DATA:
             mark = "⚠️"
             flagged += 1
         else:
             mark = "✅"
         if ev.get("source") == "purchase":
-            # Telur Ikan: consumption vs purchase, not vs sales.
             if ev["pos"] is None:
                 lines.append(kitchen_texts.short("mini_line_nobuy", language, label=ev["label"],
                                                  used=used, unit=unit))
@@ -2019,12 +2420,19 @@ def render_mini_summary_full(outlet_label, business_date, evaluations: list,
                 lines.append(kitchen_texts.short(
                     "mini_line_buy", language, mark=mark, label=ev["label"], used=used,
                     pos=format_value(ev["pos"], unit), unit=unit))
+        elif ev["pos"] is None and ev.get("pos_pcs") is not None:
+            lines.append(kitchen_texts.short(
+                "mini_line_pcs", language, label=ev["label"], used=used, unit=unit,
+                pcs=format_value(ev["pos_pcs"], "pcs")))
         else:
             lines.append(kitchen_texts.short(
                 "mini_line", language, mark=mark, label=ev["label"], used=used,
                 pos=format_value(ev["pos"], unit), unit=unit))
     lines.append("")
-    lines.append(kitchen_texts.text("mini_all_ok" if flagged == 0 else "mini_legend", language))
+    lines += _legend_lines(flagged, bad, language)
+    foot = _summary_footer(extras, language, with_counts=True)
+    if foot:
+        lines += [""] + foot
     return "\n".join(lines)
 
 
@@ -2042,7 +2450,7 @@ def leak_items(evaluations: list) -> list:
     """The LEAK-flagged evaluations (guna > POS past both gates)."""
     return [
         ev for ev in evaluations or []
-        if isinstance(ev, dict) and ev.get("flag") == "LEAK"
+        if isinstance(ev, dict) and ev.get("flag") == FLAG_LEAK
     ]
 
 
@@ -2785,6 +3193,19 @@ async def handle_kitchen_callback(update, context) -> None:
                 else:
                     await query.answer(kitchen_texts.short("need_all", lang), show_alert=True)
             return
+        if phase == PHASE_LEFT:
+            limits = await asyncio.to_thread(
+                left_limits, _supabase, outlet_code, business_date)
+            bad = left_violations(entries, limits, outlet_code)
+            if bad:
+                # Leftover > cooked makes guna negative — never save it.
+                with contextlib.suppress(Exception):
+                    await query.answer(kitchen_texts.bm_tamil_short("left_gt_cooked_alert"),
+                                       show_alert=True)
+                with contextlib.suppress(Exception):
+                    await query.message.reply_text(
+                        "\n\n".join(left_violation_text(v) for v in bad))
+                return
         # Validation passed — clear the spinner before the slow finalize.
         with contextlib.suppress(Exception):
             await query.answer()
@@ -2877,6 +3298,26 @@ async def handle_kitchen_callback(update, context) -> None:
         )
         return
 
+    # --- grams confirmation: gy<g> = it was grams, gk<g> = it really is kg ---
+    if action[:2] in ("gy", "gk") and unit == "kg":
+        try:
+            raw = float(action[2:])
+        except ValueError:
+            return
+        value = grams_to_kg(raw) if action.startswith("gy") else round(raw, 2)
+        if await _reject_left_over_cooked(query, session, item_code, value, lang):
+            return
+        entries = await asyncio.to_thread(
+            _merge_entry, _supabase, session_id, item_code, value
+        )
+        await _edit_form_message(
+            query,
+            form_text(phase, business_date, outlet_label, entries, outlet_code, lang),
+            "grams_commit",
+            reply_markup=build_item_keyboard(session_id, outlet_code, entries, phase, lang),
+        )
+        return
+
     # --- ✓ commit: read the in-memory buffer, persist the value to the DB ---
     if action == "ok":
         chat_id = query.message.chat_id if query.message else None
@@ -2885,6 +3326,20 @@ async def handle_kitchen_callback(update, context) -> None:
         buffer = st["buffer"] if st else (session.get("buffer") or "")
         value = commit_value(buffer, unit)
         _clear_numpad_state(session_id, item_code)
+        if grams_suspect(value, unit):
+            # "500" in a kg field is 500 g — ask before saving anything.
+            await _edit_form_message(
+                query,
+                kitchen_texts.bm_tamil(
+                    "grams_ask", label=meta["label"], g=format_value(value, "kg"),
+                    kg=format_value(grams_to_kg(value), "kg")),
+                "grams_ask",
+                reply_markup=build_grams_keyboard(session_id, item_code,
+                                                  format_value(value, "kg")),
+            )
+            return
+        if await _reject_left_over_cooked(query, session, item_code, value, lang):
+            return
         entries = await asyncio.to_thread(
             _merge_entry, _supabase, session_id, item_code, value
         )
@@ -2899,6 +3354,36 @@ async def handle_kitchen_callback(update, context) -> None:
         logger.info("kitchen numpad ✓ commit %s=%r: edit %.0fms",
                     item_code, value, (time.monotonic() - t_edit) * 1000)
         return
+
+
+async def _reject_left_over_cooked(query, session, item_code, value, lang) -> bool:
+    """On the LEFT form, refuse a leftover above what was cooked: tell the
+    cashier in BM + Tamil and put the numpad back up to re-enter. True when
+    the value was rejected (nothing saved)."""
+    if session.get("phase") != PHASE_LEFT or value is None:
+        return False
+    limits = await asyncio.to_thread(
+        left_limits, _supabase, session["outlet_code"], session["business_date"])
+    lim = limits.get(item_code) or {}
+    if not left_exceeds_cooked(value, lim.get("cooked"), lim.get("carry")):
+        return False
+    meta = ITEM_BY_CODE[item_code]
+    v = {**meta, "left": value, "cooked": lim.get("cooked"), "carry": lim.get("carry")}
+    with contextlib.suppress(Exception):
+        await query.answer(kitchen_texts.bm_tamil_short("left_gt_cooked_alert"),
+                           show_alert=True)
+    chat_id = query.message.chat_id if query.message else None
+    user_id = query.from_user.id if query.from_user else None
+    _touch_numpad_state(_numpad_key(chat_id, user_id, session["id"], item_code),
+                        {"buffer": "", "phase": session.get("phase")})
+    await _edit_form_message(
+        query,
+        left_violation_text(v) + "\n\n"
+        + numpad_text(session.get("phase"), meta["label"], meta["unit"], "—", lang),
+        "left_gt_cooked",
+        reply_markup=build_numpad_keyboard(session["id"], item_code, meta["unit"], lang),
+    )
+    return True
 
 
 async def _post_one(application, chat_id, outlet_code, business_date, phase) -> bool:
@@ -3063,6 +3548,9 @@ async def post_comparison_digests(
         (today - timedelta(days=k)).isoformat()
         for k in range(1, RECONCILE_LOOKBACK_DAYS + 1)
     ]
+    # Days before the rules/date fix are only re-posted by the owner
+    # (/kitchen_recheck), never caught up automatically.
+    candidates = [d for d in candidates if d >= cfg.AUTO_POST_FROM]
     posted = deferred = alerted = 0
     for chat_id, outlet_code in groups:
         try:
@@ -3081,8 +3569,10 @@ async def post_comparison_digests(
                     evaluate_outlet_day, _supabase, outlet_code, d
                 )
                 if evaluations:
+                    extras = await asyncio.to_thread(
+                        comparison_extras, _supabase, outlet_code, d)
                     summary = render_mini_summary(outlet_label, d, evaluations,
-                                                  form_language(chat_id))
+                                                  form_language(chat_id), extras=extras)
                     with contextlib.suppress(Exception):
                         await application.bot.send_message(chat_id=chat_id, text=summary)
                     posted += 1
@@ -3096,7 +3586,8 @@ async def post_comparison_digests(
                         with contextlib.suppress(Exception):
                             await application.bot.send_message(
                                 chat_id=owner_chat_id,
-                                text=render_mini_summary_full(outlet_label, d, evaluations))
+                                text=render_mini_summary_full(outlet_label, d, evaluations,
+                                                              extras=extras))
                     # Over-use (LEAK) follow-ups: Tamil note to the pandari in
                     # this group + Tamil alert to the outlet manager. Rides the
                     # same once-per-day idempotency as the summary — a day is
@@ -3185,6 +3676,65 @@ async def post_comparison_digests_final(application) -> None:
     STILL missing a shift — an ingestion gap to investigate, not a silent
     forever-"belum lengkap"."""
     await post_comparison_digests(application, notify_missing=False, alert_missing_shift=True)
+
+
+async def recheck_day(application, business_date, *, outlet_code=None, post=False,
+                      reply_chat_id=None) -> list:
+    """Owner re-run of one business day's Guna-vs-POS (``/kitchen_recheck``).
+
+    Recomputes pos_qty + flags for every kitchen group (or one outlet) with
+    the current rules — overwriting a wrong earlier result — and then either
+    PREVIEWS both copies (group + management) to ``reply_chat_id`` or, with
+    ``post=True``, posts the group copy to the outlet group and the full copy
+    to the owner. Returns [(outlet_code, status)] for the reply."""
+    from config.kitchen_groups import configured_groups
+
+    groups = await asyncio.to_thread(configured_groups, _supabase)
+    want = (outlet_code or "").strip().upper()
+    out = []
+    try:
+        owner_chat_id = int(os.environ["ALERT_CHAT_ID"])
+    except (KeyError, ValueError):
+        owner_chat_id = None
+    for chat_id, code in groups:
+        if want and code.upper() != want:
+            continue
+        try:
+            from outlet_mapping import outlet_display_name
+            label = outlet_display_name(code)
+        except Exception:
+            label = code
+        try:
+            if not await asyncio.to_thread(pos_complete_for_outlet, _supabase, code, business_date):
+                out.append((code, "POS not complete"))
+                continue
+            if not await asyncio.to_thread(day_record_complete, _supabase, code, business_date):
+                out.append((code, "kitchen record not complete"))
+                continue
+            evaluations = await asyncio.to_thread(evaluate_outlet_day, _supabase, code, business_date)
+            if not evaluations:
+                out.append((code, "nothing to compare"))
+                continue
+            extras = await asyncio.to_thread(comparison_extras, _supabase, code, business_date)
+            group_text = render_mini_summary(label, business_date, evaluations,
+                                             form_language(chat_id), extras=extras)
+            full_text = render_mini_summary_full(label, business_date, evaluations, extras=extras)
+            if post:
+                await application.bot.send_message(chat_id=chat_id, text=group_text)
+                if owner_chat_id is not None and owner_chat_id != chat_id:
+                    await application.bot.send_message(chat_id=owner_chat_id, text=full_text)
+                out.append((code, "posted"))
+            elif reply_chat_id is not None:
+                await application.bot.send_message(
+                    chat_id=reply_chat_id,
+                    text=f"[PREVIEW — group copy → {label}]\n\n{group_text}")
+                await application.bot.send_message(
+                    chat_id=reply_chat_id, text=f"[PREVIEW — management copy]\n\n{full_text}")
+                out.append((code, "previewed"))
+        except Exception:
+            logger.exception("kitchen: recheck failed for %s %s", code, business_date)
+            out.append((code, "failed — see logs"))
+    return out
 
 
 def register_handlers(app) -> None:

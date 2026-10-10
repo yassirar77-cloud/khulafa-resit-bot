@@ -7,7 +7,17 @@ POS→kg conversion and the mini-summary / digest rendering.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import pytest
+
 import kitchen_usage as ku
+
+
+@pytest.fixture(autouse=True)
+def _auto_post_all_days(monkeypatch):
+    """These scenarios use June dates; the live AUTO_POST_FROM cutoff (which
+    keeps pre-fix days from auto-posting) is tested on its own below."""
+    from config import kitchen_compare
+    monkeypatch.setattr(kitchen_compare, "AUTO_POST_FROM", "2000-01-01")
 
 MY = ZoneInfo("Asia/Kuala_Lumpur")
 
@@ -1350,46 +1360,55 @@ def test_fetch_itemwise_joins_renamed_outlets():
     assert ku.pos_qty_for_item("ayam_madu", razak) == 7
 
 
-# --- dual-gate mismatch flag -------------------------------------------------
+# --- status rule (config/kitchen_compare.py: ±15 %, floor pcs 2 / kg 0.3) ------
 
-def test_flag_pcs_leak_passes_both_gates():
-    # Used 100 vs POS 80: Δ20 = 25% (>8%) and 20 pcs (>5) -> LEAK
-    assert ku.mismatch_flag(100, 80, "pcs") == "LEAK"
-
-
-def test_flag_pcs_data_entry_under():
-    # Used 60 vs POS 80: Δ20 -> DATA (Used < POS)
-    assert ku.mismatch_flag(60, 80, "pcs") == "DATA"
+def test_flag_pcs_leak_and_data():
+    assert ku.mismatch_flag(100, 80, "pcs") == "LEAK"   # +25 %, diff 20
+    assert ku.mismatch_flag(60, 80, "pcs") == "DATA"    # −25 %, diff 20
 
 
-def test_flag_pcs_abs_gate_blocks_small_outlet():
-    # Used 4 vs POS 0: huge % but only 4 pcs (<=5) -> no flag
-    assert ku.mismatch_flag(4, 0, "pcs") is None
-    # Used 55 vs POS 50: 10% (>8%) but Δ5 not >5 -> no flag
-    assert ku.mismatch_flag(55, 50, "pcs") is None
+def test_flag_pos_zero_is_always_red():
+    # Live D.U 8 Oct: Ayam Kicap 5 vs 0, Ayam Madu 1 vs 0 were shown ✅.
+    assert ku.mismatch_flag(5, 0, "pcs") == "LEAK"
+    assert ku.mismatch_flag(1, 0, "pcs") == "LEAK"
+    assert ku.mismatch_flag(0.1, 0, "kg") == "LEAK"
+    assert ku.mismatch_flag(0, 0, "pcs") is None
 
 
-def test_flag_pcs_pct_gate_blocks_big_outlet():
-    # Used 206 vs POS 200: Δ6 (>5 pcs) but only 3% (<8%) -> no flag
-    assert ku.mismatch_flag(206, 200, "pcs") is None
+def test_flag_guna_zero_with_sales_is_always_warning():
+    assert ku.mismatch_flag(0, 1, "pcs") == "DATA"
+    assert ku.mismatch_flag(0, 0.2, "kg") == "DATA"
 
 
-def test_flag_kg_gates():
-    # Used 12 vs POS 10: 20% (>10%) and 2 kg (>1.5) -> LEAK
-    assert ku.mismatch_flag(12.0, 10.0, "kg") == "LEAK"
-    # Used 11 vs POS 10: 10% not >10% -> no flag
-    assert ku.mismatch_flag(11.0, 10.0, "kg") is None
-    # Used 8 vs POS 10: Δ2 = 20% and 2kg -> DATA
-    assert ku.mismatch_flag(8.0, 10.0, "kg") == "DATA"
+def test_flag_floor_blocks_tiny_gaps():
+    assert ku.mismatch_flag(3, 2, "pcs") is None        # +50 % but diff 1 < 2
+    assert ku.mismatch_flag(4, 2, "pcs") == "LEAK"      # diff 2 = floor
+    assert ku.mismatch_flag(1.2, 1.0, "kg") is None     # +20 % but 0.2 kg < 0.3
+    assert ku.mismatch_flag(1.3, 1.0, "kg") == "LEAK"   # 0.3 kg = floor
+    assert ku.mismatch_flag(0.7, 1.0, "kg") == "DATA"
 
 
-def test_flag_pos_zero_uses_abs_gate_only():
-    # POS 0, Used 20 pcs: % treated as exceeded, abs 20 > 5 -> LEAK
-    assert ku.mismatch_flag(20, 0, "pcs") == "LEAK"
+def test_flag_pct_gate_blocks_big_outlet():
+    assert ku.mismatch_flag(115, 100, "pcs") is None    # exactly +15 % is not > 15 %
+    assert ku.mismatch_flag(116, 100, "pcs") == "LEAK"
+    assert ku.mismatch_flag(85, 100, "pcs") is None
+    assert ku.mismatch_flag(84, 100, "pcs") == "DATA"
+
+
+def test_flag_negative_guna_is_bad_data():
+    assert ku.mismatch_flag(-495, 2.52, "kg") == "BAD"
+    assert ku.mismatch_flag(-1, 0, "pcs") == "BAD"
 
 
 def test_flag_none_when_used_missing():
     assert ku.mismatch_flag(None, 10, "pcs") is None
+    assert ku.mismatch_flag(10, None, "pcs") is None
+
+
+def test_status_thresholds_live_in_config():
+    from config import kitchen_compare as cfg
+    assert cfg.STATUS_PCT == 0.15
+    assert cfg.STATUS_FLOOR == {"pcs": 2.0, "kg": 0.3}
 
 
 # --- evaluate_usage end to end -----------------------------------------------
@@ -1405,21 +1424,41 @@ def test_evaluate_usage_full():
     assert ev["source"] == "pos"
 
 
-# --- Telur Ikan: consumption vs PURCHASE (not POS) ---------------------------
+# --- Telur Ikan: compared against the POS portions ---------------------------
 
-def test_telur_ikan_not_in_pos_or_portion_config():
-    # No portion-size guess and no POS keyword entry for Telur Ikan anymore.
-    assert "telur_ikan" not in ku.KG_PORTION_GRAMS
-    assert "telur_ikan" not in ku.ITEM_POS_KEYWORDS
-    # Kambing/Daging POS portions are untouched.
+def test_telur_ikan_is_pos_compared():
+    assert ku.compare_source("telur_ikan") == "pos"
+    for code in ("ayam_goreng", "kambing", "daging", "ikan_kari"):
+        assert ku.compare_source(code) == "pos"
     assert ku.KG_PORTION_GRAMS["kambing"] == 180.0
     assert ku.KG_PORTION_GRAMS["daging"] == 60.0
 
 
-def test_compare_source():
-    assert ku.compare_source("telur_ikan") == "purchase"
-    for code in ("ayam_goreng", "kambing", "daging", "ikan_kari"):
-        assert ku.compare_source(code) == "pos"
+def test_telur_ikan_counts_every_pos_variant():
+    rows = [{"item_name": "Telur Ikan M", "qty": 2},
+            {"item_name": "Telur Ikan (b)", "qty": 1},
+            {"item_name": "Nasi Telur Ikan", "qty": 1},
+            {"item_name": "Telur Ikan Ikut Saiz", "qty": 3},
+            {"item_name": "Telur Masin", "qty": 9}]
+    assert ku.pos_pcs_for_item("telur_ikan", rows) == 7
+
+
+def test_telur_ikan_without_portion_weight_shows_pcs_and_no_status(monkeypatch):
+    from config import kitchen_compare as cfg
+    monkeypatch.setattr(cfg, "TELUR_IKAN_PORTION_GRAMS", {})
+    ev = ku.evaluate_usage("telur_ikan", 1.0, 0.5, [{"item_name": "Telur Ikan M", "qty": 2}])
+    assert ev["pos"] is None and ev["flag"] is None and ev["pos_pcs"] == 2
+    full = ku.render_mini_summary_full("SEK-14", "2026-10-08", [ev])
+    line = next(ln for ln in full.splitlines() if "Telur Ikan" in ln)
+    assert "POS 2 pcs" in line and "beli" not in line
+
+
+def test_telur_ikan_with_portion_weight_is_compared_in_kg(monkeypatch):
+    from config import kitchen_compare as cfg
+    monkeypatch.setattr(cfg, "TELUR_IKAN_PORTION_GRAMS", {"telur ikan m": 100.0})
+    ev = ku.evaluate_usage("telur_ikan", 1.0, 0.0, [{"item_name": "Telur Ikan M", "qty": 2}])
+    assert ev["pos"] == 0.2
+    assert ev["flag"] == "LEAK"   # 1 kg vs 0.2 kg
 
 
 def test_purchased_kg_sums_matching_lines():
@@ -1443,33 +1482,6 @@ def test_purchased_kg_ignores_eggs_and_other_fish():
 def test_purchased_kg_none_when_no_receipts():
     assert ku.purchased_kg_from_receipts([]) is None
     assert ku.purchased_kg_from_receipts(None) is None
-
-
-def test_evaluate_telur_ikan_vs_purchase_flags():
-    # Used 8 kg vs bought 5 kg: Δ3 = 60% (>10%) and 3 kg (>1.5) -> LEAK.
-    ev = ku.evaluate_usage("telur_ikan", cooked=10.0, left=2.0,
-                           itemwise_rows=[], purchased_kg=5.0)
-    assert ev["source"] == "purchase"
-    assert ev["used"] == 8.0
-    assert ev["pos"] == 5.0
-    assert ev["flag"] == "LEAK"
-
-
-def test_evaluate_telur_ikan_ignores_pos_rows():
-    # Even if POS-looking ikan rows are passed, Telur Ikan never reads them.
-    pos_rows = [{"item_name": "Telur Ikan Goreng", "qty": 999}]
-    ev = ku.evaluate_usage("telur_ikan", cooked=3.0, left=1.0,
-                           itemwise_rows=pos_rows, purchased_kg=2.0)
-    assert ev["pos"] == 2.0  # purchased, not the 999 POS qty
-
-
-def test_evaluate_telur_ikan_no_purchase_no_flag():
-    # No same-day purchase -> pos None, no flag (approach b: don't false-alarm).
-    ev = ku.evaluate_usage("telur_ikan", cooked=5.0, left=0.5,
-                           itemwise_rows=[], purchased_kg=None)
-    assert ev["pos"] is None
-    assert ev["flag"] is None
-    assert ev["used"] == 4.5
 
 
 # --- form completeness -------------------------------------------------------
@@ -1523,38 +1535,18 @@ def test_render_mini_summary_all_match():
     assert "80" not in text
 
 
-def test_render_mini_summary_telur_ikan_purchase_wording():
-    # With a same-day purchase -> "guna vs beli"; the Telur line says no "POS".
-    evals = [ku.evaluate_usage("telur_ikan", 5.0, 1.0, [], purchased_kg=4.0)]
-    text = ku.render_mini_summary("SEK-6", "2026-06-22", evals)
-    telur_line = next(ln for ln in text.splitlines() if "Telur Ikan" in ln)
-    assert "beli" in telur_line
-    assert "POS" not in telur_line
-
-
-def test_render_mini_summary_telur_ikan_no_purchase():
-    evals = [ku.evaluate_usage("telur_ikan", 5.0, 1.0, [], purchased_kg=None)]
-    text = ku.render_mini_summary("SEK-6", "2026-06-22", evals)
-    assert "tiada rekod beli" in text
-
-
-def test_digest_block_telur_ikan_lines():
+def test_digest_block_bad_data_line():
     import digest
     usage = [{
-        "outlet_code": "SEK6", "complete": True,
+        "outlet_code": "SEK14", "complete": True,
         "items": [
-            {"item_code": "telur_ikan", "item_label": "Telur Ikan", "unit": "kg",
-             "used_qty": 4.0, "pos_qty": 3.0, "mismatch_flag": None},
+            {"item_code": "kambing", "item_label": "Kambing", "unit": "kg",
+             "used_qty": -495.0, "pos_qty": 2.52, "mismatch_flag": "BAD"},
         ],
     }]
     text = digest._kitchen_usage_block(usage)
-    telur_line = next(ln for ln in text.splitlines() if "Telur Ikan" in ln)
-    assert "beli" in telur_line
-    assert "POS" not in telur_line  # the line itself, not the section header
-
-    usage[0]["items"][0]["pos_qty"] = None
-    text2 = digest._kitchen_usage_block(usage)
-    assert "tiada rekod beli" in text2
+    line = next(ln for ln in text.splitlines() if "Kambing" in ln)
+    assert "Data salah" in line and "⚠️" not in line and "-495" not in line
 
 
 def test_format_value_kg_trims():
@@ -2357,6 +2349,21 @@ def test_stage2_targets_yesterday_never_today(monkeypatch):
     assert ku.comparison_already_posted(fake, "SEK20", "2026-06-26") is False
 
 
+def test_stage2_never_auto_posts_days_before_the_cutoff(monkeypatch):
+    """Days compared under the old rules are re-posted only by the owner
+    (/kitchen_recheck), never caught up by the scheduled job."""
+    from config import kitchen_compare
+    from tests.fake_supabase import FakeSupabase
+
+    monkeypatch.setattr(kitchen_compare, "AUTO_POST_FROM", "2026-06-26")
+    fake = FakeSupabase()
+    _seed_complete_day(fake, date="2026-06-25")
+    _seed_pos_complete(fake, date="2026-06-25")
+    bot = _run_stage2(fake, monkeypatch, now=datetime(2026, 6, 26, 9, 0, tzinfo=MY))
+    assert bot.sent == []
+    assert ku.comparison_already_posted(fake, "SEK20", "2026-06-25") is False
+
+
 def test_stage2_14h_targets_yesterday_not_today_after_noon(monkeypatch):
     """The 14:00 pass is AFTER noon — it must still reconcile the just-closed day
     (today-1), not the day now in progress."""
@@ -2639,8 +2646,8 @@ def test_pos_only_snapshot_shows_pos_when_kitchen_never_keyed_in():
     assert evals
     ag = next(e for e in evals if e["code"] == "ayam_goreng")
     assert ag["pos"] == 80.0 and ag["used"] is None and ag["flag"] is None
-    # telur_ikan is purchase-compared -> not shown
-    assert all(e["code"] != "telur_ikan" for e in evals)
+    # telur_ikan is POS-compared now -> shown like the rest
+    assert any(e["code"] == "telur_ikan" for e in evals)
     rows = fake.rows("kitchen_daily_usage")
     assert rows and all(r.get("pos_qty") is not None for r in rows)
     assert all(r.get("cooked_qty") is None and r.get("mismatch_flag") is None for r in rows)
@@ -2746,9 +2753,10 @@ def test_pos_fold_both_shifts_map_to_same_business_date_as_kitchen():
     )
     assert stype_day == "day" and bd_day.isoformat() == "2026-06-24"
 
-    # overnight shift: closes 07:00 on 25 Jun -> business_date 24 Jun (the day it started)
+    # overnight shift: really closes 07:00 on 25 Jun; the POS stamps it
+    # "24/Jun 07:00" (its business date) -> business_date 24 Jun
     stype_night, bd_night = sp.determine_shift_type_and_business_date(
-        datetime(2026, 6, 25, 7, 0)
+        datetime(2026, 6, 24, 7, 0), "2026-06-25T07:00:05+08:00"
     )
     assert stype_night == "overnight" and bd_night.isoformat() == "2026-06-24"
 

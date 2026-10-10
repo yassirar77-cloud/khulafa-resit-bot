@@ -3916,6 +3916,35 @@ async def kitchen_groups_debug_command(update: Update, context: ContextTypes.DEF
     await message.reply_text("\n".join(lines))
 
 
+async def kitchen_recheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only: re-run one day's Guna-vs-POS with the current rules.
+
+    Usage:
+      /kitchen_recheck 2026-10-08              -> recompute every outlet, PREVIEW here
+      /kitchen_recheck 2026-10-08 SEK14        -> one outlet, preview here
+      /kitchen_recheck 2026-10-08 post         -> recompute and POST to the groups
+      /kitchen_recheck 2026-10-08 SEK14 post   -> one outlet, post to its group
+    Recomputing overwrites that day's stored pos_qty / flags (so the 09:00 job
+    won't post the day again)."""
+    message = update.effective_message
+    if not message or not is_reviewer(_command_owner_id(update)):
+        return
+    args = [a.strip() for a in (context.args or []) if a.strip()]
+    day = next((a for a in args if re.fullmatch(r"\d{4}-\d{2}-\d{2}", a)), None)
+    if day is None:
+        await message.reply_text("Usage: /kitchen_recheck YYYY-MM-DD [OUTLET] [post]")
+        return
+    post = any(a.lower() == "post" for a in args)
+    outlet = next((a for a in args if a != day and a.lower() != "post"), None)
+    results = await kitchen_usage.recheck_day(
+        context.application, day, outlet_code=outlet, post=post,
+        reply_chat_id=message.chat_id,
+    )
+    lines = [f"Kitchen recheck {day} ({'POSTED' if post else 'preview only'}):"]
+    lines += [f"• {code}: {status}" for code, status in results] or ["• no kitchen groups matched"]
+    await message.reply_text("\n".join(lines))
+
+
 async def kitchen_post_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Owner-only: post ONE kitchen form right now for testing. Bypasses the
     KITCHEN_LOG_ENABLED safety gate (explicit single post).
@@ -9487,6 +9516,7 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("cloudinary_check", cloudinary_check_command))
     app.add_handler(CommandHandler("kitchen_groups_debug", kitchen_groups_debug_command))
     app.add_handler(CommandHandler("kitchen_post_now", kitchen_post_now_command))
+    app.add_handler(CommandHandler("kitchen_recheck", kitchen_recheck_command))
     app.add_handler(CommandHandler("reparse_status", reparse_status_command))
     app.add_handler(CommandHandler("reparse_preview", reparse_preview_command))
     app.add_handler(CommandHandler("reparse_apply", reparse_apply_command))

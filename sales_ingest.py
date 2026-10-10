@@ -87,14 +87,36 @@ def _parse_received_at(raw):
         return None
 
 
-def resolve_business_date(parsed, now_my):
-    """The shift's business date. Comes from the close time (already adjusted for
-    overnight shifts by the parser); falls back to today so the NOT NULL column
-    is always satisfied."""
+def resolve_business_date(parsed, now_my, received_at=None):
+    """The shift's business date. Comes from the close time — re-derived with
+    the email's arrival time when we have it, so an overnight close stamped
+    with the real date (not the POS business date) is still booked to the right
+    day (see ``pos_dates``); falls back to today so the NOT NULL column is
+    always satisfied."""
+    close = parsed.get("close_time")
+    if close is not None and received_at is not None:
+        from sales_parser import determine_shift_type_and_business_date
+        _stype, bd = determine_shift_type_and_business_date(close, received_at)
+        if bd is not None:
+            return bd
     bd = parsed.get("shift_business_date")
     if bd is not None:
         return bd
     return now_my.date()
+
+
+def resolve_daily_business_date(parsed, email_dict, now_my):
+    """A D-file's business date from its print stamp + the email's arrival
+    time (``pos_dates``); today when the header has no stamp."""
+    h = parsed.get("header", {}) or {}
+    printed = h.get("printed_at")
+    if printed is not None:
+        from sales_daily_parser import business_date_for_printed
+        bd = business_date_for_printed(
+            printed, _parse_received_at(email_dict.get("received_at")))
+        if bd is not None:
+            return bd
+    return h.get("business_date") or now_my.date()
 
 
 def build_sales_record(email_dict, parsed, outlet_canonical, now_my) -> dict:
@@ -105,7 +127,8 @@ def build_sales_record(email_dict, parsed, outlet_canonical, now_my) -> dict:
     # a sentinel) so it is still queryable / fixable later.
     outlet = outlet_canonical or code or "UNKNOWN"
     shift_no = parsed.get("shift_no") or email_dict.get("shift_no_from_subject")
-    business_date = resolve_business_date(parsed, now_my)
+    business_date = resolve_business_date(
+        parsed, now_my, _parse_received_at(email_dict.get("received_at")))
     shift_type = parsed.get("shift_type") or "unknown"
 
     parent = {
@@ -429,10 +452,15 @@ class SupabaseSalesStore:
             self.client.table(DAILY_SUMMARY_TABLE)
             .select("id")
             .eq("outlet_canonical", outlet_canonical)
-            .eq("business_date", business_date)
         )
-        # printed_at can be NULL when the header didn't parse; match explicitly.
-        q = q.is_("printed_at", "null") if printed_at is None else q.eq("printed_at", printed_at)
+        # A print time is unique per close, so it alone identifies a re-send —
+        # even one that arrived late enough to be dated differently (the
+        # business date depends on the arrival time, see pos_dates). Without a
+        # parsed print time, fall back to the business date.
+        if printed_at is None:
+            q = q.eq("business_date", business_date).is_("printed_at", "null")
+        else:
+            q = q.eq("printed_at", printed_at)
         resp = q.limit(1).execute()
         return bool(resp.data)
 
@@ -572,7 +600,7 @@ def _process_d_file(store, email_dict, canonical, now_my):
     if store.exists_daily_message_id(message_id):
         def _rebuild():
             parsed = parse_daily_summary(email_dict["content"])
-            business_date = parsed.get("header", {}).get("business_date") or now_my.date()
+            business_date = resolve_daily_business_date(parsed, email_dict, now_my)
             return build_daily_record(email_dict, parsed, canonical, business_date)
         repaired = _repair_partial(store, "repair_daily_children", message_id, _rebuild)
         if repaired:
@@ -581,7 +609,7 @@ def _process_d_file(store, email_dict, canonical, now_my):
     parsed = parse_daily_summary(email_dict["content"])
     if parsed.get("daily_aggregate", {}).get("day_sales") is None:
         return "error", "no_day_sales_parsed"
-    business_date = parsed.get("header", {}).get("business_date") or now_my.date()
+    business_date = resolve_daily_business_date(parsed, email_dict, now_my)
     record = build_daily_record(email_dict, parsed, canonical, business_date)
     if store.exists_daily(*record["key"]):
         return "skipped", "duplicate"
