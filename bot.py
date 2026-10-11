@@ -5635,7 +5635,8 @@ async def reconcile_now_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def reconcile_date_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Force a reconciliation re-run for one historical business date. Needed
+    """Force a reconciliation re-run for one historical business date (or a
+    range: /reconcile_date START END — e.g. after POS dates were corrected). Needed
     because /reconcile_now only refreshes today + yesterday, so a big sales day
     reconciled by old code (or before later receipts arrived) keeps its stale
     row and skews the 7-day rolling window."""
@@ -5644,28 +5645,35 @@ async def reconcile_date_command(update: Update, context: ContextTypes.DEFAULT_T
         return
     if not context.args:
         await message.reply_text(
-            "Usage: /reconcile_date YYYY-MM-DD\nExample: /reconcile_date 2026-05-25"
+            "Usage: /reconcile_date YYYY-MM-DD [YYYY-MM-DD]\n"
+            "Example: /reconcile_date 2026-05-25\n"
+            "Range: /reconcile_date 2026-08-01 2026-10-10"
         )
         return
-    raw = context.args[0].strip()
     try:
-        target = datetime.strptime(raw, "%Y-%m-%d").date()
+        start = datetime.strptime(context.args[0].strip(), "%Y-%m-%d").date()
+        end = (datetime.strptime(context.args[1].strip(), "%Y-%m-%d").date()
+               if len(context.args) > 1 else start)
     except ValueError:
-        await message.reply_text(f"Bad date {raw!r}. Use YYYY-MM-DD (e.g. 2026-05-25).")
+        await message.reply_text("Bad date. Use YYYY-MM-DD (e.g. 2026-05-25).")
         return
-    await message.reply_text(f"Reconciling {target.isoformat()}…")
-    try:
-        result = await asyncio.to_thread(
-            reconciliation_service.run_reconciliation, supabase, target.isoformat()
-        )
-    except Exception as exc:  # noqa: BLE001 - surfaced to the owner
-        logger.exception("reconcile_date failed")
-        await message.reply_text(f"Reconciliation failed: {exc}")
+    if end < start or (end - start).days > 180:
+        await message.reply_text("Range must run forward and cover at most 180 days.")
         return
-    await message.reply_text(
-        f"Reconciliation done — {result['business_date']}: "
-        f"{result['outlets_processed']} outlets"
-    )
+    dates = [(start + timedelta(days=i)).isoformat() for i in range((end - start).days + 1)]
+    await message.reply_text(f"Reconciling {dates[0]} → {dates[-1]} ({len(dates)} days)…")
+    done, failed = 0, []
+    for d in dates:
+        try:
+            await asyncio.to_thread(reconciliation_service.run_reconciliation, supabase, d)
+            done += 1
+        except Exception:  # noqa: BLE001 - keep going, report at the end
+            logger.exception("reconcile_date failed for %s", d)
+            failed.append(d)
+    text = f"Reconciliation done — {done}/{len(dates)} days"
+    if failed:
+        text += "\nFailed: " + ", ".join(failed)
+    await message.reply_text(text)
 
 
 async def food_cost_week_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

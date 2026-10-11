@@ -205,8 +205,8 @@ def test_finalize_cooked_promotes_rows(monkeypatch, caplog):
         ku.finalize_submission(fake, session, submitter="Chef")
 
     usage = fake.rows("kitchen_daily_usage")
-    # BISTRO7 has all 11 items (incl. ayam_rempah).
-    assert len(usage) == 11
+    # BISTRO7 has all 13 items (incl. ayam_rempah).
+    assert len(usage) == 13
     rempah = next(r for r in usage if r["item_code"] == "ayam_rempah")
     assert rempah["cooked_qty"] == 50
     assert rempah["cooked_by"] == "Chef"
@@ -217,8 +217,8 @@ def test_finalize_cooked_promotes_rows(monkeypatch, caplog):
     assert fake.rows("kitchen_log_session")[0]["status"] == "submitted"
     # promotion logging present
     msgs = "\n".join(r.getMessage() for r in caplog.records)
-    assert "promoting 11 entries to kitchen_daily_usage for BISTRO7" in msgs
-    assert "promotion done — 11/11 rows written" in msgs
+    assert "promoting 13 entries to kitchen_daily_usage for BISTRO7" in msgs
+    assert "promotion done — 13/13 rows written" in msgs
 
 
 def test_finalize_falls_back_to_manual_upsert_when_on_conflict_unsupported(caplog):
@@ -247,7 +247,7 @@ def test_finalize_falls_back_to_manual_upsert_when_on_conflict_unsupported(caplo
         ku.finalize_submission(fake, session, submitter="Chef")
 
     usage = fake.rows("kitchen_daily_usage")
-    assert len(usage) == 11  # written via the manual fallback
+    assert len(usage) == 13  # written via the manual fallback
     assert all(r.get("cooked_qty") is not None and r.get("left_qty") is None for r in usage)
     assert fake.rows("kitchen_log_session")[0]["status"] == "submitted"
     msgs = "\n".join(r.getMessage() for r in caplog.records)
@@ -287,12 +287,12 @@ def test_finalize_raises_and_leaves_session_open_when_all_writes_fail(caplog):
     assert fake.rows("kitchen_daily_usage") == []
     assert fake.rows("kitchen_log_session")[0]["status"] == "open"
     msgs = "\n".join(r.getMessage() for r in caplog.records)
-    assert "0/11 rows written" in msgs
+    assert "0/13 rows written" in msgs
 
 
 def test_hantar_callback_end_to_end_promotes_rows(monkeypatch):
     """End-to-end through the REAL handler: a Hantar tap on a complete BISTRO7
-    COOKED form must write 11 kitchen_daily_usage rows even when the table lacks
+    COOKED form must write 13 kitchen_daily_usage rows even when the table lacks
     the ON CONFLICT unique constraint (the production scenario)."""
     import asyncio
     import types
@@ -338,7 +338,7 @@ def test_hantar_callback_end_to_end_promotes_rows(monkeypatch):
     asyncio.run(ku.handle_kitchen_callback(update, context))
 
     usage = fake.rows("kitchen_daily_usage")
-    assert len(usage) == 11
+    assert len(usage) == 13
     assert all(r.get("cooked_qty") is not None and r.get("left_qty") is None for r in usage)
     assert {r["item_code"] for r in usage} == set(ku.required_codes("BISTRO7"))
     assert fake.rows("kitchen_log_session")[0]["status"] == "submitted"
@@ -637,7 +637,7 @@ def test_hantar_end_to_end_with_live_check_constraint(monkeypatch):
 
     asyncio.run(ku.handle_kitchen_callback(update, context))
 
-    assert len(fake.rows("kitchen_daily_usage")) == 11
+    assert len(fake.rows("kitchen_daily_usage")) == 13
     assert fake.rows("kitchen_log_session")[0]["status"] == "submitted"
     assert any("Tersimpan" in e for e in edits)
     assert replies == []  # success — no error reply
@@ -1201,15 +1201,43 @@ def test_thai_food_category_and_thai_dishes_excluded():
         assert ku.pos_qty_for_item(code, rows) == 0.0, code
 
 
-def test_ayam_rendang_kurma_kari_excluded():
+def test_ayam_rendang_kurma_kari_count_to_kari_rendang_only():
+    """Owner, Oct 2026: rendang / kurma / kari / masak merah chicken have their
+    own "Ayam Kari/Rendang" button and count nowhere else."""
     rows = [
         {"item_name": "Ayam Rendang", "qty": 10},
         {"item_name": "Ayam Kurma", "qty": 8},
         {"item_name": "Ayam Kari", "qty": 6},
+        {"item_name": "Nasi Ayam Rendang Sayur", "qty": 2},
+        {"item_name": "AYAM MERAH", "qty": 1},
+        {"item_name": "Ayam Masak Merah", "category": "THAI FOOD", "qty": 9},
     ]
+    assert ku.pos_qty_for_item("ayam_kari_rendang", rows) == 27
     for code in ku.ITEM_POS_KEYWORDS:
-        if ku.ITEM_POS_KEYWORDS[code]["base"] == "ayam":
+        if code != "ayam_kari_rendang" and ku.ITEM_POS_KEYWORDS[code]["base"] == "ayam":
             assert ku.pos_qty_for_item(code, rows) == 0.0, code
+
+
+def test_ayam_65_button():
+    rows = [{"item_name": "Ayam 65", "qty": 3}, {"item_name": "Nasiputih+65 Sayur", "qty": 6},
+            {"item_name": "Nasiputih+ Ayam65", "qty": 1}, {"item_name": "Chicken 65", "qty": 2}]
+    assert ku.pos_qty_for_item("ayam_65", rows) == 12
+    assert ku.pos_qty_for_item("ayam_goreng", rows) == 0
+
+
+def test_nasi_lemak_ayam_is_ayam_goreng_and_kambing_perut_dropped():
+    rows = [{"item_name": "Nasi Lemak Ayam", "qty": 4},
+            {"item_name": "Nasi Lemak Basmathi Ayam", "qty": 2}]
+    assert ku.pos_qty_for_item("ayam_goreng", rows) == 6
+    tripe = [{"item_name": "Kambing Perut", "qty": 5}, {"item_name": "Purut Kambing", "qty": 1},
+             {"item_name": "Nasi Kambing Perut Sayur", "qty": 1}]
+    assert ku.pos_qty_for_item("kambing", tripe) == 0
+
+
+def test_gravy_only_kari_counts_nowhere():
+    rows = [{"item_name": "KARI AYAM/KAMBING", "qty": 5}]
+    for code in ku.ITEM_POS_KEYWORDS:
+        assert ku.pos_qty_for_item(code, rows) == 0, code
 
 
 def test_kambing_all_dishes_x180g():
@@ -1434,31 +1462,16 @@ def test_telur_ikan_is_pos_compared():
     assert ku.KG_PORTION_GRAMS["daging"] == 60.0
 
 
-def test_telur_ikan_counts_every_pos_variant():
+def test_telur_ikan_counts_every_pos_variant_as_one_pc():
     rows = [{"item_name": "Telur Ikan M", "qty": 2},
             {"item_name": "Telur Ikan (b)", "qty": 1},
             {"item_name": "Nasi Telur Ikan", "qty": 1},
             {"item_name": "Telur Ikan Ikut Saiz", "qty": 3},
             {"item_name": "Telur Masin", "qty": 9}]
-    assert ku.pos_pcs_for_item("telur_ikan", rows) == 7
-
-
-def test_telur_ikan_without_portion_weight_shows_pcs_and_no_status(monkeypatch):
-    from config import kitchen_compare as cfg
-    monkeypatch.setattr(cfg, "TELUR_IKAN_PORTION_GRAMS", {})
-    ev = ku.evaluate_usage("telur_ikan", 1.0, 0.5, [{"item_name": "Telur Ikan M", "qty": 2}])
-    assert ev["pos"] is None and ev["flag"] is None and ev["pos_pcs"] == 2
-    full = ku.render_mini_summary_full("SEK-14", "2026-10-08", [ev])
-    line = next(ln for ln in full.splitlines() if "Telur Ikan" in ln)
-    assert "POS 2 pcs" in line and "beli" not in line
-
-
-def test_telur_ikan_with_portion_weight_is_compared_in_kg(monkeypatch):
-    from config import kitchen_compare as cfg
-    monkeypatch.setattr(cfg, "TELUR_IKAN_PORTION_GRAMS", {"telur ikan m": 100.0})
-    ev = ku.evaluate_usage("telur_ikan", 1.0, 0.0, [{"item_name": "Telur Ikan M", "qty": 2}])
-    assert ev["pos"] == 0.2
-    assert ev["flag"] == "LEAK"   # 1 kg vs 0.2 kg
+    assert ku.ITEM_BY_CODE["telur_ikan"]["unit"] == "pcs"
+    assert ku.pos_qty_for_item("telur_ikan", rows) == 7
+    ev = ku.evaluate_usage("telur_ikan", 10, 2, rows)
+    assert ev["used"] == 8 and ev["pos"] == 7 and ev["flag"] is None
 
 
 def test_purchased_kg_sums_matching_lines():
@@ -3274,3 +3287,60 @@ def test_edit_form_message_logs_failures_and_keeps_going(caplog):
     assert len(errors) == 1
     assert "numpad_commit" in errors[0].getMessage() and errors[0].exc_info
     assert any(r.levelno == logging.DEBUG and "not modified" in r.getMessage() for r in caplog.records)
+
+
+def test_kitchen_recheck_previews_then_posts_with_corrected_note(monkeypatch):
+    """/kitchen_recheck: preview goes only to the owner's chat; ``post`` sends
+    the group copy (headed "Abaikan ringkasan sebelum ini") to the group."""
+    import asyncio
+    import types
+
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    _seed_complete_day(fake, date="2026-06-24")
+    _seed_pos_complete(fake, date="2026-06-24")
+    monkeypatch.setattr(ku, "_supabase", fake)
+    monkeypatch.delenv("ALERT_CHAT_ID", raising=False)
+    monkeypatch.setattr(
+        "config.kitchen_groups.configured_groups", lambda client: [(-100, "SEK20")]
+    )
+    bot = _CaptureBot()
+    app = types.SimpleNamespace(bot=bot)
+    res = asyncio.run(ku.recheck_day(app, "2026-06-24", reply_chat_id=42))
+    assert res == [("SEK20", "previewed")]
+    assert {c for c, _ in bot.sent} == {42}
+
+    bot2 = _CaptureBot()
+    res = asyncio.run(ku.recheck_day(types.SimpleNamespace(bot=bot2), "2026-06-24", post=True))
+    assert res == [("SEK20", "posted")]
+    chat, text = bot2.sent[0]
+    assert chat == -100 and "Abaikan ringkasan sebelum ini" in text
+
+
+def test_left_form_skips_buttons_with_no_cooked_row():
+    """A button added between the 18:00 and 02:00 forms must not get a
+    leftover-only row (the day would never be complete)."""
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    for code in ("ayam_goreng", "kambing"):
+        fake._store.setdefault("kitchen_daily_usage", []).append({
+            "outlet_code": "SEK20", "business_date": "2026-10-11", "item_code": code,
+            "unit": ku.ITEM_BY_CODE[code]["unit"], "cooked_qty": 10,
+        })
+    fake._store["kitchen_daily_usage"].append({
+        "outlet_code": "SEK20", "business_date": "2026-10-11", "item_code": "telur_ikan",
+        "unit": "kg", "cooked_qty": 1.0,
+    })
+    session = {"id": 1, "outlet_code": "SEK20", "business_date": "2026-10-11",
+               "phase": ku.PHASE_LEFT, "entries": {"ayam_goreng": 2, "telur_ikan": 3}}
+    fake._store.setdefault("kitchen_log_session", []).append(dict(session, status="submitting"))
+    ku.finalize_submission(fake, session, "tester")
+    rows = {r["item_code"]: r for r in fake.rows("kitchen_daily_usage")}
+    assert rows["ayam_goreng"]["left_qty"] == 2
+    assert rows["kambing"]["left_qty"] == 0           # cooked existed, untouched -> 0
+    assert "ayam_65" not in rows and "ayam_kari_rendang" not in rows
+    # cooked in kg before the switch: leftover written in kg, day completes
+    assert rows["telur_ikan"]["left_qty"] == 3 and rows["telur_ikan"]["unit"] == "kg"
+    assert ku.day_record_complete(fake, "SEK20", "2026-10-11") is True

@@ -160,27 +160,32 @@ def test_sek14_ayam_bawang_counts_every_variant_incl_typo():
     assert ku.pos_qty_for_item("ayam_bawang", ITEMWISE[1219]) == 40
 
 
-def test_rendang_and_kari_are_listed_not_mapped():
+def test_rendang_kari_and_65_have_their_own_buttons():
     rows = ITEMWISE[1228]
     assert ku.pos_qty_for_item("ayam_kicap", rows) == 0
     assert ku.pos_qty_for_item("ayam_madu", rows) == 0
-    un = ku.unmapped_ayam_counts(rows)
-    # Rendang 2 + Rendang 1pc 1 + Nasi Ayam Rendang 2; Kari 3 + 4 + 2
-    assert un["Rendang"] == 5 and un["Kari"] == 9
+    # Rendang 2 + Rendang 1pc 1 + Nasi Ayam Rendang 2 + Kari 3 + 4 + 2
+    assert ku.pos_qty_for_item("ayam_kari_rendang", rows) == 14
     # Ayam 65 3 + Nasiputih+65 Sayur 6
-    assert un["Ayam 65"] == 9
-    full = ku.render_mini_summary_full("SEK-14", "2026-10-09", [], extras={"unmapped": un})
-    assert "POS tiada butang: Rendang 5, Kari 9, Ayam 65 9" in full
-    group = ku.render_mini_summary("SEK-14", "2026-10-09", [], extras={"unmapped": un})
-    assert "POS tiada butang: Rendang, Kari, Ayam 65" in group  # names only
+    assert ku.pos_qty_for_item("ayam_65", rows) == 9
+    assert ku.unmapped_ayam_counts(rows) == {}
+
+
+def test_buttons_without_kitchen_rows_show_pos_only():
+    ev = {"code": "ayam_65", "label": "Ayam 65", "unit": "pcs", "cooked": None, "left": None,
+          "used": None, "pos": 9, "flag": None, "source": "pos", "no_kitchen": True}
+    full = ku.render_mini_summary_full("SEK-14", "2026-10-09", [ev])
+    assert "➖ Ayam 65: tiada rekod dapur vs POS 9 pcs" in full
+    group = ku.render_mini_summary("SEK-14", "2026-10-09", [ev])
+    assert "➖ Ayam 65: tiada rekod dapur" in group and "9" not in group.split("\n", 3)[3]
 
 
 def test_telur_ikan_is_compared_against_pos_not_purchases():
     assert ku.compare_source("telur_ikan") == "pos"
-    assert ku.pos_pcs_for_item("telur_ikan", ITEMWISE[1228]) == 2  # "Telur Ikan M"
-    ev = ku.evaluate_usage("telur_ikan", 1.0, 0.5, ITEMWISE[1228])
+    assert ku.pos_qty_for_item("telur_ikan", ITEMWISE[1228]) == 2  # "Telur Ikan M"
+    ev = ku.evaluate_usage("telur_ikan", 3, 1, ITEMWISE[1228])
     text = ku.render_mini_summary_full("SEK-14", "2026-10-09", [ev])
-    assert "tiada rekod beli" not in text and "POS 2 pcs" in text
+    assert "tiada rekod beli" not in text and "guna 2 vs POS 2 pcs" in text
 
 
 def test_tandoori_is_ayam_tandoori_only():

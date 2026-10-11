@@ -35,14 +35,16 @@ KG_PORTION_GRAMS: dict[str, float] = {
     "daging": 60.0,
 }
 
-# Telur Ikan is sold on the POS in sized portions. Grams per portion, keyed by
-# the normalised POS name. NOT YET SET — no weight has been agreed, so until
-# every variant an outlet sells has a weight here, the summary shows the POS
-# piece count next to guna kg without a status (never a guessed conversion).
-# Variants seen in the last 30 days (all outlets):
-#   "telur ikan b", "telur ikan (b)", "telur ikan m", "telur ikan (m)",
-#   "telur ikan ikut saiz", "telur ikan rm 12", "nasi telur ikan"
-TELUR_IKAN_PORTION_GRAMS: dict[str, float] = {}
+# Telur Ikan is keyed in pcs and every POS size (B, M, Ikut Saiz, Rm 12,
+# "Nasi Telur Ikan") counts as 1 pc — owner decision, Oct 2026.
+
+# POS items that are curry GRAVY only (no meat) and must count toward no
+# button. Normalised names (pos_names.normalize_pos_name). Owner rule: a
+# "Kari Ayam/Kambing" item counts only if it includes meat — pending the
+# owner's confirmation the one below is gravy, so it is excluded.
+GRAVY_ONLY_NAMES: frozenset = frozenset({
+    "kari ayam/kambing",   # SEK15 — gravy (to confirm)
+})
 
 # --- POS name normalisation ---------------------------------------------------
 # Whole-word typo fixes applied to every POS item name before matching (after
@@ -60,14 +62,9 @@ POS_NAME_TYPOS: dict[str, str] = {
 }
 
 # --- chicken dishes with no lauk button ----------------------------------------
-# Ayam dishes that count toward NO kitchen item. They are listed under the
-# summary ("POS tiada butang: Rendang 3, Kari 9") so the owner can decide
-# whether they belong to a button. Deliberately NOT mapped to any item.
+# Ayam dishes that count toward NO kitchen item, listed under the summary as
+# "POS tiada butang: X n" so the owner can decide. Empty since Oct 2026: the
+# former Rendang/Kari/Kurma/Masak Merah buckets are the "Ayam Kari/Rendang"
+# button and Ayam 65 has its own button.
 # label -> regex patterns (searched in the normalised name).
-UNMAPPED_AYAM_BUCKETS: dict[str, tuple[str, ...]] = {
-    "Rendang": ("rendang",),
-    "Kari": ("kari", "curry"),
-    "Kurma": ("kurma",),
-    "Ayam 65": (r"\b65\b",),
-    "Masak Merah": ("merah",),
-}
+UNMAPPED_AYAM_BUCKETS: dict[str, tuple[str, ...]] = {}

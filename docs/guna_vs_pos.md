@@ -35,13 +35,15 @@ both, never a D-file that lists another day's shifts.
 ## POS name → lauk button
 Names are normalised first (`pos_names.py`: case, `_`/`+`, spaces, typos such as
 "Awam"→"Ayam", "Sepuruh"→"Separuh"). Then (`ITEM_POS_KEYWORDS`):
-* **Ayam Goreng** — "ayam goreng" + plain nasi-kandar plates (Nasi Ayam, Nasi Separuh Ayam, Briyani Ayam…) with no other style word.
+* **Ayam Goreng** — "ayam goreng" + plain nasi-kandar plates (Nasi Ayam, Nasi Separuh Ayam, Briyani Ayam, Nasi Lemak Ayam…) with no other style word.
 * **Ayam Bawang / Kicap / Madu / Rempah** — "ayam" + that style word.
-* **Ayam Tandoori** — "ayam" + "tandoori"/"tandori" (staff meals excluded). *Ayam 65 is not tandoori.*
+* **Ayam Tandoori** — "ayam" + "tandoori"/"tandori" (staff meals excluded).
+* **Ayam Kari/Rendang** — "ayam" + rendang / kari / curry / kurma / merah (THAI FOOD category excluded).
+* **Ayam 65** — any name with "65" as a word: Ayam 65, Chicken 65, Nasiputih+65, Ayam Masala/65.
 * **Ikan Goreng** — "ikan goreng". **Ikan Kari** — ikan + kari/curry, or plain Nasi Ikan / Nasi Putih Ikan / Nasi Separuh Ikan.
-* **Kambing / Daging** — every dish with the word (minus Susu Kambing), POS portions × 180 g / 60 g.
-* **Telur Ikan** — every "telur ikan" dish, × grams per portion from `TELUR_IKAN_PORTION_GRAMS` (empty until set → shown as POS pcs, no status).
-* Excluded everywhere: THAI FOOD category, staff meals; for ayam also isi-ayam noodle/rice dishes.
-* **No button** (listed as "POS tiada butang"): Rendang, Kari, Kurma, Ayam 65, Masak Merah.
+* **Kambing / Daging** — every dish with the word, POS portions × 180 g / 60 g. Not counted: Susu Kambing, Kambing Perut / Purut Kambing (tripe). Lamb Shank / Lamb Chop are separate (not counted).
+* **Telur Ikan** — keyed in **pcs**; every "telur ikan" POS item counts as 1 pc whatever the size.
+* Excluded everywhere: THAI FOOD category, staff meals, curry-gravy-only items (`GRAVY_ONLY_NAMES`: "Kari Ayam/Kambing"); for ayam also isi-ayam noodle/rice dishes.
+* A button the kitchen had no row for that day shows "➖ … tiada rekod dapur" with the POS count; Telur Ikan rows keyed before the switch (kg) show "rekod lama dalam kg".
 
 Full 30-day audit: `docs/audits/pos_item_names_30d.md` (`scripts/audit_pos_item_names.py`).

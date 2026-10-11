@@ -310,6 +310,14 @@ T: dict[str, dict[str, str]] = {
         "english": "🔴 = used more than POS  ⚠️ = used less than POS (maybe entered wrong)",
         "indonesian": "🔴 = terpakai lebih dari POS  ⚠️ = terpakai kurang dari POS (mungkin salah isi)",
     },
+    # Re-posted (corrected) summaries carry this first line.
+    "mini_corrected": {
+        "bm": "⚠️ Abaikan ringkasan sebelum ini — ini versi yang dibetulkan.",
+        "tamil": "⚠️ முந்தைய சுருக்கத்தை விட்டுடுங்க — இது திருத்தின பதிப்பு.",
+        "bengali": "⚠️ Ager shongkkhep bad din — eta thik kora version.",
+        "english": "⚠️ Ignore the earlier summary — this is the corrected version.",
+        "indonesian": "⚠️ Abaikan ringkasan sebelumnya — ini versi yang sudah diperbaiki.",
+    },
     "mini_bad": {
         "bm": "❌ {label}: Data salah – sila semak",
         "tamil": "❌ {label}: Data தப்பு – சரிபாருங்க",
@@ -317,13 +325,28 @@ T: dict[str, dict[str, str]] = {
         "english": "❌ {label}: Wrong data – please check",
         "indonesian": "❌ {label}: Data salah – mohon dicek",
     },
-    # Telur Ikan while no portion weight is set: POS pieces, no status.
-    "mini_line_pcs": {
-        "bm": "➖ {label}: guna {used} {unit} vs POS {pcs} pcs (berat porsi belum ditetapkan)",
-        "tamil": "➖ {label}: பயன்பாடு {used} {unit} vs POS {pcs} pcs (portion எடை இன்னும் set ஆகல)",
-        "bengali": "➖ {label}: byabohar {used} {unit} vs POS {pcs} pcs (portion ojon set hoy nai)",
-        "english": "➖ {label}: used {used} {unit} vs POS {pcs} pcs (portion weight not set)",
-        "indonesian": "➖ {label}: terpakai {used} {unit} vs POS {pcs} pcs (berat porsi belum diatur)",
+    # A button the kitchen had no row for that day: POS only, no status.
+    "mini_no_kitchen": {
+        "bm": "➖ {label}: tiada rekod dapur",
+        "tamil": "➖ {label}: சமையலறை பதிவு இல்ல",
+        "bengali": "➖ {label}: ranna ghorer record nai",
+        "english": "➖ {label}: no kitchen record",
+        "indonesian": "➖ {label}: tidak ada catatan dapur",
+    },
+    "mini_no_kitchen_full": {
+        "bm": "➖ {label}: tiada rekod dapur vs POS {pos} {unit}",
+        "tamil": "➖ {label}: சமையலறை பதிவு இல்ல vs POS {pos} {unit}",
+        "bengali": "➖ {label}: ranna ghorer record nai vs POS {pos} {unit}",
+        "english": "➖ {label}: no kitchen record vs POS {pos} {unit}",
+        "indonesian": "➖ {label}: tidak ada catatan dapur vs POS {pos} {unit}",
+    },
+    # Keyed in an older unit (Telur Ikan was kg until Oct 2026).
+    "mini_unit_changed": {
+        "bm": "➖ {label}: rekod lama dalam kg — tak boleh banding dengan POS (pcs)",
+        "tamil": "➖ {label}: பழைய பதிவு kg-ல — POS (pcs)-உடன் ஒப்பிட முடியாது",
+        "bengali": "➖ {label}: purono record kg-te — POS (pcs)-er sathe tulona hoy na",
+        "english": "➖ {label}: older record in kg — can't compare with POS (pcs)",
+        "indonesian": "➖ {label}: catatan lama dalam kg — tidak bisa dibandingkan dengan POS (pcs)",
     },
     "mini_nocompare": {
         "bm": "➖ {label}: belum boleh banding",

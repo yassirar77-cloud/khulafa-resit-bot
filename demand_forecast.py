@@ -234,7 +234,7 @@ def load_usage_rows(supabase, start_iso: str, end_iso: str) -> list[dict]:
         return (
             supabase.table(USAGE_TABLE)
             .select(
-                "id, outlet_code, business_date, item_code, "
+                "id, outlet_code, business_date, item_code, unit, "
                 "cooked_qty, left_qty, used_qty, pos_qty"
             )
             .gte("business_date", start_iso)
@@ -269,6 +269,12 @@ def day_demand(row: dict, item_code: str) -> dict | None:
     never enters the model. ``censored`` marks a sell-out (Left = 0) — demand
     was AT LEAST this."""
     try:
+        # A row keyed in another unit (Telur Ikan was kg until Oct 2026, pcs
+        # since) is not comparable with today's numbers.
+        from kitchen_usage import ITEM_BY_CODE
+        unit_now = (ITEM_BY_CODE.get(item_code) or {}).get("unit")
+        if row.get("unit") and unit_now and row.get("unit") != unit_now:
+            return None
         cooked = _to_float(row.get("cooked_qty"))
         left = _to_float(row.get("left_qty"))
         used = _to_float(row.get("used_qty"))
