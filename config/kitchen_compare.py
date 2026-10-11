@@ -16,10 +16,11 @@ STATUS_PCT = 0.15
 STATUS_FLOOR = {"pcs": 2.0, "kg": 0.3}
 
 # --- scheduled posting -------------------------------------------------------
-# The 09:00/11:00/14:00 job only auto-posts business days on/after this date.
+# The 09:00/11:00/14:00 job only auto-posts business days on/after this date
+# (8–10 Oct are held for the owner's review of the corrected summaries).
 # Days before it were compared under the old (wrong) rules and dates; they are
 # re-posted only on the owner's say-so with /kitchen_recheck YYYY-MM-DD post.
-AUTO_POST_FROM = "2026-10-10"
+AUTO_POST_FROM = "2026-10-11"
 
 # --- key-in validation --------------------------------------------------------
 # A kg field keyed at/above this is almost certainly grams ("500" for 0.5 kg):
