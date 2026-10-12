@@ -217,8 +217,8 @@ def register_manager(supabase, code, manager_name, chat_id) -> dict:
 
 # Internal outlet codes that name the same shop as a registry code. Managers
 # are registered under registry codes (outlet_canonical), but item_prices /
-# the order drafts say "D" for Damansara and the kitchen log resolves the
-# "Kl Sg Besi" group to KLRAZAK (config/kitchen_groups.py) — without these,
+# the order drafts say "D" for Damansara and the kitchen log keyed the
+# "Kl Sg Besi" group KLRAZAK before Oct 2026 (now SBESI) — without these,
 # those lookups miss the registered manager and fall back to the director.
 CODE_ALIASES = {"D": "DAMANSARA", "KLRAZAK": "SBESI"}
 

@@ -233,3 +233,19 @@ def test_corrected_sek14_8_oct():
     assert ev["ayam_bawang"]["pos"] == 40 and ev["ayam_bawang"]["flag"] is None
     assert ev["ayam_tandoori"]["pos"] == 9 and ev["ayam_tandoori"]["flag"] == "LEAK"
     assert ev["ayam_madu"]["flag"] == "LEAK"
+
+
+def test_gravy_items_count_toward_nothing_and_65_names_kept():
+    """Owner, Oct 2026: Kari Bungkus / Kua Kari / Nasi Putih (Kari) and SEK-15
+    "KARI AYAM/KAMBING" (avg RM2.59 < RM4) are gravy; Chicken 65 and Ayam
+    Masala/65 stay in the Ayam 65 button."""
+    gravy = ["Kari Bungkus", "Kua Kari", "Nasi Putih ( Kari )", "Nasi Putih (Kari)",
+             "KARI AYAM/KAMBING"]
+    for name in gravy:
+        rows = [{"item_name": name, "qty": 10, "category": None}]
+        assert all(ku.pos_pcs_for_item(code, rows) == 0
+                   for code in ku.ITEM_POS_KEYWORDS), name
+    assert ku.pos_pcs_for_item("ayam_kari_rendang",
+                               [{"item_name": "Ayam Kari", "qty": 3}]) == 3
+    for name in ("Chicken 65", "Ayam Masala/65"):
+        assert ku.pos_pcs_for_item("ayam_65", [{"item_name": name, "qty": 2}]) == 2, name

@@ -27,7 +27,7 @@ MY = ZoneInfo("Asia/Kuala_Lumpur")
 def test_ayam_rempah_only_for_bistro():
     bistro = [it["code"] for it in ku.items_for_outlet("BISTRO7")]
     assert "ayam_rempah" in bistro
-    for outlet in ("SEK6", "SEK20", "VISTA", "JAKEL", "D", "KLANG", "KLRAZAK"):
+    for outlet in ("SEK6", "SEK20", "VISTA", "JAKEL", "D", "KLANG", "SBESI"):
         codes = [it["code"] for it in ku.items_for_outlet(outlet)]
         assert "ayam_rempah" not in codes, outlet
         # every other tracked item is still present
@@ -1293,7 +1293,7 @@ def test_normalize_outlet_strips_pos_prefix_all_ten_outlets():
         ("JAKEL", "S-JAKEL"),
         ("D", "D-DAMANSARA"),     # names differ but resolve to D.U
         ("KLANG", "S-KLANG"),
-        ("KLRAZAK", "D-RAZAK"),   # names differ but resolve to K.L Razak
+        ("SBESI", "D-SBESI"),
     ]
     keys = set()
     for kitchen, pos in pairs:
@@ -1324,7 +1324,9 @@ def test_outlet_join_keys_bridge_bare_code_and_canonical():
     assert ku.outlets_match("KLANG", "Klang B.Emas")
     # renamed outlets bridge via the canonical name
     assert ku.outlets_match("D", "D-DAMANSARA")
-    assert ku.outlets_match("KLRAZAK", "D-RAZAK")
+    assert ku.outlets_match("SBESI", "D-SBESI")
+    # the closed K.L Razak POS never joins the Sg Besi kitchen
+    assert not ku.outlets_match("SBESI", "D-RAZAK")
     # different outlets never match
     assert not ku.outlets_match("KLANG", "D-SEK20")
     assert ku.outlet_join_keys("") == set()
@@ -1333,7 +1335,7 @@ def test_outlet_join_keys_bridge_bare_code_and_canonical():
 
 def test_outlet_join_keys_all_ten_distinct_no_cross_match():
     outs = ["BISTRO7", "SEK20", "SEK14", "SEK15", "SEK6",
-            "VISTA", "JAKEL", "D", "KLANG", "KLRAZAK"]
+            "VISTA", "JAKEL", "D", "KLANG", "SBESI"]
     for i, a in enumerate(outs):
         for j, b in enumerate(outs):
             if i != j:
@@ -1368,7 +1370,8 @@ def test_fetch_itemwise_joins_kitchen_klang_to_pos_d_klang():
 
 
 def test_fetch_itemwise_joins_renamed_outlets():
-    """Kitchen 'D'/'KLRAZAK' join POS 'D-DAMANSARA'/'D-RAZAK' despite name diffs."""
+    """Kitchen 'D' joins POS 'D-DAMANSARA'; kitchen 'SBESI' joins D-SBESI, never
+    the closed K.L Razak POS."""
     from tests.fake_supabase import FakeSupabase
 
     fake = FakeSupabase()
@@ -1377,15 +1380,18 @@ def test_fetch_itemwise_joins_renamed_outlets():
          "business_date": "2026-06-24"},
         {"id": 2, "outlet_code": "D-RAZAK", "outlet_canonical": "K.L Razak",
          "business_date": "2026-06-24"},
+        {"id": 3, "outlet_code": "D-SBESI", "outlet_canonical": "SBESI",
+         "business_date": "2026-06-24"},
     ]
     fake._store[ku.SALES_ITEMWISE_TABLE] = [
         {"id": 10, "summary_id": 1, "item_name": "Ayam Madu", "qty": 3},
         {"id": 11, "summary_id": 2, "item_name": "Ayam Madu", "qty": 7},
+        {"id": 12, "summary_id": 3, "item_name": "Ayam Madu", "qty": 4},
     ]
     du = ku._fetch_itemwise(fake, "D", "2026-06-24")
     assert ku.pos_qty_for_item("ayam_madu", du) == 3
-    razak = ku._fetch_itemwise(fake, "KLRAZAK", "2026-06-24")
-    assert ku.pos_qty_for_item("ayam_madu", razak) == 7
+    sbesi = ku._fetch_itemwise(fake, "SBESI", "2026-06-24")
+    assert ku.pos_qty_for_item("ayam_madu", sbesi) == 4
 
 
 # --- status rule (config/kitchen_compare.py: ±15 %, floor pcs 2 / kg 0.3) ------
@@ -1596,30 +1602,29 @@ def test_outlet_code_from_text_titles():
         "Khulafa Jakel Receipt": "JAKEL",
         "Khulafa Damansara Uptown": "D",
         "Khulafa Klang Bayu Emas": "KLANG",
-        "Khulafa KL Razak": "KLRAZAK",
-        # "Kl Sg Besi" is the SAME outlet as K.L Razak -> KLRAZAK, not SBESI.
-        "Kl Sg Besi": "KLRAZAK",
-        "Khulafa Sungai Besi": "KLRAZAK",
+        # "Kl Sg Besi" is Sungai Besi (POS SBESI); K.L Razak is closed.
+        "Kl Sg Besi": "SBESI",
+        "Khulafa Sungai Besi": "SBESI",
         # SEK6 only matches a genuine Jalan Murai / Sek 6 titled group.
         "Khulafa Sek 6 Jalan Murai": "SEK6",
     }
     for text, code in cases.items():
         assert kg.outlet_code_from_text(text) == code, text
-    # SBESI must never be emitted as a kitchen outlet_code anymore.
-    assert "SBESI" not in {kg.outlet_code_from_text(t) for t in cases}
+    # KLRAZAK is never emitted anymore; a "razak" title resolves to nothing.
+    assert "KLRAZAK" not in {kg.outlet_code_from_text(t) for t in cases}
+    assert kg.outlet_code_from_text("Khulafa KL Razak") is None
     assert kg.outlet_code_from_text("UNKNOWN") is None
     assert kg.outlet_code_from_text("") is None
     assert kg.outlet_code_from_text(None) is None
 
 
-def test_kl_sg_besi_resolves_to_klrazak_not_sbesi():
-    # Regression: group -5163000846 "Kl Sg Besi" is K.L Razak.
+def test_kl_sg_besi_resolves_to_sbesi():
+    # Group -5163000846 "Kl Sg Besi" is Sungai Besi (owner, Oct 2026).
     kg = _fresh_kitchen_groups()
     fake = FakeSupabase()
     fake._store["receipts"] = [{"chat_id": -5163000846, "outlet": "Kl Sg Besi"}]
     groups = dict(kg.configured_groups(fake))
-    assert groups == {-5163000846: "KLRAZAK"}
-    assert "SBESI" not in groups.values()
+    assert groups == {-5163000846: "SBESI"}
 
 
 def test_sharfuddin_klang_not_sek6():
@@ -1724,7 +1729,7 @@ def test_log_resolution_summary_warns_when_missing(caplog):
     with caplog.at_level(logging.WARNING, logger="config.kitchen_groups"):
         result = kg.log_resolution_summary(fake)
     assert "SEK6" in result["missing"]
-    assert "KLRAZAK" in result["missing"]
+    assert "SBESI" in result["missing"]
     assert "BISTRO7" not in result["missing"]
     msgs = "\n".join(r.getMessage() for r in caplog.records)
     assert "Kitchen groups resolved: 3/10" in msgs
@@ -1740,7 +1745,7 @@ def test_log_resolution_summary_info_when_all_present(caplog):
         "BISTRO7": "Bistro", "SEK20": "SEK 20", "SEK14": "Signature",
         "SEK15": "SEK 15", "SEK6": "Sek 6 Jalan Murai", "VISTA": "Vista",
         "JAKEL": "Jakel", "D": "Damansara", "KLANG": "Hj Sharfuddin Klang Bayu Emas",
-        "KLRAZAK": "KL Razak",
+        "SBESI": "Kl Sg Besi",
     }
     fake._store["receipts"] = [
         {"chat_id": -(i + 1), "outlet": title} for i, title in enumerate(titles.values())

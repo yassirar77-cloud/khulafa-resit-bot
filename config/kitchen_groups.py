@@ -37,8 +37,8 @@ KITCHEN_GROUPS: dict[int, str] = {}
 #     map to KLANG. SEK-6 (Jalan Murai) only matches a genuine "sek 6"/"jalan
 #     murai" titled group; if no such group exists it simply won't resolve and
 #     the startup summary surfaces it as missing.
-# Codes match item_prices.outlet_code / outlet_mapping (KLRAZAK resolves to the
-# "K.L Razak" canonical via outlet_resolver, matching sales' S-RAZAK).
+# Codes match item_prices.outlet_code / outlet_mapping (kitchen SBESI joins
+# POS D-SBESI / S-SBESI).
 _CODE_RULES: list[tuple[str, str]] = [
     ("sek 15", "SEK15"),
     ("sek15", "SEK15"),
@@ -52,13 +52,13 @@ _CODE_RULES: list[tuple[str, str]] = [
     ("sek 6", "SEK6"),
     ("sek6", "SEK6"),
     ("bistro", "BISTRO7"),
-    # K.L Razak == "Kl Sg Besi" — ONE physical outlet, two names. All of these
-    # resolve to KLRAZAK (the "K.L Razak" canonical / sales' S-RAZAK), so the POS
-    # comparison joins correctly. SBESI is NOT a separate kitchen outlet.
-    ("razak", "KLRAZAK"),
-    ("sungai besi", "KLRAZAK"),
-    ("sg besi", "KLRAZAK"),
-    ("sbesi", "KLRAZAK"),
+    # "Kl Sg Besi" (chat -5163000846) is Sungai Besi: its POS is D-SBESI /
+    # S-SBESI. (Until Oct 2026 it was keyed "KLRAZAK" and wrongly joined to the
+    # K.L Razak POS, which is closed/inactive.) "razak" maps to nothing.
+    ("sungai besi", "SBESI"),
+    ("sg besi", "SBESI"),
+    ("s besi", "SBESI"),
+    ("sbesi", "SBESI"),
     ("vista", "VISTA"),
     ("jakel", "JAKEL"),
     ("damansara", "D"),
@@ -74,7 +74,7 @@ _CODE_RULES: list[tuple[str, str]] = [
 # noticed instead of silently getting no kitchen form.
 EXPECTED_CODES: tuple[str, ...] = (
     "BISTRO7", "SEK20", "SEK14", "SEK15", "SEK6",
-    "VISTA", "JAKEL", "D", "KLANG", "KLRAZAK",
+    "VISTA", "JAKEL", "D", "KLANG", "SBESI",
 )
 
 _RECEIPTS_TABLE = "receipts"

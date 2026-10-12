@@ -135,6 +135,7 @@ import overbuy_check
 import overbuy_watch
 import supervisor
 import order_generator
+import pos_arrival_alert
 import order_proposal
 import po_mismatch
 import order_sanity
@@ -9484,6 +9485,32 @@ async def _ingest_then_compare(app, compare_coro) -> None:
     await compare_coro(app)
 
 
+_pos_alert_client: Client | None = None
+
+
+async def post_pos_arrival_alert(application: Application) -> None:
+    """09:02 MYT, owner only: "POS belum terima: [outlet] [date]" for every
+    active outlet whose usual D-/S-files for yesterday have not arrived, and
+    (on the 3rd) whose monthly report for last month has not arrived. Runs
+    just after the 09:00 comparison, which ingests the inbox first."""
+    global _pos_alert_client
+    try:
+        if _pos_alert_client is None:
+            _pos_alert_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        lines = await asyncio.to_thread(
+            pos_arrival_alert.build_alert, _pos_alert_client, datetime.now(MALAYSIA_TZ))
+    except Exception:
+        logger.exception("POS arrival check failed")
+        return
+    if not lines:
+        logger.info("POS arrival check: all files in")
+        return
+    try:
+        await application.bot.send_message(chat_id=ALERT_CHAT_ID, text="\n".join(lines))
+    except Exception:
+        logger.exception("Failed to send POS arrival alert to ALERT_CHAT_ID")
+
+
 async def post_kitchen_comparison_0900(app) -> None:
     await _ingest_then_compare(app, kitchen_usage.post_comparison_digests)
 
@@ -9952,6 +9979,16 @@ async def run_bot() -> None:
         minute=0,
         args=[app],
         id="kitchen_comparison",
+        replace_existing=True,
+    )
+    # Owner-only missing-POS alert, just after the 09:00 pass has ingested.
+    scheduler.add_job(
+        post_pos_arrival_alert,
+        trigger="cron",
+        hour=9,
+        minute=2,
+        args=[app],
+        id="pos_arrival_alert",
         replace_existing=True,
     )
     scheduler.add_job(

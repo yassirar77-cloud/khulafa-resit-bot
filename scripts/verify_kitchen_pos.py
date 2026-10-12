@@ -40,7 +40,7 @@ DEFAULT_OUTLET = "KLANG"
 DEFAULT_DATES = ["2026-06-23", "2026-06-24"]
 
 ALL_KITCHEN_OUTLETS = ("BISTRO7", "SEK20", "SEK14", "SEK15", "SEK6",
-                       "VISTA", "JAKEL", "D", "KLANG", "KLRAZAK")
+                       "VISTA", "JAKEL", "D", "KLANG", "SBESI")
 
 # Style/phrase markers that make an ayam dish a TRACKED item (used only to flag
 # "plain" briyani/nasi ayam that carry none of them — an owner decision).

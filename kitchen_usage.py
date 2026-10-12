@@ -344,7 +344,7 @@ def parse_bulk_entry(text, outlet_code) -> dict:
 # read 0 for every outlet. Stripping the S-/D- prefix and resolving the rest to
 # its canonical outlet name lands both sides on one join key (all 10 outlets,
 # including the two whose names differ: kitchen "D" <-> POS "D-DAMANSARA" both
-# -> "D.U", kitchen "KLRAZAK" <-> POS "D-RAZAK" both -> "K.L Razak").
+# -> "D.U"; kitchen "SBESI" <-> POS "D-SBESI").
 _OUTLET_CODE_PREFIX_RE = re.compile(r"^[sd]-", re.IGNORECASE)
 
 
@@ -379,9 +379,8 @@ def outlet_join_keys(code) -> set:
     Two bridges are included, so the join survives even if one side fails:
       * the **bare prefix-stripped UPPER code** — kitchen ``KLANG`` and POS
         ``D-KLANG`` / ``S-KLANG`` all yield ``"KLANG"``;
-      * the **canonical outlet name** — needed for the two outlets whose
-        kitchen/POS codes differ (kitchen ``D`` ↔ POS ``D-DAMANSARA`` → ``D.U``;
-        kitchen ``KLRAZAK`` ↔ POS ``D-RAZAK`` → ``K.L Razak``).
+      * the **canonical outlet name** — needed for the outlet whose
+        kitchen/POS codes differ (kitchen ``D`` ↔ POS ``D-DAMANSARA`` → ``D.U``).
     Two outlets match iff their key sets intersect. Returns an empty set for
     empty / non-string input."""
     if not isinstance(code, str):
@@ -527,6 +526,10 @@ AYAM_NOODLE_SUBSTRINGS = (
 AYAM_EXCLUDE_SUBSTRINGS = AYAM_NOODLE_SUBSTRINGS
 
 
+# Space-insensitive, so "Nasi Putih (Kari)" and "Nasi Putih ( Kari )" both hit.
+_GRAVY_KEYS = frozenset(n.replace(" ", "") for n in cfg.GRAVY_ONLY_NAMES)
+
+
 def _pos_dish_excluded(name: str, category, base: str) -> bool:
     """True when a POS dish must not count toward ANY kitchen item.
 
@@ -536,7 +539,7 @@ def _pos_dish_excluded(name: str, category, base: str) -> bool:
         return True
     if _POS_STAFF_SUBSTR in name:
         return True
-    if name in cfg.GRAVY_ONLY_NAMES:
+    if name.replace(" ", "") in _GRAVY_KEYS:
         return True
     if base == "ayam" and any(s in name for s in AYAM_EXCLUDE_SUBSTRINGS):
         return True

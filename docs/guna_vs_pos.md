@@ -43,7 +43,7 @@ Names are normalised first (`pos_names.py`: case, `_`/`+`, spaces, typos such as
 * **Ikan Goreng** — "ikan goreng". **Ikan Kari** — ikan + kari/curry, or plain Nasi Ikan / Nasi Putih Ikan / Nasi Separuh Ikan.
 * **Kambing / Daging** — every dish with the word, POS portions × 180 g / 60 g. Not counted: Susu Kambing, Kambing Perut / Purut Kambing (tripe). Lamb Shank / Lamb Chop are separate (not counted).
 * **Telur Ikan** — keyed in **pcs**; every "telur ikan" POS item counts as 1 pc whatever the size.
-* Excluded everywhere: THAI FOOD category, staff meals, curry-gravy-only items (`GRAVY_ONLY_NAMES`: "Kari Ayam/Kambing"); for ayam also isi-ayam noodle/rice dishes.
+* Excluded everywhere: THAI FOOD category, staff meals, curry-gravy-only items (`GRAVY_ONLY_NAMES`: Kari Bungkus, Kua Kari, Nasi Putih (Kari), and SEK-15 "Kari Ayam/Kambing" — RM2.59, under the RM4 meat threshold); for ayam also isi-ayam noodle/rice dishes.
 * A button the kitchen had no row for that day shows "➖ … tiada rekod dapur" with the POS count; Telur Ikan rows keyed before the switch (kg) show "rekod lama dalam kg".
 
 Full 30-day audit: `docs/audits/pos_item_names_30d.md` (`scripts/audit_pos_item_names.py`).

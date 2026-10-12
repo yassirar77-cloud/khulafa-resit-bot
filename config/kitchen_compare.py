@@ -39,11 +39,14 @@ KG_PORTION_GRAMS: dict[str, float] = {
 # "Nasi Telur Ikan") counts as 1 pc — owner decision, Oct 2026.
 
 # POS items that are curry GRAVY only (no meat) and must count toward no
-# button. Normalised names (pos_names.normalize_pos_name). Owner rule: a
-# "Kari Ayam/Kambing" item counts only if it includes meat — pending the
-# owner's confirmation the one below is gravy, so it is excluded.
+# button. Normalised names (pos_names.normalize_pos_name). Owner rule (Oct
+# 2026): a "Kari Ayam/Kambing" item counts toward Ayam Kari/Rendang only when
+# its POS price is RM4 or more (i.e. it includes meat); under RM4 it is gravy.
 GRAVY_ONLY_NAMES: frozenset = frozenset({
-    "kari ayam/kambing",   # SEK15 — gravy (to confirm)
+    "kari bungkus",
+    "kua kari",              # KLANG
+    "nasi putih ( kari )",   # SBESI, SEK6
+    "kari ayam/kambing",     # SEK15 — avg RM2.59 (Aug–Oct 2026) < RM4 -> gravy
 })
 
 # --- POS name normalisation ---------------------------------------------------

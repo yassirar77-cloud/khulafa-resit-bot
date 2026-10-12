@@ -924,7 +924,7 @@ def log_row(slot, outlet_code, chat_id, cashier, language, facts, result, mode) 
 def data_codes(registry_code: str) -> list[str]:
     """Codes the data tables use for an outlet registered under
     ``registry_code`` (order drafts say "D" for DAMANSARA, the kitchen log
-    "KLRAZAK" for SBESI)."""
+    "KLRAZAK" for SBESI before Oct 2026)."""
     import manager_registration
     code = str(registry_code or "").upper()
     return [code] + [a for a, t in manager_registration.CODE_ALIASES.items() if t == code]
