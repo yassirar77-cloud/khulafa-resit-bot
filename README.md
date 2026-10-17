@@ -73,6 +73,7 @@ message, at WARNING), `empty_text`, `low_confidence` (with the score),
 | `0057_nudge_off.sql` | `outlet_nudge_off` |
 | `0058_outside_purchases.sql` | `approved_suppliers`, `allowed_outside_items`, `cashier_roster`, `outside_purchases`, view `cashier_strikes` (RLS on) |
 | `0059_pinpoint_v2.sql` | `outside_purchases.mode / notified_at / source`, `outlet_known_merchants` (seeded), `overbuy_flags`, `holiday_calendar` (seeded) — RLS on |
+| `0071_receipt_fingerprints.sql` | `receipt_fingerprints` (photo hash, content key, cross-chat match) — RLS on |
 
 ## Outside purchases + cashier strikes ("Pinpoint Target")
 
@@ -252,8 +253,90 @@ psql "$SUPABASE_DB_URL" -f migrations/0058_outside_purchases.sql
 psql "$SUPABASE_DB_URL" -f migrations/0059_pinpoint_v2.sql
 ```
 
+## Intelligence layer: fingerprints, supplier scorecard, cash forecast
+
+Three management features built only from data the bot already holds — no new
+OCR call, no AI wording, nothing to an outlet group except one re-send line.
+
+The scorecard and the forecast group OCR spellings of one supplier
+("AYAM BERLIAN SDN BHD", "AYAM BERLIAN SDN. BHD.", "AYAM BERLIAN SON BHD")
+under the `merchant_canonical` display name through the same alias tiers the
+bot uses (`merchant_groups.py`); a spelling that matches nothing stays itself.
+
+### Receipt fingerprints — one bill can only be claimed once
+
+`receipt_fingerprint.py`, `migrations/0071_receipt_fingerprints.sql`. Every
+saved receipt photo gets a 64-bit difference hash (dHash, Pillow only, taken
+from the original bytes before the OCR resize) plus a content key: merchant,
+receipt date, total and the invoice / DO number read from the OCR text. Each
+upload is compared with the last `FINGERPRINT_LOOKBACK_DAYS` (45):
+
+| Match | How | Who hears |
+| --- | --- | --- |
+| `same_photo` | Hamming distance <= `FINGERPRINT_MAX_DISTANCE` (6) — the same picture again, survives Telegram's recompression | another chat: director alert; same chat: one line under the photo ("Resit ini sudah direkod (#id)"), no money |
+| `same_invoice` | different picture, same merchant and invoice / DO number (both bills must carry one) | director alert |
+| `same_bill` | different picture, no invoice number to compare, same merchant + date + the same total to the cent, total >= `FINGERPRINT_MIN_TOTAL` (RM100) | recorded as "possible" for `/resit_sama` only — **not alerted**: on Sept–Oct 2026 data every such pair was two real bills (one supplier's standard order to two outlets on one day, consecutive invoice numbers; pest control at RM150 for two shops) |
+
+Content matches only run across chats; inside one chat two different bills
+from one merchant on one day are already covered by the "same shop 2 kali"
+audit question. The director alert names both receipt ids, outlets, dates and
+totals; the match is kept on the row (`matched_receipt_id`, `match_kind`,
+`match_outlet`) for `/resit_sama [days]`. Runs for every receipt type after the
+save; any failure is logged and the upload continues. `FINGERPRINT_ENABLED=false`
+turns it off.
+
+### Supplier scorecard (Monday 09:15, `/supplier_score`)
+
+`supplier_scorecard.py`. Every supplier with >= 4 supplier-purchase bills in
+the window (default 30 days) gets 0–100 and a grade (A >= 85, B >= 70,
+C >= 55, else D) from `item_prices` and `receipts`:
+
+| Dimension | Points | From |
+| --- | --- | --- |
+| Price stability | 40 | robust spread (1.4826 x MAD / median) of each item's unit price, weighted by lines; 0 points at ±25% |
+| Price direction | 15 | median change of item prices, second half of the window vs the first; 0 points at +10% |
+| Order accuracy | 25 | share of bills with a `po_mismatch`; 0 points at 30% |
+| Bill legibility | 20 | share of bills the verifier scored >= 80 |
+
+A dimension without data is **not scored**: it shows "Insufficient data" and
+the score is points earned over points available in the dimensions that have
+data. Order accuracy counts only when the order-vs-bill check (`po_mismatch`)
+recorded anything in the window — it writes only for a bill that differs, so an
+empty window means the check was not running, not that every bill was perfect
+(as of Oct 2026 it has never written a row, so every board says so). Each
+card also lists total purchases and bill count (actual, recorded), the biggest
+price movers, unusual price lines (more than double or less than half the
+item's median, with the receipt id), and potential duplicate invoices (two bills
+with the same date and total to the cent, plus cross-outlet fingerprint
+matches) — potential only, the photos decide.
+
+Each line carries the one concern that explains the grade (the dimension
+that lost the largest share of its points). Without affecting the score the
+card also flags a cross-outlet gap (one outlet's median >= 15% above
+another's for the same item at this supplier), the biggest movers, and
+delivery regularity (last seen vs the usual gap; "not seen lately" when
+overdue). `/supplier_score [days]` ranks everyone; `/supplier_score <name>
+[days]` shows one card. Management only (RM figures).
+
+### Cash-out forecast (Sunday 20:00, `/cash_forecast`)
+
+`cash_forecast.py`. From the last 90 days of supplier bills, every
+(outlet, supplier) pair with >= 3 bill days gets a rhythm — fixed weekdays
+when <= 2 weekdays cover >= 70% of the bill days (Jakel Mon/Thu), otherwise
+the median gap between bill days (daily roti steps by 1) — and a typical
+bill (totals of one day summed first, then the median; the 25th–75th
+percentiles give the range). Both are projected over the next 7 days per
+outlet. The message leads with the ACTUAL line (recorded bills, last 7 days,
+with the bill-day count) and labels every projection FORECAST with its
+history basis; estimates are never presented as bills. Then the heaviest
+forecast day and an "expected but no bill recorded yet" list: suppliers silent for >= 1.5x their usual gap
+(a stopped delivery or a bill never sent in). Undated bills count on their
+upload day. `/cash_forecast [outlet] [days]`. Management only.
+
 ## Director commands added
 
 `/closed <OUTLET> [YYYY-MM-DD] [reason]`, `/nudge_off <OUTLET> today` (no nudges for the rest of the day, outlet not closed), `/voice_stats` (voice notes this week per outlet: transcribed vs bounced, with reasons), `/staff_digest_now`, `/issues`,
 `/resolve <id>`, `/order <OUTLET>`, `/phrasing_now`. Existing: `/lang`,
 `/draft`, `/staff_preview`, `/staff_samples`.
+Intelligence (management only): `/supplier_score [name] [days]`,
+`/cash_forecast [outlet] [days]`, `/resit_sama [days]`.
