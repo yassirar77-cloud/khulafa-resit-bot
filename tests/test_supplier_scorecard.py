@@ -38,7 +38,10 @@ class Scoring(unittest.TestCase):
         self.assertTrue(card["scored"])
         self.assertEqual(card["grade"], "A")
         self.assertEqual(card["score"], 100.0)
-        self.assertEqual(card["concern"], "steady prices, bills match the orders")
+        self.assertEqual(card["concern"], "steady prices, bills read cleanly")
+        # No order-vs-bill check in the window: accuracy is not counted, not perfect.
+        self.assertIn("accuracy", card["missing"])
+        self.assertNotIn("accuracy", card["points"])
         self.assertEqual(card["spend"], 2000.0)
 
     def test_swinging_prices_lose_stability_points(self):
@@ -68,9 +71,11 @@ class Scoring(unittest.TestCase):
         self.assertEqual(card["points"]["accuracy"], 0.0)
         self.assertEqual(card["points"]["legibility"], 0.0)
         self.assertEqual(card["grade"], "D")
-        # No priced items: stability/direction fall back to a neutral 75%.
-        self.assertEqual(card["points"]["stability"], 30.0)
-        self.assertEqual(card["points"]["direction"], 11.2)
+        self.assertEqual(card["score"], 0.0)
+        # No priced items: stability and direction are "Insufficient data", not
+        # a neutral fallback; only accuracy (data present) and legibility count.
+        self.assertEqual(card["missing"], ["stability", "direction"])
+        self.assertEqual(set(card["points"]), {"accuracy", "legibility"})
 
     def test_too_few_bills_not_scored_and_listed_last(self):
         receipts = _receipts("BIG", 6) + _receipts("NEWBIE", 2)
@@ -118,6 +123,52 @@ class Scoring(unittest.TestCase):
 
     def test_grades(self):
         self.assertEqual([sc.grade(x) for x in (100, 85, 84.9, 70, 55, 54)], ["A", "A", "B", "B", "C", "D"])
+        self.assertEqual(sc.grade(None), "—")
+
+    def test_score_is_points_over_available_points(self):
+        # Only legibility has data: 60% clean -> 12/20 -> 60/100, not 12/100.
+        receipts = _receipts("X", 5, confidence=95)
+        receipts[0]["confidence"] = receipts[1]["confidence"] = 50
+        card = sc.score_all(receipts, [], today=TODAY, days=DAYS)[0]
+        self.assertEqual(card["points"], {"legibility": 12.0})
+        self.assertEqual(card["score"], 60.0)
+        self.assertEqual(card["missing"], ["stability", "direction", "accuracy"])
+
+    def test_board_says_when_order_accuracy_has_no_data(self):
+        cards = sc.score_all(_receipts("BESTARI FARM", 6), [], today=TODAY, days=DAYS)
+        text = sc.format_board(cards, DAYS)
+        self.assertIn("Order accuracy: Insufficient data — no order-vs-bill check recorded in this window", text)
+        self.assertFalse(sc.mismatch_data_present(_receipts("BESTARI FARM", 6)))
+        self.assertTrue(sc.mismatch_data_present(_receipts("X", 2, mismatch_every=1)))
+
+    def test_potential_duplicates_same_date_and_total(self):
+        receipts = _receipts("JUTA RIA", 6)
+        receipts.append(dict(receipts[0], id=2000, outlet="Signature"))        # same date + total, other outlet
+        receipts.append(dict(receipts[1], id=2001, total=receipts[1]["total"] + 0.5))   # total differs: not a dup
+        card = sc.score_all(receipts, [], today=TODAY, days=DAYS)[0]
+        self.assertEqual(len(card["duplicates"]), 1)
+        self.assertEqual(card["duplicates"][0]["receipt_ids"], [1000, 2000])
+        self.assertTrue(card["duplicates"][0]["cross_outlet"])
+        self.assertEqual(card["concern"], "1 potential duplicate bill — check the photos")
+        text = sc.format_card(card, DAYS)
+        self.assertIn("Potential duplicate invoices (same date and total — check the photos):", text)
+        self.assertIn("• #1000, #2000 — 2026-10-14 RM200.00 (SEK20 / Signature)", text)
+
+    def test_fingerprint_matches_count_on_the_card(self):
+        fp = [{"merchant": "JUTA RIA", "receipt_id": 9, "matched_receipt_id": 1}]
+        card = sc.score_all(_receipts("JUTA RIA", 6), [], today=TODAY, days=DAYS, fingerprint_rows=fp)[0]
+        self.assertEqual(card["fingerprint_matches"], 1)
+        self.assertIn("1 photo / invoice-number match across outlets (/resit_sama)", sc.format_card(card, DAYS))
+
+    def test_unusual_price_lines(self):
+        receipts = _receipts("SAYUR", 6)
+        lines = _lines("SAYUR", "bawang", [4.0, 4.1, 4.0, 9.5, 4.0, 1.5])
+        card = sc.score_all(receipts, lines, today=TODAY, days=DAYS)[0]
+        self.assertEqual(card["outlier_count"], 2)
+        self.assertEqual({o["price"] for o in card["outliers"]}, {9.5, 1.5})
+        text = sc.format_card(card, DAYS)
+        self.assertIn("Unusual price lines (2):", text)
+        self.assertIn("• bawang: RM9.50 vs usual RM4.00 (#1003, SEK20, ", text)
 
 
 class Texts(unittest.TestCase):
@@ -130,7 +181,9 @@ class Texts(unittest.TestCase):
         self.assertIn("1. BESTARI FARM — A 100 (10 bills, RM2,000)", text)
         self.assertIn("2. FOOK LEONG — D", text)
         self.assertIn("Watch: FOOK LEONG", text)
-        self.assertIn("Too few bills to score (< 4): NEWBIE (2)", text)
+        self.assertIn("Too few bills to score (< 4): NEWBIE (2, RM400)", text)
+        # FOOK LEONG carries mismatch data, so accuracy IS scored on this board.
+        self.assertNotIn("Insufficient data", text)
 
     def test_empty_board(self):
         self.assertIn("No supplier bills", sc.format_board([], DAYS))
@@ -142,7 +195,8 @@ class Texts(unittest.TestCase):
         self.assertEqual(sc.pick(cards, "jakel"), [])
         text = sc.format_card(cards[0], DAYS)
         self.assertIn("BESTARI FARM — A 100/100 (last 30 days)", text)
-        self.assertIn("8 bills, RM1,600, outlets: SEK20", text)
+        self.assertIn("Total purchases RM1,600 over 8 bills (actual, recorded); outlets: SEK20", text)
+        self.assertIn("Order accuracy: Insufficient data (no order-vs-bill check recorded in this window) — not counted", text)
         self.assertIn("Price stability 40/40 (spread ±0%)", text)
         self.assertIn("Delivers about every 3 days; last seen 1 days ago", text)
 

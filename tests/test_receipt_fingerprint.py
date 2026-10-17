@@ -127,11 +127,15 @@ class Matching(unittest.TestCase):
         new = _fp(receipt_id=9, chat_id=-200, invoice_no="INV0002", dhash="ffffffffffffffff")
         self.assertEqual(rf.find_matches(new, [old], max_dist=6, min_content_total=100), [])
 
-    def test_same_bill_needs_date_total_and_min_total(self):
+    def test_same_bill_needs_exact_total_date_and_min_total_and_is_not_alerted(self):
         old = _fp(dhash="0000000000000000")
-        new = _fp(receipt_id=9, chat_id=-200, dhash="ffffffffffffffff", total=182.0)
-        self.assertEqual([m["kind"] for m in rf.find_matches(new, [old], max_dist=6, min_content_total=100)],
-                         ["same_bill"])
+        new = _fp(receipt_id=9, chat_id=-200, dhash="ffffffffffffffff", total=181.0)
+        matches = rf.find_matches(new, [old], max_dist=6, min_content_total=100)
+        self.assertEqual([m["kind"] for m in matches], ["same_bill"])
+        # Recorded as "possible" only: the director is not alerted, the group not told.
+        self.assertEqual(rf.split_matches(matches), ([], []))
+        # Real sibling deliveries differ by a few ringgit: 2% off is NOT the same bill.
+        self.assertEqual(rf.find_matches(dict(new, total=182.0), [old], max_dist=6, min_content_total=100), [])
         # Below the floor: a daily roti bill of RM45 at two outlets is normal.
         small_old, small_new = dict(old, total=45.0), dict(new, total=45.0)
         self.assertEqual(rf.find_matches(small_new, [small_old], max_dist=6, min_content_total=100), [])
@@ -211,6 +215,19 @@ class CheckAndRecord(unittest.TestCase):
         self.assertEqual(rows[1]["match_kind"], "same_invoice")
         self.assertEqual(rows[1]["match_outlet"], "SEK20")
         self.assertEqual(len(rf.fetch_matched(db, NOW.replace(day=1))), 1)
+
+    def test_same_bill_is_kept_on_the_row_but_not_alerted(self):
+        db = FakeSupabase()
+        rf.check_and_record(db, {"id": 1, "chat_id": -100, "outlet": "SEK20", "merchant": "JUTA RIA",
+                                 "receipt_date": "2026-09-30", "total": 1107.0}, {"raw_text": ""}, "00000000000000ff", now=NOW)
+        out = rf.check_and_record(db, {"id": 2, "chat_id": -200, "outlet": "Signature", "merchant": "JUTA RIA",
+                                       "receipt_date": "2026-09-30", "total": 1107.0}, {"raw_text": ""}, "ffffffffffff0000", now=NOW)
+        self.assertEqual(out["director"], [])
+        self.assertEqual(out["group"], [])
+        row = db.rows(rf.TABLE)[1]
+        self.assertEqual((row["matched_receipt_id"], row["match_kind"]), (1, "same_bill"))
+        self.assertIn("possible: same merchant, date and total, not alerted",
+                      rf.format_stats(rf.fetch_matched(db, NOW.replace(day=1)), 30))
 
     def test_receipt_without_id_is_not_saved(self):
         db = FakeSupabase()

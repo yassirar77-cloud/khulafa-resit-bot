@@ -275,7 +275,7 @@ upload is compared with the last `FINGERPRINT_LOOKBACK_DAYS` (45):
 | --- | --- | --- |
 | `same_photo` | Hamming distance <= `FINGERPRINT_MAX_DISTANCE` (6) — the same picture again, survives Telegram's recompression | another chat: director alert; same chat: one line under the photo ("Resit ini sudah direkod (#id)"), no money |
 | `same_invoice` | different picture, same merchant and invoice / DO number (both bills must carry one) | director alert |
-| `same_bill` | different picture, no invoice number to compare, same merchant + date + total within 2%, total >= `FINGERPRINT_MIN_TOTAL` (RM100, so a daily roti bill at two outlets never counts) | director alert, marked "check the two photos" |
+| `same_bill` | different picture, no invoice number to compare, same merchant + date + the same total to the cent, total >= `FINGERPRINT_MIN_TOTAL` (RM100) | recorded as "possible" for `/resit_sama` only — **not alerted**: on Sept–Oct 2026 data every such pair was two real bills (one supplier's standard order to two outlets on one day, consecutive invoice numbers; pest control at RM150 for two shops) |
 
 Content matches only run across chats; inside one chat two different bills
 from one merchant on one day are already covered by the "same shop 2 kali"
@@ -298,6 +298,18 @@ C >= 55, else D) from `item_prices` and `receipts`:
 | Order accuracy | 25 | share of bills with a `po_mismatch`; 0 points at 30% |
 | Bill legibility | 20 | share of bills the verifier scored >= 80 |
 
+A dimension without data is **not scored**: it shows "Insufficient data" and
+the score is points earned over points available in the dimensions that have
+data. Order accuracy counts only when the order-vs-bill check (`po_mismatch`)
+recorded anything in the window — it writes only for a bill that differs, so an
+empty window means the check was not running, not that every bill was perfect
+(as of Oct 2026 it has never written a row, so every board says so). Each
+card also lists total purchases and bill count (actual, recorded), the biggest
+price movers, unusual price lines (more than double or less than half the
+item's median, with the receipt id), and potential duplicate invoices (two bills
+with the same date and total to the cent, plus cross-outlet fingerprint
+matches) — potential only, the photos decide.
+
 Each line carries the one concern that explains the grade (the dimension
 that lost the largest share of its points). Without affecting the score the
 card also flags a cross-outlet gap (one outlet's median >= 15% above
@@ -314,8 +326,10 @@ when <= 2 weekdays cover >= 70% of the bill days (Jakel Mon/Thu), otherwise
 the median gap between bill days (daily roti steps by 1) — and a typical
 bill (totals of one day summed first, then the median; the 25th–75th
 percentiles give the range). Both are projected over the next 7 days per
-outlet, with the heaviest day, the last 7 days' actual spend next to it, and
-an "expected but not seen" list: suppliers silent for >= 1.5x their usual gap
+outlet. The message leads with the ACTUAL line (recorded bills, last 7 days,
+with the bill-day count) and labels every projection FORECAST with its
+history basis; estimates are never presented as bills. Then the heaviest
+forecast day and an "expected but no bill recorded yet" list: suppliers silent for >= 1.5x their usual gap
 (a stopped delivery or a bill never sent in). Undated bills count on their
 upload day. `/cash_forecast [outlet] [days]`. Management only.
 

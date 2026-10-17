@@ -12,18 +12,21 @@ and three kinds of match come out:
 * ``same_invoice`` — a different picture of a bill with the same merchant and
   the same invoice / DO number (both bills must carry one).
 * ``same_bill``    — a different picture, no invoice number to compare, but the
-  same merchant + receipt date + a total within ``TOTAL_TOLERANCE``. Only
-  counted at or above ``FINGERPRINT_MIN_TOTAL``, because a standing daily
-  order (roti, gas) legitimately produces identical small bills at two
-  outlets on the same day.
+  same merchant + receipt date + the same total to the cent, at or above
+  ``FINGERPRINT_MIN_TOTAL``. Recorded for ``/resit_sama`` as "possible" but
+  NOT alerted: on the production data (Sept–Oct 2026) every such pair was
+  two real bills — a supplier delivering the same standard order to two
+  outlets on one day (consecutive invoice numbers), pest control at RM150
+  for two shops — so an alert would be noise.
 
-What matters is a match in ANOTHER chat (another outlet): one supplier bill
-submitted at two outlets is either a mix-up or a double claim, and the
-director gets both receipt ids with the outlets, dates and totals. A match in
-the SAME chat is a re-send: one short line under the photo (no money) and
-nothing else — two genuinely different bills from one merchant on one day are
-already covered by the "same shop 2 kali" audit question. The content checks
-never run within one chat; only the picture check does.
+What matters is a ``same_photo`` or ``same_invoice`` match in ANOTHER chat
+(another outlet): one supplier bill submitted at two outlets is either a
+mix-up or a double claim, and the director gets both receipt ids with the
+outlets, dates and totals. A ``same_photo`` match in the SAME chat is a
+re-send: one short line under the photo (no money) and nothing else — two
+genuinely different bills from one merchant on one day are already covered by
+the "same shop 2 kali" audit question. The content checks never run within
+one chat; only the picture check does.
 
 Pure helpers take plain dicts so they are testable without a database; the
 ``receipt_fingerprints`` table is ``migrations/0071_receipt_fingerprints.sql``.
@@ -40,7 +43,8 @@ logger = logging.getLogger(__name__)
 
 TABLE = "receipt_fingerprints"
 HASH_SIZE = 8                       # 8x8 = 64 bits
-TOTAL_TOLERANCE = 0.02              # same_bill: totals within 2%
+TOTAL_TOLERANCE = 0.0               # same_bill: totals equal to the cent (2% matched real sibling deliveries)
+ALERT_KINDS = ("same_photo", "same_invoice")   # kinds the director is told about
 
 
 def enabled() -> bool:
@@ -154,6 +158,8 @@ def totals_match(a, b, tolerance: float = TOTAL_TOLERANCE) -> bool:
     x, y = _total(a), _total(b)
     if x is None or y is None:
         return False
+    if tolerance <= 0:
+        return abs(x - y) < 0.005
     return abs(x - y) / max(x, y) <= tolerance
 
 
@@ -243,9 +249,10 @@ def find_matches(new: dict, candidates, *, max_dist: int | None = None,
 
 
 def split_matches(matches) -> tuple[list[dict], list[dict]]:
-    """``(for_director, for_group)``: cross-chat matches go to the director;
-    a same-chat re-send of the same picture gets one line in the group."""
-    director = [m for m in matches if m["cross_chat"]]
+    """``(for_director, for_group)``: cross-chat same_photo / same_invoice
+    matches go to the director; a same-chat re-send of the same picture gets
+    one line in the group. ``same_bill`` is only recorded (see module doc)."""
+    director = [m for m in matches if m["cross_chat"] and m["kind"] in ALERT_KINDS]
     group = [m for m in matches if not m["cross_chat"] and m["kind"] == "same_photo"]
     return director, group
 
@@ -255,7 +262,7 @@ def split_matches(matches) -> tuple[list[dict], list[dict]]:
 _KIND_LABEL = {
     "same_photo": "same photo",
     "same_invoice": "same invoice number",
-    "same_bill": "same merchant, date and total",
+    "same_bill": "possible: same merchant, date and total, not alerted",
 }
 
 
@@ -331,11 +338,13 @@ def check_and_record(client, stored: dict, parsed: dict | None, image_hash,
     candidates = recent(client, moment - timedelta(days=lookback_days()))
     matches = find_matches(row, candidates)
     director, group = split_matches(matches)
-    if director:
-        # The cross-chat match is kept on the row so /resit_sama can list it.
-        row["matched_receipt_id"] = director[0]["receipt_id"]
-        row["match_kind"] = director[0]["kind"]
-        row["match_outlet"] = director[0].get("outlet")
+    cross = [m for m in matches if m["cross_chat"]]
+    if cross:
+        # Every cross-chat match (alerted or "possible") is kept on the row so
+        # /resit_sama can list it; the alerted kinds sort first.
+        row["matched_receipt_id"] = cross[0]["receipt_id"]
+        row["match_kind"] = cross[0]["kind"]
+        row["match_outlet"] = cross[0].get("outlet")
     record(client, row)
     return {"row": row, "director": director, "group": group}
 

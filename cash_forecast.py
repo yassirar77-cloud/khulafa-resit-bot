@@ -156,8 +156,13 @@ def forecast(rows, *, today: date, horizon: int = HORIZON_DAYS, names: dict | No
     by_day: dict[date, float] = defaultdict(float)
     recent_from = today - timedelta(days=horizon - 1)
     recent_actual = 0.0
+    recent_bill_days = 0
+    history_days = 0
     for (outlet, merchant), totals in per_pair.items():
-        recent_actual += sum(v for d, v in totals.items() if recent_from <= d <= today)
+        recent = [v for d, v in totals.items() if recent_from <= d <= today]
+        recent_actual += sum(recent)
+        recent_bill_days += len(recent)
+        history_days += len(totals)
         days = sorted(totals)
         if len(days) < MIN_BILL_DAYS:
             continue
@@ -197,6 +202,9 @@ def forecast(rows, *, today: date, horizon: int = HORIZON_DAYS, names: dict | No
         "high": sum(o["high"] for o in by_outlet.values()),
         "overdue": overdue,
         "recent_actual": recent_actual,
+        "recent_bill_days": recent_bill_days,
+        "history_bill_days": history_days,
+        "suppliers_projected": len(lines),
     }
 
 
@@ -219,23 +227,25 @@ def format_summary(fc: dict, *, top: int = 3) -> str:
     start, end = fc["today"] + timedelta(days=1), fc["today"] + timedelta(days=h)
     if not fc["lines"] and not fc["overdue"]:
         return f"Cash forecast: not enough bill history to project the next {h} days."
-    head = (f"Cash-out forecast {start.strftime('%-d %b')}–{end.strftime('%-d %b')}: "
-            f"{_rm(fc['total'])} (range {_rm(fc['low'])}–{_rm(fc['high'])}); "
-            f"last {h} days actual {_rm(fc['recent_actual'])}")
-    lines = [head]
+    lines = [f"ACTUAL — recorded supplier bills, last {h} days to {fc['today'].strftime('%-d %b')}: "
+             f"{_rm(fc['recent_actual'])} ({fc['recent_bill_days']} bill days)",
+             f"FORECAST — {start.strftime('%-d %b')}–{end.strftime('%-d %b')}, projected from each supplier's "
+             f"bill rhythm over the last {LOOKBACK_DAYS} days ({fc['suppliers_projected']} outlet-supplier pairs): "
+             f"{_rm(fc['total'])} (likely range {_rm(fc['low'])}–{_rm(fc['high'])})"]
     for outlet, o in sorted(fc["by_outlet"].items(), key=lambda kv: -kv[1]["total"]):
         parts = [f"{ln['merchant']} {_rm(ln['expected'])} ({_when(ln)})" for ln in o["lines"][:top]]
         more = len(o["lines"]) - top
         if more > 0:
             parts.append(f"+{more} more")
-        lines.append(f"• {outlet}: {_rm(o['total'])} — " + "; ".join(parts))
+        lines.append(f"• {outlet}: {_rm(o['total'])} forecast — " + "; ".join(parts))
     if fc["by_day"]:
         peak_day, peak = max(fc["by_day"].items(), key=lambda kv: kv[1])
-        lines.append(f"Heaviest day: {peak_day.strftime('%a %-d %b')} ≈ {_rm(peak)}")
+        lines.append(f"Heaviest forecast day: {peak_day.strftime('%a %-d %b')} ≈ {_rm(peak)}")
     if fc["overdue"]:
-        lines.append("Expected but not seen: " + "; ".join(
+        lines.append("Expected but no bill recorded yet: " + "; ".join(
             f"{x['merchant']} @ {x['outlet']} ({x['since_last']}d, usually every {x['median_gap']:g}, ~{_rm(x['typical'])})"
             for x in fc["overdue"][:6]))
+    lines.append("Forecast figures are estimates, not bills. Suppliers without 3 bill days are not projected.")
     return "\n".join(lines)
 
 
@@ -245,13 +255,15 @@ def format_outlet(fc: dict, outlet: str) -> str:
     h = fc["horizon"]
     if not o:
         return f"{key}: not enough bill history to project the next {h} days."
-    lines = [f"{key} — expected cash out next {h} days: {_rm(o['total'])} (range {_rm(o['low'])}–{_rm(o['high'])})"]
+    lines = [f"{key} — FORECAST cash out next {h} days: {_rm(o['total'])} "
+             f"(likely range {_rm(o['low'])}–{_rm(o['high'])}); estimates from past bills, not invoices"]
     for ln in o["lines"]:
         days = ", ".join(d.strftime("%a %-d") for d in ln["days"])
-        lines.append(f"• {ln['merchant']}: {_rm(ln['expected'])} — {len(ln['days'])}× ~{_rm(ln['typical'])} ({days})")
+        lines.append(f"• {ln['merchant']}: {_rm(ln['expected'])} — {len(ln['days'])}× ~{_rm(ln['typical'])} "
+                     f"typical bill ({days})")
     od = [x for x in fc["overdue"] if x["outlet"] == key]
     if od:
-        lines.append("Expected but not seen: " + "; ".join(
+        lines.append("Expected but no bill recorded yet: " + "; ".join(
             f"{x['merchant']} ({x['since_last']}d, usually every {x['median_gap']:g})" for x in od))
     return "\n".join(lines)
 

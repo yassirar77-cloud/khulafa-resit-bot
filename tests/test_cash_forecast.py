@@ -111,7 +111,7 @@ class Forecast(unittest.TestCase):
         fc = cf.forecast(rows, today=TODAY, horizon=7)
         self.assertEqual(fc["overdue"][0]["merchant"], "FOOK LEONG")
         self.assertEqual(fc["overdue"][0]["since_last"], 9)
-        self.assertIn("Expected but not seen: FOOK LEONG @ SEK-20 (9d, usually every 3, ~RM500)",
+        self.assertIn("Expected but no bill recorded yet: FOOK LEONG @ SEK-20 (9d, usually every 3, ~RM500)",
                       cf.format_summary(fc))
 
 
@@ -120,18 +120,22 @@ class Texts(unittest.TestCase):
         rows = _every("ROTI CANAI SDN BHD", 1, 14, 45) + _every("BESTARI FARM", 3, 8, 600)
         rows += _every("JAKEL", 3, 8, 300, outlet="Klang")
         text = cf.format_summary(cf.forecast(rows, today=TODAY, horizon=7))
-        self.assertIn("Cash-out forecast 16 Oct–22 Oct: RM2,115", text)
-        self.assertIn("last 7 days actual", text)
-        self.assertIn("• SEK-20: RM1,515 — BESTARI FARM RM1,200 (17 Oct, 20 Oct); ROTI CANAI SDN BHD RM315 (daily)", text)
-        self.assertIn("• Klang B.Emas: RM600 — JAKEL RM600 (17 Oct, 20 Oct)", text)
-        self.assertIn("Heaviest day:", text)
+        self.assertIn("ACTUAL — recorded supplier bills, last 7 days to 15 Oct: RM2,070 (10 bill days)", text)
+        self.assertIn("FORECAST — 16 Oct–22 Oct, projected from each supplier's bill rhythm over the last 90 days "
+                      "(3 outlet-supplier pairs): RM2,115 (likely range RM2,115–RM2,115)", text)
+        self.assertIn("• SEK-20: RM1,515 forecast — BESTARI FARM RM1,200 (17 Oct, 20 Oct); ROTI CANAI SDN BHD RM315 (daily)", text)
+        self.assertIn("• Klang B.Emas: RM600 forecast — JAKEL RM600 (17 Oct, 20 Oct)", text)
+        self.assertIn("Heaviest forecast day:", text)
+        self.assertIn("Forecast figures are estimates, not bills.", text)
+        # The ACTUAL line comes before any forecast line.
+        self.assertLess(text.index("ACTUAL"), text.index("FORECAST"))
 
     def test_outlet_text_and_empty(self):
         rows = _every("BESTARI FARM", 3, 8, 600)
         fc = cf.forecast(rows, today=TODAY, horizon=7)
         text = cf.format_outlet(fc, "sek20")
-        self.assertIn("SEK-20 — expected cash out next 7 days: RM1,200 (range RM1,200–RM1,200)", text)
-        self.assertIn("• BESTARI FARM: RM1,200 — 2× ~RM600 (Sat 17, Tue 20)", text)
+        self.assertIn("SEK-20 — FORECAST cash out next 7 days: RM1,200 (likely range RM1,200–RM1,200); estimates from past bills, not invoices", text)
+        self.assertIn("• BESTARI FARM: RM1,200 — 2× ~RM600 typical bill (Sat 17, Tue 20)", text)
         self.assertIn("not enough bill history", cf.format_outlet(fc, "Klang"))
         self.assertIn("not enough bill history", cf.format_summary(cf.forecast([], today=TODAY)))
 
