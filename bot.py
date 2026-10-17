@@ -136,6 +136,9 @@ import overbuy_watch
 import supervisor
 import order_generator
 import pos_arrival_alert
+import receipt_fingerprint
+import supplier_scorecard
+import cash_forecast
 import order_proposal
 import po_mismatch
 import order_sanity
@@ -1789,6 +1792,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # release them unconditionally even if get_file/download raises.
     image_bytes = None
     image_upload_task = None
+    photo_hash = None
     # _ocr_semaphore is also the burst queue: its waiters are served in
     # arrival order, OCR_MAX_CONCURRENCY at a time.
     await _ocr_semaphore.acquire()
@@ -1812,6 +1816,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     what="resend request")
             return
         _photo_requeues.pop(photo_key, None)
+
+        # Receipt fingerprint (receipt_fingerprint): a 64-bit picture hash of
+        # the ORIGINAL bytes, taken before the resize so a re-sent photo
+        # matches whatever size Telegram served. Pillow only, never raises.
+        if receipt_fingerprint.enabled():
+            photo_hash = await asyncio.to_thread(receipt_fingerprint.dhash, image_bytes)
 
         # Persist the image for every receipt (re-OCR / model comparison /
         # debug). Kick off a best-effort Cloudinary archive of the ORIGINAL
@@ -1984,6 +1994,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # aggregation, spike detection, anomaly detection, and audit checks.
     receipt_id = stored.get("id")
     receipt_type = classification.receipt_type
+
+    # Receipt fingerprint: has this exact picture, invoice number or bill been
+    # saved before? Another chat = the same bill at two outlets (director
+    # alert); the same chat = a re-send (one line under the photo). Every
+    # receipt type: a double claim is a double claim whatever the bill is for.
+    await fingerprint_on_upload(context, stored, parsed, message, photo_hash)
 
     # Pinpoint Target: a bill from a shop that is neither an approved supplier
     # nor known for this outlet is an outside purchase — pinpoint the cashier,
@@ -2324,6 +2340,34 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 # === Pinpoint Target: outside purchases + cashier strikes (outside_purchase) ===
+
+async def fingerprint_on_upload(context, stored: dict, parsed: dict, message,
+                                photo_hash: str | None) -> None:
+    """Record the receipt's fingerprint (receipt_fingerprint) and act on the
+    matches: cross-chat ones go to the director with both receipt ids, a
+    same-chat re-send of the same picture gets one line under the photo.
+    Never breaks the pipeline — any failure is logged and the upload goes on."""
+    if not receipt_fingerprint.enabled():
+        return
+    try:
+        result = await asyncio.to_thread(
+            receipt_fingerprint.check_and_record, supabase, stored, parsed, photo_hash)
+    except Exception:
+        logger.exception("receipt fingerprint check failed for receipt %s", stored.get("id"))
+        return
+    if result["director"]:
+        text = receipt_fingerprint.format_director_alert(result["row"], result["director"])
+        logger.warning("receipt %s matches a bill in another chat: %s",
+                       stored.get("id"), [m["receipt_id"] for m in result["director"]])
+        try:
+            await context.bot.send_message(chat_id=ALERT_CHAT_ID, text=text)
+        except Exception:
+            logger.exception("Failed to send fingerprint alert to ALERT_CHAT_ID")
+    if result["group"]:
+        await telegram_io.best_effort(
+            lambda: message.reply_text(receipt_fingerprint.format_group_reply(result["group"][0])),
+            what="fingerprint re-send reply")
+
 
 _OUTSIDE_RECEIPT_TYPES = (ReceiptType.SUPPLIER_PURCHASE, ReceiptType.UNKNOWN)
 
@@ -2761,6 +2805,63 @@ async def buang_merchant_command(update: Update, context: ContextTypes.DEFAULT_T
         return
     await message.reply_text(f"✖ {row.get('canonical_merchant')} dibuang dari senarai dikenali "
                              f"{row.get('outlet')}. Bil dari kedai ini akan ditanda beli luar.")
+
+
+async def supplier_score_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: /supplier_score [days] — every supplier's grade for the window
+    (default 30 days); /supplier_score <name> [days] — one supplier's card."""
+    message = update.effective_message
+    if not message or not _outside_admin(update):
+        return
+    args = list(context.args or [])
+    days = 30
+    if args and args[-1].isdigit():
+        days = max(7, min(int(args.pop()), 365))
+    name = " ".join(args).strip()
+    cards = await asyncio.to_thread(supplier_scorecard.build, supabase, _my_today(), days)
+    if name:
+        hits = supplier_scorecard.pick(cards, name)
+        if not hits:
+            await message.reply_text(f"No supplier bills matching '{name}' in the last {days} days.")
+            return
+        text = "\n\n".join(supplier_scorecard.format_card(c, days) for c in hits[:3])
+    else:
+        text = supplier_scorecard.format_board(cards, days)
+    await _reply_chunked(message, text)
+
+
+async def cash_forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: /cash_forecast [outlet] [days] — expected supplier cash-out over
+    the next days (default 7), per outlet and supplier."""
+    message = update.effective_message
+    if not message or not _outside_admin(update):
+        return
+    args = list(context.args or [])
+    horizon = cash_forecast.HORIZON_DAYS
+    if args and args[-1].isdigit():
+        horizon = max(1, min(int(args.pop()), 30))
+    outlet = " ".join(args).strip() or None
+    if outlet and not outlet_resolver.canonical_outlet(outlet):
+        await message.reply_text(f"Outlet {outlet} tak dikenali. Contoh: /cash_forecast SEK20 7")
+        return
+    fc = await asyncio.to_thread(cash_forecast.build, supabase, _my_today(), horizon)
+    text = cash_forecast.format_outlet(fc, outlet) if outlet else cash_forecast.format_summary(fc)
+    await _reply_chunked(message, text)
+
+
+async def resit_sama_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: /resit_sama [days] — bills whose photo, invoice number or content
+    matched a bill in another outlet (default 30 days)."""
+    message = update.effective_message
+    if not message or not _outside_admin(update):
+        return
+    args = list(context.args or [])
+    days = 30
+    if args and args[0].isdigit():
+        days = max(1, min(int(args[0]), 365))
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    rows = await asyncio.to_thread(receipt_fingerprint.fetch_matched, supabase, since)
+    await _reply_chunked(message, receipt_fingerprint.format_stats(rows, days))
 
 
 def _outside_admin(update: Update) -> bool:
@@ -3206,7 +3307,16 @@ HELP_TEXT = (
     "/merchant_known <outlet> | all — shops known for an outlet (bills from unknown shops are pinned)\n"
     "/buang_merchant <outlet> <name> — remove a shop from the known list\n"
     "/pinpoint_shadow — what shadow mode WOULD have sent to cashiers today "
-    "(OUTSIDE_PURCHASE_MODE=shadow|live)"
+    "(OUTSIDE_PURCHASE_MODE=shadow|live)\n"
+    "\n"
+    "Intelligence (management only):\n"
+    "/supplier_score [days] — every supplier graded A–D on price stability, "
+    "price direction, order accuracy and bill legibility (default 30 days)\n"
+    "/supplier_score <name> [days] — one supplier's full card\n"
+    "/cash_forecast [outlet] [days] — expected supplier cash-out over the next "
+    "days, from each supplier's delivery rhythm (default 7)\n"
+    "/resit_sama [days] — bills whose photo, invoice number or content matched "
+    "a bill in another outlet"
 )
 
 
@@ -9511,6 +9621,38 @@ async def post_pos_arrival_alert(application: Application) -> None:
         logger.exception("Failed to send POS arrival alert to ALERT_CHAT_ID")
 
 
+async def post_supplier_scorecard(application: Application, *, notify_chat_id=None) -> None:
+    """Monday 09:15 MY, management only: every supplier's grade for the last
+    30 days (supplier_scorecard). Nothing goes to an outlet group."""
+    try:
+        cards = await asyncio.to_thread(supplier_scorecard.build, supabase, _my_today(), 30)
+        text = supplier_scorecard.format_board(cards, 30)
+    except Exception:
+        logger.exception("Supplier scorecard failed")
+        return
+    try:
+        for chunk in chunk_message(text):
+            await application.bot.send_message(chat_id=notify_chat_id or ALERT_CHAT_ID, text=chunk)
+    except Exception:
+        logger.exception("Failed to send supplier scorecard")
+
+
+async def post_cash_forecast(application: Application, *, notify_chat_id=None) -> None:
+    """Sunday 20:00 MY, management only: the coming week's expected supplier
+    cash-out per outlet (cash_forecast). Nothing goes to an outlet group."""
+    try:
+        fc = await asyncio.to_thread(cash_forecast.build, supabase, _my_today(), cash_forecast.HORIZON_DAYS)
+        text = cash_forecast.format_summary(fc)
+    except Exception:
+        logger.exception("Cash forecast failed")
+        return
+    try:
+        for chunk in chunk_message(text):
+            await application.bot.send_message(chat_id=notify_chat_id or ALERT_CHAT_ID, text=chunk)
+    except Exception:
+        logger.exception("Failed to send cash forecast")
+
+
 async def post_kitchen_comparison_0900(app) -> None:
     await _ingest_then_compare(app, kitchen_usage.post_comparison_digests)
 
@@ -9659,6 +9801,9 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("merchant_known", merchant_known_command))
     app.add_handler(CommandHandler("buang_merchant", buang_merchant_command))
     app.add_handler(CommandHandler("pinpoint_shadow", pinpoint_shadow_command))
+    app.add_handler(CommandHandler("supplier_score", supplier_score_command))
+    app.add_handler(CommandHandler("cash_forecast", cash_forecast_command))
+    app.add_handler(CommandHandler("resit_sama", resit_sama_command))
     app.add_handler(CallbackQueryHandler(handle_overbuy_reason,
                                          pattern=r"^ov:\d+:(stock|order|supplier|other)$"))
     app.add_handler(CallbackQueryHandler(handle_overbuy_decision, pattern=r"^ovm:\d+:(accept|reject)$"))
@@ -10128,6 +10273,29 @@ async def run_bot() -> None:
         minute=30,
         args=[app],
         id="staff_night_digest",
+        replace_existing=True,
+    )
+    # Intelligence, director chat only: Monday 09:15 supplier scorecard
+    # (supplier_scorecard), Sunday 20:00 cash-out forecast for the coming
+    # week (cash_forecast).
+    scheduler.add_job(
+        post_supplier_scorecard,
+        trigger="cron",
+        day_of_week="mon",
+        hour=9,
+        minute=15,
+        args=[app],
+        id="supplier_scorecard",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        post_cash_forecast,
+        trigger="cron",
+        day_of_week="sun",
+        hour=20,
+        minute=0,
+        args=[app],
+        id="cash_forecast_weekly",
         replace_existing=True,
     )
 
