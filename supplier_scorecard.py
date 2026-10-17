@@ -274,7 +274,9 @@ def score_supplier(merchant: str, receipts, lines, *, today: date, days: int,
     score = round(sum(points.values()) / available * 100.0, 1) if available else None
 
     outlets = sorted({str(r.get("outlet")).strip() for r in bills if r.get("outlet")})
-    dates = [d for d in (_day(r.get("receipt_date")) for r in bills) if d]
+    # A mis-OCR'd date in the future ("2028-10-06") must not make the supplier
+    # "last seen -720 days ago"; delivery rhythm uses dates up to today only.
+    dates = [d for d in (_day(r.get("receipt_date")) for r in bills) if d and d <= today]
     card = {
         "merchant": merchant,
         "bills": n,

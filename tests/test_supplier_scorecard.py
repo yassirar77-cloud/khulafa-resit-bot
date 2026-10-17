@@ -109,6 +109,14 @@ class Scoring(unittest.TestCase):
         self.assertEqual(card["delivery"]["median_gap"], 3)
         self.assertEqual(card["concern"], "not seen for 11 days (usually every 3)")
 
+    def test_future_misread_dates_do_not_break_delivery(self):
+        receipts = _receipts("AYAM BERLIAN", 6)
+        receipts[0]["receipt_date"] = "2028-10-06"          # OCR read 2026 as 2028
+        card = sc.score_all(receipts, [], today=TODAY, days=DAYS)[0]
+        self.assertEqual(card["delivery"]["last_seen_days"], 4)
+        self.assertGreaterEqual(card["delivery"]["last_seen_days"], 0)
+        self.assertEqual(card["bills"], 6)                    # the bill itself still counts
+
     def test_robust_cv_ignores_one_bad_line(self):
         self.assertEqual(sc.robust_cv([10, 10, 10, 10, 1000]), 0.0)
         self.assertIsNone(sc.robust_cv([10, 10]))
