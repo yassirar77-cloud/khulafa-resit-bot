@@ -241,19 +241,24 @@ def top_concern(card: dict) -> str:
     return f"only {card['clean_rate'] * 100:.0f}% of bills read cleanly (confidence ≥ {QUALITY_FLOOR})"
 
 
-def score_all(receipts, lines, *, today: date, days: int) -> list[dict]:
+def score_all(receipts, lines, *, today: date, days: int, names: dict | None = None) -> list[dict]:
     """Cards for every supplier in the rows, best score first; suppliers with
-    fewer than MIN_BILLS bills come last as unscored."""
+    fewer than MIN_BILLS bills come last as unscored. ``names`` (raw merchant
+    upper-cased -> canonical name, see ``merchant_groups``) folds OCR
+    spellings of one supplier into one card."""
+    names = names or {}
     by_m_receipts: dict[str, list] = defaultdict(list)
     for r in receipts or []:
         if (r.get("receipt_type") or SUPPLIER_TYPE) != SUPPLIER_TYPE:
             continue
         m = _merchant(r.get("merchant"))
+        m = names.get(m, m)
         if m and m not in ("UNKNOWN", "UNKNOWN MERCHANT", "N/A"):
             by_m_receipts[m].append(r)
     by_m_lines: dict[str, list] = defaultdict(list)
     for ln in lines or []:
-        by_m_lines[_merchant(ln.get("merchant"))].append(ln)
+        m = _merchant(ln.get("merchant"))
+        by_m_lines[names.get(m, m)].append(ln)
     cards = [score_supplier(m, rs, by_m_lines.get(m, []), today=today, days=days)
              for m, rs in by_m_receipts.items()]
     cards.sort(key=lambda c: (not c["scored"], -c["score"], -c["bills"]))
@@ -340,5 +345,9 @@ def fetch_rows(client, today: date, days: int) -> tuple[list, list]:
 
 
 def build(client, today: date, days: int = 30) -> list[dict]:
+    import merchant_groups
     receipts, lines = fetch_rows(client, today, days)
-    return score_all(receipts, lines, today=today, days=days)
+    aliases, canonicals = merchant_groups.load(client)
+    raw = {r.get("merchant") for r in receipts} | {ln.get("merchant") for ln in lines}
+    names = merchant_groups.name_map(raw, aliases, canonicals)
+    return score_all(receipts, lines, today=today, days=days, names=names)

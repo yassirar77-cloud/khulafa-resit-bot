@@ -75,13 +75,17 @@ def _percentile(sorted_vals: list[float], q: float) -> float:
 
 # --- rhythm ---------------------------------------------------------------------------
 
-def daily_totals(rows) -> dict[tuple[str, str], dict[date, float]]:
-    """{(outlet, merchant): {bill day: RM that day}} for supplier bills."""
+def daily_totals(rows, names: dict | None = None) -> dict[tuple[str, str], dict[date, float]]:
+    """{(outlet, merchant): {bill day: RM that day}} for supplier bills.
+    ``names`` (raw merchant upper-cased -> canonical name, ``merchant_groups``)
+    folds OCR spellings of one supplier together."""
+    names = names or {}
     out: dict[tuple[str, str], dict[date, float]] = defaultdict(lambda: defaultdict(float))
     for r in rows or []:
         if (r.get("receipt_type") or SUPPLIER_TYPE) != SUPPLIER_TYPE:
             continue
         m = _merchant(r.get("merchant"))
+        m = names.get(m, m)
         if not m or m in ("UNKNOWN", "UNKNOWN MERCHANT", "N/A"):
             continue
         day = receipt_day(r.get("receipt_date"), r.get("created_at"))
@@ -142,11 +146,11 @@ def project_days(rh: dict, today: date, horizon: int) -> list[date]:
     return out
 
 
-def forecast(rows, *, today: date, horizon: int = HORIZON_DAYS) -> dict:
+def forecast(rows, *, today: date, horizon: int = HORIZON_DAYS, names: dict | None = None) -> dict:
     """``{"lines": [...], "by_outlet": {...}, "by_day": {...}, "total", "low",
     "high", "overdue": [...], "recent_actual"}``; ``recent_actual`` is the
     spend of the last ``horizon`` days, to put the forecast next to."""
-    per_pair = daily_totals(rows)
+    per_pair = daily_totals(rows, names)
     lines, overdue = [], []
     by_outlet: dict[str, dict] = defaultdict(lambda: {"total": 0.0, "low": 0.0, "high": 0.0, "lines": []})
     by_day: dict[date, float] = defaultdict(float)
@@ -271,4 +275,8 @@ def fetch_rows(client, today: date, lookback: int = LOOKBACK_DAYS) -> list:
 
 
 def build(client, today: date, horizon: int = HORIZON_DAYS) -> dict:
-    return forecast(fetch_rows(client, today), today=today, horizon=horizon)
+    import merchant_groups
+    rows = fetch_rows(client, today)
+    aliases, canonicals = merchant_groups.load(client)
+    names = merchant_groups.name_map({r.get("merchant") for r in rows}, aliases, canonicals)
+    return forecast(rows, today=today, horizon=horizon, names=names)

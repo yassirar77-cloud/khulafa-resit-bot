@@ -258,6 +258,11 @@ psql "$SUPABASE_DB_URL" -f migrations/0059_pinpoint_v2.sql
 Three management features built only from data the bot already holds — no new
 OCR call, no AI wording, nothing to an outlet group except one re-send line.
 
+The scorecard and the forecast group OCR spellings of one supplier
+("AYAM BERLIAN SDN BHD", "AYAM BERLIAN SDN. BHD.", "AYAM BERLIAN SON BHD")
+under the `merchant_canonical` display name through the same alias tiers the
+bot uses (`merchant_groups.py`); a spelling that matches nothing stays itself.
+
 ### Receipt fingerprints — one bill can only be claimed once
 
 `receipt_fingerprint.py`, `migrations/0071_receipt_fingerprints.sql`. Every
