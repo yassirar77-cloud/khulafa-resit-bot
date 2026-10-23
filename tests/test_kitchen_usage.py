@@ -969,18 +969,37 @@ def test_numpad_pcs_rejects_dot():
     assert ku.commit_value("3", "pcs") == 3
 
 
-def test_numpad_kg_one_decimal():
+def test_numpad_kg_two_decimals():
+    # 4.75 kg: the scale reads to 10 g, so two places after the point apply.
     buf = ""
-    buf = ku.apply_key(buf, "3", "kg")
-    buf = ku.apply_key(buf, ".", "kg")
-    buf = ku.apply_key(buf, "5", "kg")
-    assert buf == "3.5"
-    # a second decimal digit is ignored
-    buf = ku.apply_key(buf, "7", "kg")
-    assert buf == "3.5"
-    # a second dot is ignored
+    for k in ("4", ".", "7", "5"):
+        buf = ku.apply_key(buf, k, "kg")
+    assert buf == "4.75"
+    # a THIRD decimal digit is ignored — and the reason is reportable
+    assert ku.key_rejection(buf, "0", "kg") == "numpad_max_dp"
+    assert ku.apply_key(buf, "0", "kg") == "4.75"
+    # a second dot is ignored, with its own reason
+    assert ku.key_rejection("3.5", ".", "kg") == "numpad_dup_dot"
     assert ku.apply_key("3.5", ".", "kg") == "3.5"
+    assert ku.commit_value("4.75", "kg") == 4.75
     assert ku.commit_value("3.5", "kg") == 3.5
+    assert ku.format_value(4.75, "kg") == "4.75"
+
+
+def test_numpad_key_rejection_reasons():
+    # pcs never takes a decimal point
+    assert ku.key_rejection("3", ".", "pcs") == "numpad_no_dot"
+    # keys that apply report no reason
+    assert ku.key_rejection("", ".", "kg") is None
+    assert ku.key_rejection("4.", "7", "kg") is None
+    assert ku.key_rejection("4.7", "5", "kg") is None
+    assert ku.key_rejection("12", "3", "pcs") is None
+    assert ku.key_rejection("12", "bs", "pcs") is None
+    # every reason is a real kitchen text in every form language
+    import kitchen_texts
+    for key in ("numpad_no_dot", "numpad_dup_dot", "numpad_max_dp"):
+        for lang in ("bm", "tamil", "bengali", "english", "indonesian", "bm_tamil"):
+            assert kitchen_texts.short(key, lang)
 
 
 def test_numpad_kg_leading_dot_becomes_zero():
@@ -1883,6 +1902,77 @@ def test_numpad_digit_never_edits_message(monkeypatch):
     assert answers           # spinner cleared via the toast answer
 
 
+def test_numpad_rejected_key_toast_says_why(monkeypatch):
+    # KLANG 22 Oct: "4.7" then 5, 0, 5, 0 — four taps with no visible change.
+    # The tap must still be answered, and the toast must say why it did nothing.
+    import asyncio
+
+    from tests.fake_supabase import FakeSupabase
+
+    monkeypatch.setattr(ku, "_supabase", FakeSupabase())
+    ku._numpad_state.clear()
+    key = ku._numpad_key(-77, 7, "s1", "daging")
+    ku._numpad_state[key] = {"buffer": "4.75", "phase": "cooked"}
+
+    update, edits, answers = _cb_update("kdu:s1:daging:d0")
+    asyncio.run(ku.handle_kitchen_callback(update, _ctx()))
+    assert edits == []
+    text = answers[-1][1].get("text", "")
+    assert text.startswith("Daging: 4.75")
+    assert "maks 2 angka lepas titik" in text
+    assert ku._numpad_state[key]["buffer"] == "4.75"
+
+    # a second "." on a kg item, and "." on a pcs item (not on its keyboard,
+    # but a stale client can still send it)
+    update, _, answers = _cb_update("kdu:s1:daging:dot")
+    asyncio.run(ku.handle_kitchen_callback(update, _ctx()))
+    assert "titik dah ada" in answers[-1][1].get("text", "")
+    ku._numpad_state[ku._numpad_key(-77, 7, "s1", "ayam_goreng")] = {"buffer": "3", "phase": "cooked"}
+    update, _, answers = _cb_update("kdu:s1:ayam_goreng:dot")
+    asyncio.run(ku.handle_kitchen_callback(update, _ctx()))
+    assert "nombor bulat" in answers[-1][1].get("text", "")
+
+    # an accepted key keeps the plain toast
+    ku._numpad_state[key] = {"buffer": "4.7", "phase": "cooked"}
+    update, _, answers = _cb_update("kdu:s1:daging:d5")
+    asyncio.run(ku.handle_kitchen_callback(update, _ctx()))
+    assert answers[-1][1].get("text", "") == "Daging: 4.75"
+
+
+def test_numpad_kg_two_decimal_commit_and_grams_confirm(monkeypatch):
+    import asyncio
+
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store["kitchen_log_session"] = [{
+        "id": "s1", "chat_id": -77, "outlet_code": "SEK20", "business_date": "2026-06-24",
+        "phase": "cooked", "status": "open", "entries": {},
+    }]
+    monkeypatch.setattr(ku, "_supabase", fake)
+    ku._numpad_state.clear()
+
+    # 4.75 kg keyed directly is saved as 4.75 (was rounded to 4.8 / dropped)
+    ku._numpad_state[ku._numpad_key(-77, 7, "s1", "kambing")] = {"buffer": "4.75", "phase": "cooked"}
+    update, edits, _ = _cb_update("kdu:s1:kambing:ok")
+    asyncio.run(ku.handle_kitchen_callback(update, _ctx()))
+    assert fake.rows("kitchen_log_session")[0]["entries"]["kambing"] == 4.75
+    assert "4.75" in edits[-1][1].get("text", "") or any(
+        "4.75" in b.text for r in edits[-1][1]["reply_markup"].inline_keyboard for b in r)
+
+    # 4750 keyed in the kg field -> grams question; ✅ saves 4.75 kg
+    ku._numpad_state[ku._numpad_key(-77, 7, "s1", "daging")] = {"buffer": "4750", "phase": "cooked"}
+    update, edits, _ = _cb_update("kdu:s1:daging:ok")
+    asyncio.run(ku.handle_kitchen_callback(update, _ctx()))
+    assert "daging" not in fake.rows("kitchen_log_session")[0]["entries"]
+    kb = edits[-1][1]["reply_markup"].inline_keyboard
+    assert [b.callback_data for r in kb for b in r] == [
+        "kdu:s1:daging:gy4750", "kdu:s1:daging:open", "kdu:s1:daging:gk4750"]
+    update, edits, _ = _cb_update("kdu:s1:daging:gy4750")
+    asyncio.run(ku.handle_kitchen_callback(update, _ctx()))
+    assert fake.rows("kitchen_log_session")[0]["entries"]["daging"] == 4.75
+
+
 def test_numpad_ok_commits_to_db_and_clears_memory(monkeypatch):
     import asyncio
 
@@ -1962,6 +2052,16 @@ def test_numpad_memory_miss_recovers_from_db_once(monkeypatch):
 
 
 # --- mistake-fixing before Hantar: overwrite + Kosongkan ---------------------
+
+def test_grams_keyboard_keep_as_kg_is_last_and_explicit():
+    kb = ku.build_grams_keyboard("s1", "kambing", "300")
+    rows = kb.inline_keyboard
+    assert [b.callback_data for r in rows for b in r] == [
+        "kdu:s1:kambing:gy300", "kdu:s1:kambing:open", "kdu:s1:kambing:gk300",
+    ]
+    assert "300 g = 0.3 kg" in rows[0][0].text
+    assert "bukan gram" in rows[2][0].text and rows[2][0].text.startswith("⚠️")
+
 
 def test_numpad_keyboard_has_kosongkan_clear():
     kb = ku.build_numpad_keyboard("s1", "ayam_goreng", "pcs")
