@@ -1960,17 +1960,44 @@ def test_numpad_kg_two_decimal_commit_and_grams_confirm(monkeypatch):
     assert "4.75" in edits[-1][1].get("text", "") or any(
         "4.75" in b.text for r in edits[-1][1]["reply_markup"].inline_keyboard for b in r)
 
-    # 4750 keyed in the kg field -> grams question; ✅ saves 4.75 kg
+    # 4750 keyed in the kg field is grams: saved as 4.75 kg at once, no
+    # question (the old "4750 kg (betul)" button was being tapped as "correct")
     ku._numpad_state[ku._numpad_key(-77, 7, "s1", "daging")] = {"buffer": "4750", "phase": "cooked"}
-    update, edits, _ = _cb_update("kdu:s1:daging:ok")
-    asyncio.run(ku.handle_kitchen_callback(update, _ctx()))
-    assert "daging" not in fake.rows("kitchen_log_session")[0]["entries"]
-    kb = edits[-1][1]["reply_markup"].inline_keyboard
-    assert [b.callback_data for r in kb for b in r] == [
-        "kdu:s1:daging:gy4750", "kdu:s1:daging:open", "kdu:s1:daging:gk4750"]
-    update, edits, _ = _cb_update("kdu:s1:daging:gy4750")
+    update, edits, answers = _cb_update("kdu:s1:daging:ok")
     asyncio.run(ku.handle_kitchen_callback(update, _ctx()))
     assert fake.rows("kitchen_log_session")[0]["entries"]["daging"] == 4.75
+    # told plainly: a pop-up (the one answer this callback gets) + a line on the form
+    assert len(answers) == 1 and answers[0][1].get("show_alert") is True
+    assert "4750 g" in answers[0][0][0] and "4.75 kg" in answers[0][0][0]
+    assert edits[-1][0].startswith("⚖️ Daging: 4750 g disimpan sebagai 4.75 kg")
+    assert "reply_markup" in edits[-1][1]  # back on the item list, not a question
+
+    # a stale grams question (message posted before this change) still works
+    update, edits, _ = _cb_update("kdu:s1:kambing:gy300")
+    asyncio.run(ku.handle_kitchen_callback(update, _ctx()))
+    assert fake.rows("kitchen_log_session")[0]["entries"]["kambing"] == 0.3
+
+
+def test_numpad_kg_commit_answers_callback_exactly_once(monkeypatch):
+    # A callback query can be answered once; the plain kg ✓ must still clear
+    # the spinner (no alert), and the grams case must not answer twice.
+    import asyncio
+
+    from tests.fake_supabase import FakeSupabase
+
+    fake = FakeSupabase()
+    fake._store["kitchen_log_session"] = [{
+        "id": "s1", "chat_id": -77, "outlet_code": "SEK20", "business_date": "2026-06-24",
+        "phase": "cooked", "status": "open", "entries": {},
+    }]
+    monkeypatch.setattr(ku, "_supabase", fake)
+    ku._numpad_state.clear()
+    ku._numpad_state[ku._numpad_key(-77, 7, "s1", "daging")] = {"buffer": "1.5", "phase": "cooked"}
+    update, edits, answers = _cb_update("kdu:s1:daging:ok")
+    asyncio.run(ku.handle_kitchen_callback(update, _ctx()))
+    assert len(answers) == 1 and not answers[0][1].get("show_alert")
+    assert fake.rows("kitchen_log_session")[0]["entries"]["daging"] == 1.5
+    assert not edits[-1][0].startswith("⚖️")
 
 
 def test_numpad_ok_commits_to_db_and_clears_memory(monkeypatch):

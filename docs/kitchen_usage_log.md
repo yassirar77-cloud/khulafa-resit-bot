@@ -35,7 +35,7 @@ local time before noon folds back to the previous calendar day
 | `kambing` | Kambing | kg |
 | `daging` | Daging | kg |
 
-`pcs` items are whole numbers; `kg` items allow up to two decimals (4.75). **Ayam Rempah only
+`pcs` items are whole numbers; `kg` items allow up to two decimals (4.75); a kg figure of 50 or more is taken as grams and saved ÷1000 (`KG_GRAMS_SUSPECT_AT`). **Ayam Rempah only
 appears on the BISTRO7 form** (`items_for_outlet`).
 
 ## Key-in UX (tap buttons + numpad)

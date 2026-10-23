@@ -953,7 +953,9 @@ def build_numpad_keyboard(session_id, item_code, unit: str, language: str = "bm"
 # --- key-in checks (pure) ------------------------------------------------------
 
 def grams_suspect(value, unit) -> bool:
-    """A kg value this large was almost certainly keyed in grams ("500")."""
+    """A kg value this large was keyed in grams ("500" for 0.5 kg): no outlet
+    cooks ``KG_GRAMS_SUSPECT_AT`` kg of kambing or daging in a day (KLANG's
+    record is 6.25 kg), so ✓ converts it without asking."""
     return (unit == "kg" and value is not None
             and float(value) >= cfg.KG_GRAMS_SUSPECT_AT)
 
@@ -1002,9 +1004,10 @@ def left_violation_text(v: dict) -> str:
 def build_grams_keyboard(session_id, item_code, buffer: str):
     """Confirm a suspicious kg value: ✅ X g -> kg / retype / really kg.
 
-    "Keep as kg" goes LAST and is worded as the exception: with it in the
-    middle, reading "300 kg (betul)" as "300, correct", chefs who had weighed
-    300 g were saving 300 kg (SEK6 every night 11–21 Oct, KLANG 1200 kg left)."""
+    No longer posted by ✓ (a 3-digit kg figure is now saved as grams outright,
+    see ``handle_kitchen_callback``); kept so a message still showing the old
+    question keeps working. "Keep as kg" goes LAST and is worded as the
+    exception — in the middle, "300 kg (betul)" was read as "300, correct"."""
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
     g = buffer
@@ -3257,7 +3260,10 @@ async def handle_kitchen_callback(update, context) -> None:
     # below into silent no-ops. For "send" the answer happens inside the
     # Hantar branch instead.
     is_send = item_code == FORM_TOKEN and action == "send"
-    if not is_send:
+    # ✓ on a kg item may need a show_alert answer (grams saved as kg) — the
+    # answer is given inside that branch instead, like Hantar.
+    is_kg_commit = action == "ok" and (ITEM_BY_CODE.get(item_code) or {}).get("unit") == "kg"
+    if not is_send and not is_kg_commit:
         with contextlib.suppress(Exception):
             await query.answer()
 
@@ -3432,18 +3438,18 @@ async def handle_kitchen_callback(update, context) -> None:
         buffer = st["buffer"] if st else (session.get("buffer") or "")
         value = commit_value(buffer, unit)
         _clear_numpad_state(session_id, item_code)
+        grams_note = None
         if grams_suspect(value, unit):
-            # "500" in a kg field is 500 g — ask before saving anything.
-            await _edit_form_message(
-                query,
-                kitchen_texts.bm_tamil(
-                    "grams_ask", label=meta["label"], g=format_value(value, "kg"),
-                    kg=format_value(grams_to_kg(value), "kg")),
-                "grams_ask",
-                reply_markup=build_grams_keyboard(session_id, item_code,
-                                                  format_value(value, "kg")),
-            )
-            return
+            # "500" in a kg field is 500 g. Treat it as grams, no question:
+            # the old "Maksud 500 g = 0.5 kg?" prompt saved 697 kambing/daging
+            # rows as hundreds of kg (Jun–Oct 2026) because "500 kg (betul)"
+            # was read as "500, correct". No outlet cooks 50 kg of either.
+            grams = format_value(value, "kg")
+            value = grams_to_kg(value)
+            grams_note = kitchen_texts.bm_tamil(
+                "grams_saved", label=meta["label"], g=grams, kg=format_value(value, "kg"))
+            logger.info("kitchen: %s %s %s keyed %s in the kg field -> saved %s kg",
+                        outlet_code, phase, item_code, grams, format_value(value, "kg"))
         if await _reject_left_over_cooked(query, session, item_code, value, lang):
             return
         entries = await asyncio.to_thread(
@@ -3451,9 +3457,17 @@ async def handle_kitchen_callback(update, context) -> None:
         )
         # The ONLY message edit in the numpad flow — back to the item list.
         t_edit = time.monotonic()
+        text = form_text(phase, business_date, outlet_label, entries, outlet_code, lang)
+        if grams_note:
+            text = grams_note + "\n\n" + text
+            with contextlib.suppress(Exception):
+                await query.answer(grams_note.split("\n", 1)[0], show_alert=True)
+        elif unit == "kg":
+            with contextlib.suppress(Exception):
+                await query.answer()
         await _edit_form_message(
             query,
-            form_text(phase, business_date, outlet_label, entries, outlet_code, lang),
+            text,
             "numpad_commit",
             reply_markup=build_item_keyboard(session_id, outlet_code, entries, phase, lang),
         )

@@ -408,6 +408,11 @@ T: dict[str, dict[str, str]] = {
         "bm": "{label}: Maksud {g} g = {kg} kg?",
         "tamil": "{label}: {g} g = {kg} kg-ஆ?",
     },
+    # ✓ on a 3-digit kg figure: saved as grams, told plainly (no question).
+    "grams_saved": {
+        "bm": "⚖️ {label}: {g} g disimpan sebagai {kg} kg",
+        "tamil": "⚖️ {label}: {g} g = {kg} kg-ஆ சேமிச்சாச்சு",
+    },
     "grams_yes": {"bm": "✅ Ya, {g} g = {kg} kg", "tamil": "✅ ஆமா, {g} g = {kg} kg"},
     "grams_keep": {"bm": "⚠️ Memang {g} kg (bukan gram)", "tamil": "⚠️ உண்மையா {g} kg (கிராம் இல்ல)"},
     "grams_retype": {"bm": "✏️ Taip semula", "tamil": "✏️ மறுபடி போடு"},

@@ -23,8 +23,10 @@ STATUS_FLOOR = {"pcs": 2.0, "kg": 0.3}
 AUTO_POST_FROM = "2026-10-11"
 
 # --- key-in validation --------------------------------------------------------
-# A kg field keyed at/above this is almost certainly grams ("500" for 0.5 kg):
-# the bot asks "Maksud 500 g = 0.5 kg?" before saving.
+# A kg field keyed at/above this is grams ("500" for 0.5 kg): ✓ saves it as
+# kg (÷1000) and says so. It no longer asks — the "500 kg (betul)" answer was
+# being tapped as "500, correct" and 697 rows went in as hundreds of kg
+# (Jun–Oct 2026). Daily record for either item is 6.25 kg (KLANG).
 KG_GRAMS_SUSPECT_AT = 50
 
 # --- POS pieces -> kg ---------------------------------------------------------
