@@ -78,7 +78,7 @@ def kitchen_log_enabled() -> bool:
 
 
 # --- item catalogue ---------------------------------------------------------
-# (code, BM label, unit). pcs = whole numbers only; kg = one decimal allowed.
+# (code, BM label, unit). pcs = whole numbers only; kg = up to KG_DECIMALS (2) decimals.
 # Order here is the order shown on the form.
 _ITEMS: list[tuple[str, str, str]] = [
     ("ayam_goreng", "Ayam Goreng", "pcs"),
@@ -145,35 +145,57 @@ def business_date_for(dt: datetime, cutoff_hour: int = BUSINESS_DAY_CUTOFF_HOUR)
 
 DIGITS = frozenset("0123456789")
 
+# Digits allowed after the decimal point in a kg field. The kitchen scale reads
+# to 10 g and the portions are 60 g (daging) / 180 g (kambing), so chefs key
+# "4.75" or "0.25" — with one place the second digit was silently dropped and
+# the button looked dead (KLANG, 22 Oct: 4.7 → 5 → 5 → 5, then gave up).
+KG_DECIMALS = 2
+
 
 def apply_key(buffer: str, key: str, unit: str) -> str:
     """Apply one numpad key to the running buffer and return the new buffer.
 
     Keys: a single digit "0".."9", "." (kg only), or "bs" (backspace). Invalid
-    presses are ignored (no-op) rather than raising:
+    presses are ignored (no-op) rather than raising — ``key_rejection`` says
+    why, so the tap can still be answered with a reason:
       * "." is rejected for pcs items, and a second "." is rejected for kg.
-      * kg allows at most ONE digit after the decimal point.
+      * kg allows at most ``KG_DECIMALS`` digits after the decimal point.
       * a leading run of zeros is collapsed ("0" then "5" -> "5") so the display
         never shows "05"; "0." is preserved so "0.5" can be typed.
     """
     buffer = buffer or ""
     if key == "bs":
         return buffer[:-1]
+    if key_rejection(buffer, key, unit):
+        return buffer
     if key == ".":
-        if unit != "kg" or "." in buffer:
-            return buffer
         return (buffer + ".") if buffer else "0."
     if key in DIGITS:
         if "." in buffer:
-            # at most one decimal place
-            if len(buffer.split(".", 1)[1]) >= 1:
-                return buffer
             return buffer + key
         # integer part: collapse a lone leading zero
         if buffer == "0":
             return key
         return buffer + key
     return buffer
+
+
+def key_rejection(buffer: str, key: str, unit: str):
+    """Why ``apply_key`` would ignore this press — a kitchen_texts key
+    ("numpad_no_dot", "numpad_dup_dot", "numpad_max_dp") — or None when the
+    key applies. A silently ignored tap reads as a dead button, so the
+    handler puts this reason in the answer toast."""
+    buffer = buffer or ""
+    if key == ".":
+        if unit != "kg":
+            return "numpad_no_dot"
+        if "." in buffer:
+            return "numpad_dup_dot"
+        return None
+    if key in DIGITS and "." in buffer:
+        if len(buffer.split(".", 1)[1]) >= KG_DECIMALS:
+            return "numpad_max_dp"
+    return None
 
 
 def buffer_display(buffer: str) -> str:
@@ -184,9 +206,10 @@ def buffer_display(buffer: str) -> str:
 def commit_value(buffer: str, unit: str):
     """Parse a buffer into a stored value, or ``None`` if it isn't a real number.
 
-    pcs -> int, kg -> float rounded to one decimal. Empty / "." / "0." style
-    fragments that don't parse to a number return None (Hantar treats the item
-    as unfilled)."""
+    pcs -> int, kg -> float rounded to ``KG_DECIMALS`` places (the same
+    precision the grams confirmation stores: 750 g -> 0.75). Empty / "." /
+    "0." style fragments that don't parse to a number return None (Hantar
+    treats the item as unfilled)."""
     buffer = (buffer or "").strip()
     if not buffer or buffer == ".":
         return None
@@ -196,7 +219,7 @@ def commit_value(buffer: str, unit: str):
         return None
     if unit == "pcs":
         return int(round(val))
-    return round(val, 1)
+    return round(val, KG_DECIMALS)
 
 
 def format_value(value, unit) -> str:
@@ -905,6 +928,7 @@ def build_numpad_keyboard(session_id, item_code, unit: str, language: str = "bm"
 
     pcs (3×4): [1 2 3] [4 5 6] [7 8 9] [⌫ 0 ✓]
     kg  (+".") : [1 2 3] [4 5 6] [7 8 9] [. 0 ⌫] [✓ Simpan]
+    (kg accepts up to KG_DECIMALS digits after the point: "4.75".)
     """
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -929,7 +953,9 @@ def build_numpad_keyboard(session_id, item_code, unit: str, language: str = "bm"
 # --- key-in checks (pure) ------------------------------------------------------
 
 def grams_suspect(value, unit) -> bool:
-    """A kg value this large was almost certainly keyed in grams ("500")."""
+    """A kg value this large was keyed in grams ("500" for 0.5 kg): no outlet
+    cooks ``KG_GRAMS_SUSPECT_AT`` kg of kambing or daging in a day (KLANG's
+    record is 6.25 kg), so ✓ converts it without asking."""
     return (unit == "kg" and value is not None
             and float(value) >= cfg.KG_GRAMS_SUSPECT_AT)
 
@@ -976,18 +1002,23 @@ def left_violation_text(v: dict) -> str:
 
 
 def build_grams_keyboard(session_id, item_code, buffer: str):
-    """Confirm a suspicious kg value: ✅ X g -> kg / keep as kg / retype."""
+    """Confirm a suspicious kg value: ✅ X g -> kg / retype / really kg.
+
+    No longer posted by ✓ (a 3-digit kg figure is now saved as grams outright,
+    see ``handle_kitchen_callback``); kept so a message still showing the old
+    question keeps working. "Keep as kg" goes LAST and is worded as the
+    exception — in the middle, "300 kg (betul)" was read as "300, correct"."""
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
     g = buffer
     kg = format_value(grams_to_kg(buffer), "kg")
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(kitchen_texts.bm_tamil_short("grams_yes", kg=kg),
+        [InlineKeyboardButton(kitchen_texts.bm_tamil_short("grams_yes", g=g, kg=kg),
                               callback_data=_cb(session_id, item_code, f"gy{g}"))],
-        [InlineKeyboardButton(kitchen_texts.bm_tamil_short("grams_keep", g=g),
-                              callback_data=_cb(session_id, item_code, f"gk{g}"))],
         [InlineKeyboardButton(kitchen_texts.bm_tamil_short("grams_retype"),
                               callback_data=_cb(session_id, item_code, "open"))],
+        [InlineKeyboardButton(kitchen_texts.bm_tamil_short("grams_keep", g=g),
+                              callback_data=_cb(session_id, item_code, f"gk{g}"))],
     ])
 
 
@@ -3093,20 +3124,28 @@ async def _handle_numpad_key(query, session_id, item_code, action) -> None:
         st = {"buffer": session.get("buffer") or "", "phase": session.get("phase") or PHASE_COOKED}
 
     # In-memory mutation (synchronous, no await) — atomic within this task.
-    st["buffer"] = apply_key(st["buffer"], _action_to_key(action), unit)
+    pressed = _action_to_key(action)
+    rejected = key_rejection(st["buffer"], pressed, unit)
+    st["buffer"] = apply_key(st["buffer"], pressed, unit)
     # Store + stamp (refreshes the TTL on every keypress so an actively-edited
     # buffer is never swept mid-entry).
     _touch_numpad_state(key, st)
     display = buffer_display(st["buffer"])
+    toast = f"{meta['label']}: {display}"
+    if rejected:
+        # Say WHY the key did nothing — an unchanged toast looks like a dead
+        # button ("mutton/daging tak respond").
+        toast += " — " + kitchen_texts.short(rejected, form_language(chat_id, st.get("phase")))
 
     t_ans = time.monotonic()
     with contextlib.suppress(Exception):
         # Toast shows the running value AND clears the spinner in one call.
-        await query.answer(text=f"{meta['label']}: {display}", cache_time=0)
+        await query.answer(text=toast, cache_time=0)
     t_done = time.monotonic()
     logger.info(
-        "kitchen numpad %s -> %r: recv->answer_start %.0fms, answer %.0fms (toast, no edit)",
-        action, st["buffer"], (t_ans - t0) * 1000, (t_done - t_ans) * 1000,
+        "kitchen numpad %s -> %r%s: recv->answer_start %.0fms, answer %.0fms (toast, no edit)",
+        action, st["buffer"], f" (rejected: {rejected})" if rejected else "",
+        (t_ans - t0) * 1000, (t_done - t_ans) * 1000,
     )
 
 
@@ -3221,7 +3260,10 @@ async def handle_kitchen_callback(update, context) -> None:
     # below into silent no-ops. For "send" the answer happens inside the
     # Hantar branch instead.
     is_send = item_code == FORM_TOKEN and action == "send"
-    if not is_send:
+    # ✓ on a kg item may need a show_alert answer (grams saved as kg) — the
+    # answer is given inside that branch instead, like Hantar.
+    is_kg_commit = action == "ok" and (ITEM_BY_CODE.get(item_code) or {}).get("unit") == "kg"
+    if not is_send and not is_kg_commit:
         with contextlib.suppress(Exception):
             await query.answer()
 
@@ -3369,7 +3411,12 @@ async def handle_kitchen_callback(update, context) -> None:
             raw = float(action[2:])
         except ValueError:
             return
-        value = grams_to_kg(raw) if action.startswith("gy") else round(raw, 2)
+        value = grams_to_kg(raw) if action.startswith("gy") else round(raw, KG_DECIMALS)
+        if action.startswith("gk"):
+            # Visible in the logs: who insisted a 3-digit kg figure was kg.
+            logger.warning(
+                "kitchen: %s %s kept %s kg for %s despite the grams check (session %s)",
+                outlet_code, phase, format_value(value, unit), item_code, session_id)
         if await _reject_left_over_cooked(query, session, item_code, value, lang):
             return
         entries = await asyncio.to_thread(
@@ -3391,18 +3438,18 @@ async def handle_kitchen_callback(update, context) -> None:
         buffer = st["buffer"] if st else (session.get("buffer") or "")
         value = commit_value(buffer, unit)
         _clear_numpad_state(session_id, item_code)
+        grams_note = None
         if grams_suspect(value, unit):
-            # "500" in a kg field is 500 g — ask before saving anything.
-            await _edit_form_message(
-                query,
-                kitchen_texts.bm_tamil(
-                    "grams_ask", label=meta["label"], g=format_value(value, "kg"),
-                    kg=format_value(grams_to_kg(value), "kg")),
-                "grams_ask",
-                reply_markup=build_grams_keyboard(session_id, item_code,
-                                                  format_value(value, "kg")),
-            )
-            return
+            # "500" in a kg field is 500 g. Treat it as grams, no question:
+            # the old "Maksud 500 g = 0.5 kg?" prompt saved 697 kambing/daging
+            # rows as hundreds of kg (Jun–Oct 2026) because "500 kg (betul)"
+            # was read as "500, correct". No outlet cooks 50 kg of either.
+            grams = format_value(value, "kg")
+            value = grams_to_kg(value)
+            grams_note = kitchen_texts.bm_tamil(
+                "grams_saved", label=meta["label"], g=grams, kg=format_value(value, "kg"))
+            logger.info("kitchen: %s %s %s keyed %s in the kg field -> saved %s kg",
+                        outlet_code, phase, item_code, grams, format_value(value, "kg"))
         if await _reject_left_over_cooked(query, session, item_code, value, lang):
             return
         entries = await asyncio.to_thread(
@@ -3410,9 +3457,17 @@ async def handle_kitchen_callback(update, context) -> None:
         )
         # The ONLY message edit in the numpad flow — back to the item list.
         t_edit = time.monotonic()
+        text = form_text(phase, business_date, outlet_label, entries, outlet_code, lang)
+        if grams_note:
+            text = grams_note + "\n\n" + text
+            with contextlib.suppress(Exception):
+                await query.answer(grams_note.split("\n", 1)[0], show_alert=True)
+        elif unit == "kg":
+            with contextlib.suppress(Exception):
+                await query.answer()
         await _edit_form_message(
             query,
-            form_text(phase, business_date, outlet_label, entries, outlet_code, lang),
+            text,
             "numpad_commit",
             reply_markup=build_item_keyboard(session_id, outlet_code, entries, phase, lang),
         )

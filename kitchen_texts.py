@@ -87,9 +87,28 @@ T: dict[str, dict[str, str]] = {
     },
     # --- numpad -----------------------------------------------------------
     "unit_kg": {
-        "bm": "(kg, boleh 1 titik perpuluhan)", "tamil": "(kg, ஒரு புள்ளி போடலாம்)",
-        "bengali": "(kg, ek dosomik chole)", "english": "(kg, 1 decimal allowed)",
-        "indonesian": "(kg, boleh 1 desimal)",
+        "bm": "(kg, cth 4.75)", "tamil": "(kg, உதா. 4.75)",
+        "bengali": "(kg, jemon 4.75)", "english": "(kg, e.g. 4.75)",
+        "indonesian": "(kg, mis. 4.75)",
+    },
+    # Toast suffix when a numpad key is ignored (apply_key no-op) — otherwise
+    # the unchanged value looks like the button did not respond.
+    "numpad_no_dot": {
+        "bm": "pcs: nombor bulat sahaja", "tamil": "pcs: முழு எண் மட்டும்",
+        "bengali": "pcs: shudhu purno shongkha", "english": "pcs: whole numbers only",
+        "indonesian": "pcs: angka bulat saja",
+    },
+    "numpad_dup_dot": {
+        "bm": "titik dah ada", "tamil": "புள்ளி ஏற்கனவே இருக்கு",
+        "bengali": "dosomik age-i ache", "english": "decimal point already there",
+        "indonesian": "titik sudah ada",
+    },
+    "numpad_max_dp": {
+        "bm": "maks 2 angka lepas titik (cth 4.75)",
+        "tamil": "புள்ளிக்கு பின் 2 எண் மட்டும் (உதா. 4.75)",
+        "bengali": "dosomik-er pore max 2 shongkha (jemon 4.75)",
+        "english": "max 2 digits after the point (e.g. 4.75)",
+        "indonesian": "maks 2 angka setelah titik (mis. 4.75)",
     },
     "unit_pcs": {
         "bm": "(pcs, nombor bulat)", "tamil": "(pcs, முழு எண்)",
@@ -389,8 +408,13 @@ T: dict[str, dict[str, str]] = {
         "bm": "{label}: Maksud {g} g = {kg} kg?",
         "tamil": "{label}: {g} g = {kg} kg-ஆ?",
     },
-    "grams_yes": {"bm": "✅ Ya, {kg} kg", "tamil": "✅ ஆமா, {kg} kg"},
-    "grams_keep": {"bm": "{g} kg (betul)", "tamil": "{g} kg (சரி)"},
+    # ✓ on a 3-digit kg figure: saved as grams, told plainly (no question).
+    "grams_saved": {
+        "bm": "⚖️ {label}: {g} g disimpan sebagai {kg} kg",
+        "tamil": "⚖️ {label}: {g} g = {kg} kg-ஆ சேமிச்சாச்சு",
+    },
+    "grams_yes": {"bm": "✅ Ya, {g} g = {kg} kg", "tamil": "✅ ஆமா, {g} g = {kg} kg"},
+    "grams_keep": {"bm": "⚠️ Memang {g} kg (bukan gram)", "tamil": "⚠️ உண்மையா {g} kg (கிராம் இல்ல)"},
     "grams_retype": {"bm": "✏️ Taip semula", "tamil": "✏️ மறுபடி போடு"},
     "pos_wait_head": {
         "bm": "⏳ POS belum lengkap — {outlet} {date}",
