@@ -165,6 +165,54 @@ class GroqTranscribeTests(unittest.TestCase):
         self.assertEqual(sv.accept(out), "esok ayam 40kg ikan 10kg")   # no score: accepted
 
 
+class ScriptCheckTests(unittest.TestCase):
+    def _t(self, text, lang, conf=0.9):
+        return {"ok": True, "text": text, "confidence": conf, "language": lang}
+
+    def test_allowed_scripts_per_language(self):
+        ok = [("காடிசியா மேவாட்டார் எப்பாவுக்குனான்", "ta"), ("naalaikku ayam 12 kilo, ok?", "ta"),
+              ("ஆமா, ayam 40kg… “ok” 🙏", "ta"), ("Aaj order thik ache", "bn"), ("আজ ঠিক আছে", "bn"),
+              ("esok ayam 40kg", "ms"), ("naïve café 100%", "ms"), ("All OK boss!", "en"),
+              ("besok ayam 40 kg", "id"), ("ஆமா ok", "auto"), ("আজ ঠিক", "auto")]
+        for text, lang in ok:
+            self.assertEqual(sv.wrong_script(text, lang), [], (text, lang))
+            self.assertEqual(sv.accept(self._t(text, lang)), text, (text, lang))
+
+    def test_foreign_scripts_bounce_with_wrong_script(self):
+        bad = [("스탕 οι ελληνικές", "ta", "Hangul, Greek"), ("Привет", "en", "Cyrillic"),
+               ("ايوه", "auto", "Arabic"), ("你好", "ms", "CJK"), ("สวัสดี", "id", "Thai"),
+               ("ஆமா", "ms", "Tamil"), ("ஆமா", "bn", "Tamil"), ("আজ", "ta", "Bengali"),
+               ("ayam 12 kilo και", "ta", "Greek")]
+        for text, lang, scripts in bad:
+            self.assertTrue(sv.wrong_script(text, lang), (text, lang))
+            t = self._t(text, lang)
+            self.assertIsNone(sv.accept(t), (text, lang))
+            why = sv.bounce(t)
+            self.assertEqual(why["reason"], "wrong_script", (text, lang))
+            self.assertEqual(why["level"], "info")
+            self.assertIn(f"lang={lang} found {scripts}", why["detail"], (text, lang))
+
+    def test_script_check_runs_before_the_confidence_floor(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            low_and_foreign = self._t("스탕 οι ελληνικές", "ta", conf=0.477)
+            self.assertEqual(sv.bounce(low_and_foreign)["reason"], "wrong_script")
+            low_but_clean = self._t("காடிசியா", "ta", conf=0.477)
+            self.assertEqual(sv.bounce(low_but_clean)["reason"], "low_confidence")
+            # A clean high-confidence Tamil note is unaffected.
+            self.assertEqual(sv.accept(self._t("ஆமா ok", "ta", conf=0.9)), "ஆமா ok")
+
+    def test_log_row_and_stats_count_wrong_script(self):
+        t = self._t("스탕 οι ελληνικές", "ta", conf=0.477)
+        row = sv.log_row(None, outlet_code="DAMANSARA", chat_id=-1, language="tamil", file_id="x",
+                         transcript=t, text="", accepted=False, duration=2.9)
+        self.assertEqual(row["problems"], ["wrong_script"])
+        self.assertEqual(row["facts"]["reason"], "wrong_script")
+        self.assertIn("Hangul, Greek", row["facts"]["reason_detail"])
+        text = sv.format_stats([row])
+        self.assertIn("• DAMANSARA: 0 transcribed, 1 bounced — wrong_script ×1", text)
+        self.assertIn("wrong_script = letters from another script", text)
+
+
 class AcceptTests(unittest.TestCase):
     def test_confidence_floor(self):
         with mock.patch.dict("os.environ", {}, clear=True):
