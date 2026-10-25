@@ -910,7 +910,9 @@ def build_item_keyboard(session_id, outlet_code, entries: dict, phase: str = PHA
         code, label, unit = it["code"], it["label"], it["unit"]
         val = entries.get(code)
         if val is not None:
-            text = f"✓ {label}: {format_value(val, unit)}"
+            # kg items carry the unit so "0.6" reads as 0.6 kg (= 600 g), not
+            # as a wrong number.
+            text = f"✓ {label}: {format_value(val, unit)}" + (" kg" if unit == "kg" else "")
         else:
             text = f"{label}: —"
         rows.append([InlineKeyboardButton(text, callback_data=_cb(session_id, code, "open"))])
@@ -3446,8 +3448,8 @@ async def handle_kitchen_callback(update, context) -> None:
             # was read as "500, correct". No outlet cooks 50 kg of either.
             grams = format_value(value, "kg")
             value = grams_to_kg(value)
-            grams_note = kitchen_texts.bm_tamil(
-                "grams_saved", label=meta["label"], g=grams, kg=format_value(value, "kg"))
+            grams_note = kitchen_texts.text(
+                "grams_saved", lang, label=meta["label"], g=grams, kg=format_value(value, "kg"))
             logger.info("kitchen: %s %s %s keyed %s in the kg field -> saved %s kg",
                         outlet_code, phase, item_code, grams, format_value(value, "kg"))
         if await _reject_left_over_cooked(query, session, item_code, value, lang):

@@ -408,10 +408,15 @@ T: dict[str, dict[str, str]] = {
         "bm": "{label}: Maksud {g} g = {kg} kg?",
         "tamil": "{label}: {g} g = {kg} kg-ஆ?",
     },
-    # ✓ on a 3-digit kg figure: saved as grams, told plainly (no question).
+    # ✓ on a 3-digit kg figure: saved as grams, told plainly (no question) —
+    # in the cashier's language. Jakel's Bengali cashier got this in BM/Tamil
+    # (25 Oct), read "0.6" as wrong, tapped 🗑 and sent the form without it.
     "grams_saved": {
         "bm": "⚖️ {label}: {g} g disimpan sebagai {kg} kg",
         "tamil": "⚖️ {label}: {g} g = {kg} kg-ஆ சேமிச்சாச்சு",
+        "bengali": "⚖️ {label}: {g} g = {kg} kg save hoyeche (thik ache)",
+        "english": "⚖️ {label}: {g} g saved as {kg} kg",
+        "indonesian": "⚖️ {label}: {g} g disimpan sebagai {kg} kg",
     },
     "grams_yes": {"bm": "✅ Ya, {g} g = {kg} kg", "tamil": "✅ ஆமா, {g} g = {kg} kg"},
     "grams_keep": {"bm": "⚠️ Memang {g} kg (bukan gram)", "tamil": "⚠️ உண்மையா {g} kg (கிராம் இல்ல)"},
