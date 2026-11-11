@@ -75,8 +75,16 @@ class DirectorAskWiring(unittest.TestCase):
         # to the read-only SQL Q&A only when DIRECTOR_QA is on (and, in the
         # group, only for questions).
         self.assertIn("if interesting:\n        await _send_answer(message, question)\n        return", block)
-        self.assertIn("director_sql.enabled() and (private_reviewer or "
-                      "director_sql.looks_like_question(question))", block)
+        self.assertIn("private_reviewer or followup or "
+                      "director_sql.looks_like_question(question)", block)
+        # A follow-up only overrides the item search when the text is not
+        # plainly a new item question, and only for the same conversation.
+        self.assertIn("director_sql.expects_followup(\n        message.chat_id, user_id, question)",
+                      block)
+        self.assertIn('if followup and not parsed.get("confident"):\n        interesting = False',
+                      block)
+        answer = _block(self.src, "async def _answer_sql(")
+        self.assertIn("chat_id=message.chat_id, user_id=user_id", answer)
         runner = _block(self.src, "def _run_readonly_sql(")
         self.assertIn('supabase.rpc(director_sql.RPC, {"q": sql})', runner)
 

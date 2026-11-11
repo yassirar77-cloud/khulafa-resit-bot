@@ -14,10 +14,31 @@ SELECT. The hard rules live HERE, in code, not in the prompt:
     transaction read-only and a 5-second statement timeout;
   * every question, SQL and row count is logged (``director_sql_log``).
 
-The result is a short table plus a one-line English answer the provider
-writes from the rows; a number in that line that is not in the rows drops
-the line. Off unless ``DIRECTOR_QA=on``. Only the director chat and the
-reviewers' private chats ever reach this.
+The result is a short answer the provider writes from the rows, in the
+language the question was asked in, plus a table when there is more than one
+row. A number in that answer that is not in the rows (or in the totals the
+CODE computed from them) drops it. Off unless ``DIRECTOR_QA=on``. Only the
+director chat and the reviewers' private chats ever reach this.
+
+It is meant to feel like asking a person who knows the books:
+
+  * it remembers the conversation — "and last month?", "sek 14 pula?",
+    "ikut outlet" lean on the last few questions of that chat (kept in
+    memory for ``MEMORY_TTL_S``, never written anywhere);
+  * a query the database refuses (a wrong column, a rejected statement) is
+    handed back to the provider once with the error, and the corrected one
+    is run — instead of telling the director to "try asking differently";
+  * when a wrong guess would mislead it asks ONE short question back and
+    reads the next message as the answer to it;
+  * totals, averages, lowest and highest are computed here, in code, and
+    handed to the provider, so "RM 1,240 in total" is allowed and correct;
+  * "hi", "thanks", "what can you do" get one friendly line (no figures);
+  * the SQL stays out of the reply unless ``DIRECTOR_QA_SHOW_SQL=on`` or
+    the director types "sql" after an answer.
+
+None of this loosens a rule above: every statement still goes through
+``sanitize`` and the read-only function, and every answer through the
+number check.
 
 Pure except for the two callables handed in: ``complete`` (the provider)
 and ``run_sql`` (the database). bot.py owns both.
@@ -28,6 +49,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 
 import staff_ai
@@ -41,6 +63,27 @@ MAX_ROWS = 200
 SHOW_ROWS = 15
 MAX_SQL_CHARS = 2000
 TIMEOUT_SECONDS = 5
+
+# The conversation: the last few questions of a chat, so a follow-up can
+# lean on them. In memory only — a restart forgets, which is fine.
+MEMORY_TURNS = 4
+MEMORY_TTL_S = 30 * 60
+# How long after an answer a bare "and sek 14?" still reads as a follow-up
+# in the director GROUP (where everything else is the owners' own chatter).
+FOLLOWUP_S = 5 * 60
+MAX_ANSWER_CHARS = 400
+MAX_ASIDE_CHARS = 240
+
+KIND_ANSWER = "answer"
+KIND_CLARIFY = "clarify"
+KIND_CHAT = "chat"
+KIND_FAILED = "failed"
+
+CAPABILITIES = ("Ask me anything about the bills, prices, orders, POS sales, kitchen usage "
+                "or the staff check-ins — in English or Malay. For example: "
+                "\"sales semalam ikut outlet\", \"which outlet had the most no-replies this "
+                "week\", \"bil Bestari bulan ni\". You can follow up with \"and last month?\".")
+CLARIFY_FALLBACK = "Can you be more specific — which outlet, item or period do you mean?"
 
 # What the provider is allowed to know about. Column lists come from the
 # migrations; keep this in step when a table changes.
@@ -121,23 +164,56 @@ SYSTEM_PROMPT = (
     "- Only the tables and columns listed. Aggregate when the question is a "
     "total or a count; otherwise return the most useful few columns.\n"
     "- Sort sensibly and add LIMIT 200 or less.\n"
-    "- 'this week' = since the last Monday; 'last month' = the previous calendar "
-    "month; 'today' = current_date.\n"
+    "- 'this week' = since the last Monday; 'last week' = the Monday-to-Sunday "
+    "week before this one; 'last month' = the previous calendar month; 'today' "
+    "= current_date.\n"
     "- If the question cannot be answered from these tables, return sql null "
     "with a short reason.\n"
+    "- Questions come in English, Malay or a mix: 'semalam' = yesterday, "
+    "'minggu ni' = this week, 'minggu lepas' = last week, 'bulan ni' = this "
+    "month, 'bulan lepas' = last month, 'berapa' = how many / how much, "
+    "'ikut outlet' = per outlet, 'bil' / 'resit' = receipts, 'jualan' = sales.\n"
+    "- When a bare number would say little ('how are sales today'), return the "
+    "useful breakdown in the same query (per outlet, or per day) instead.\n"
+    "- 'conversation' (when given) lists the earlier questions in this chat, "
+    "oldest first, with the SQL that answered them. When the new question "
+    "leans on them ('and last month?', 'sek 14 pula', 'ikut outlet', 'why?'), "
+    "keep the same subject, filters and period and change only what the new "
+    "question changes. An entry with 'you_asked' means you asked the director "
+    "that question: the new message is the reply — combine it with that "
+    "entry's question. If the new question is unrelated, ignore the conversation.\n"
+    "- 'failed_attempt' (when given) is your earlier SQL for this question and "
+    "the error it got. Write a corrected query: only listed columns, one SELECT.\n"
+    "- Prefer a sensible default (all outlets, the last 30 days) over asking. "
+    "Only when a wrong guess would mislead (no way to tell which item, outlet "
+    "or what is meant at all), return sql null and 'clarify': ONE short "
+    "question in the director's language.\n"
+    "- If the message is a greeting, a thank-you or asks what you can do, "
+    "return sql null and 'chat': one short friendly line in their language, "
+    "with no figures in it.\n"
     f"{OUTLET_NOTE}\n"
     "Tables:\n" + schema_text() + "\n"
     'Reply with JSON only: {"sql": "<one SELECT or null>", "note": "<what it returns, '
-    'one short line>"}'
+    'one short line>", "clarify": "<a question back, or null>", "chat": "<a friendly '
+    'line, or null>"}'
 )
 
 ANSWER_PROMPT = (
     "A restaurant director asked a question; a database query returned the rows "
-    "given (JSON). Write ONE short plain-English sentence answering the question "
-    "from those rows only. Every number you write must appear in the rows exactly "
-    "(no totals or averages you compute yourself, no percentages, no guesses). If "
-    "there are no rows, say that nothing matched.\n"
-    'Reply with JSON only: {"answer": "<one sentence>"}'
+    "given (JSON). Answer the way a sharp operations manager would text the boss: "
+    "the direct answer first, then at most ONE more short sentence with the most "
+    "useful thing in the rows (the highest, the lowest, an odd one out) if there "
+    "is one. No greeting, no filler, no advice.\n"
+    "Write in the language of the question: English for English, casual Malay "
+    "for Malay or a Malay-English mix.\n"
+    "Every number you write must appear exactly in the rows or in 'stats' "
+    "('stats', when given, holds the sum, avg, min and max of each numeric "
+    "column over ALL the returned rows — use those for totals and averages; "
+    "never compute a number yourself). No percentages, no guesses. 'row_count' "
+    "is how many rows came back; you see only the first few. 'conversation' "
+    "(when given) is what was asked just before, for context only. If there are "
+    "no rows, say that nothing matched.\n"
+    'Reply with JSON only: {"answer": "<one or two short sentences>"}'
 )
 
 _COMMENT_LINE = re.compile(r"--[^\n]*")
@@ -208,31 +284,163 @@ def looks_like_question(text) -> bool:
     return bool(re.match(
         r"^(how|what|which|when|where|who|why|show|list|count|total|berapa|bila|mana|"
         r"siapa|apa|kenapa|tunjuk|senarai|berapakah|how many|how much|top|sum|average|"
-        r"avg|compare|give me|any)\b", t))
+        r"avg|compare|give me|any)\b", t)
+        or re.search(r"\b(berapa|how many|how much|macam mana)\b", t))
 
 
-def generate(question: str, complete) -> dict:
-    """Ask the provider for the SELECT. ``{sql, note, raw, error}``."""
+_FOLLOWUP_HEAD = re.compile(
+    r"^(and|dan|how about|what about|macam mana dengan|kalau|same for|sama untuk|why|"
+    r"kenapa|by outlet|ikut outlet|per outlet)\b")
+_FOLLOWUP_TAIL = re.compile(r"\b(pula|pulak|instead)\W*$")
+
+
+def looks_like_followup(text) -> bool:
+    """Short and shaped like a continuation: "and last month?", "sek 14
+    pula", "ikut outlet". Only meaningful right after an answer."""
+    t = str(text or "").strip().lower()
+    if not t or len(t) > 60:
+        return False
+    return bool(_FOLLOWUP_HEAD.match(t) or _FOLLOWUP_TAIL.search(t))
+
+
+# --- the conversation ---------------------------------------------------------
+
+_memory: dict = {}
+_memory_lock = threading.Lock()
+
+
+def forget(chat_id=None) -> None:
+    with _memory_lock:
+        if chat_id is None:
+            _memory.clear()
+        else:
+            _memory.pop(chat_id, None)
+
+
+def recall(chat_id, now: float | None = None) -> list[dict]:
+    """The chat's recent turns, oldest first; expired ones are dropped."""
+    if chat_id is None:
+        return []
+    now = time.time() if now is None else now
+    with _memory_lock:
+        turns = [t for t in _memory.get(chat_id, []) if now - t["at"] <= MEMORY_TTL_S]
+        if turns:
+            _memory[chat_id] = turns
+        else:
+            _memory.pop(chat_id, None)
+        return list(turns)
+
+
+def remember(chat_id, result: dict, *, user_id=None, now: float | None = None) -> None:
+    """Keep an answered question (or a question we asked back). Failures and
+    pleasantries teach the next question nothing, so they are not kept."""
+    if chat_id is None or result.get("kind") not in (KIND_ANSWER, KIND_CLARIFY):
+        return
+    now = time.time() if now is None else now
+    question = str(result.get("question") or "")[:300]
+    with _memory_lock:
+        turns = _memory.setdefault(chat_id, [])
+        if result["kind"] == KIND_CLARIFY and turns and turns[-1]["kind"] == KIND_CLARIFY:
+            # A second question back on the same thread: keep the original ask.
+            question = f"{turns[-1]['question']} — {question}"[:300]
+            turns.pop()
+        turns.append({
+            "at": now, "user_id": user_id, "kind": result["kind"], "question": question,
+            "sql": result.get("sql"), "note": str(result.get("note") or "")[:200],
+            "answer": str(result.get("answer") or "")[:300],
+        })
+        del turns[:-MEMORY_TURNS]
+
+
+def expects_followup(chat_id, user_id, text, now: float | None = None) -> bool:
+    """Is this message the next line of a conversation with the bot? True
+    when the same person was just answered and the text is shaped like a
+    continuation, or when the bot asked them a question and this is the
+    reply. The group's ordinary chatter never qualifies."""
+    now = time.time() if now is None else now
+    turns = recall(chat_id, now)
+    if not turns:
+        return False
+    last = turns[-1]
+    if now - last["at"] > FOLLOWUP_S:
+        return False
+    if last["user_id"] is not None and user_id is not None and last["user_id"] != user_id:
+        return False
+    return last["kind"] == KIND_CLARIFY or looks_like_followup(text)
+
+
+def _conversation(history: list[dict]) -> list[dict]:
+    out = []
+    for t in history or []:
+        if t.get("kind") == KIND_CLARIFY:
+            out.append({"question": t.get("question"), "you_asked": t.get("answer")})
+        else:
+            out.append({"question": t.get("question"), "sql": t.get("sql"),
+                        "answer": t.get("answer")})
+    return out
+
+
+_SHOW_SQL_ASK = re.compile(r"^(show |tunjuk |the )?(sql|query)\W*$", re.IGNORECASE)
+
+
+def show_sql() -> bool:
+    return (os.environ.get("DIRECTOR_QA_SHOW_SQL") or "").strip().lower() in (
+        "on", "1", "true", "yes")
+
+
+def _aside(text, question: str, fallback: str) -> str:
+    """A line the provider wrote that is not backed by rows (a question back,
+    a pleasantry): short, no money, and no number the director did not type."""
+    line = " ".join(str(text or "").split())
+    if not line:
+        return ""
+    asked = {staff_chat._norm_num(n) for n in _NUM.findall(str(question or ""))}
+    if (len(line) > MAX_ASIDE_CHARS or staff_chat._MONEY.search(line)
+            or any(staff_chat._norm_num(n) not in asked for n in _NUM.findall(line))):
+        return fallback
+    return line
+
+
+def generate(question: str, complete, history: list[dict] | None = None,
+             failed: dict | None = None) -> dict:
+    """Ask the provider for the SELECT. ``{sql, note, raw, error, clarify,
+    chat}``. ``history`` is the chat's recent turns (``recall``); ``failed``
+    is ``{sql, error}`` from an attempt the guard or the database refused."""
+    payload: dict = {"question": question}
+    if history:
+        payload["conversation"] = _conversation(history)
+    if failed:
+        payload["failed_attempt"] = failed
     try:
-        result = complete(SYSTEM_PROMPT, json.dumps({"question": question}, ensure_ascii=False))
+        result = complete(SYSTEM_PROMPT, json.dumps(payload, ensure_ascii=False, default=str))
     except Exception:
         logger.exception("director sql: provider failed")
         result = None
+    out = {"sql": None, "note": "", "raw": None, "error": "", "clarify": "", "chat": ""}
     if not result:
-        return {"sql": None, "note": "", "raw": None, "error": "ai unavailable"}
+        out["error"] = "ai unavailable"
+        return out
     data = result.get("data") or {}
+    out["note"] = str(data.get("note") or "")
     raw = data.get("sql")
     if not raw:
-        return {"sql": None, "note": str(data.get("note") or ""), "raw": None,
-                "error": str(data.get("note") or data.get("reason") or "cannot answer from the tables")}
+        out["clarify"] = _aside(data.get("clarify"), question, CLARIFY_FALLBACK)
+        if not out["clarify"]:
+            out["chat"] = _aside(data.get("chat"), question, CAPABILITIES)
+        out["error"] = str(data.get("note") or data.get("reason")
+                           or "cannot answer from the tables")
+        return out
+    out["raw"] = str(raw)
     safe, reason = sanitize(raw)
     if safe is None:
-        return {"sql": None, "note": str(data.get("note") or ""), "raw": str(raw),
-                "error": f"rejected: {reason}"}
-    return {"sql": safe, "note": str(data.get("note") or ""), "raw": str(raw), "error": ""}
+        out["error"] = f"rejected: {reason}"
+        return out
+    out["sql"] = safe
+    return out
 
 
 _NUM = re.compile(r"\d+(?:[.,]\d+)?")
+_THOUSANDS = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
 
 
 def _numbers_in_rows(rows: list[dict]) -> set[str]:
@@ -252,13 +460,41 @@ def _numbers_in_rows(rows: list[dict]) -> set[str]:
     return out
 
 
-def check_answer(answer: str, rows: list[dict], question: str = "") -> list[str]:
-    """Numbers in the sentence that are not in the rows, the row count or the
-    question itself ("Sek 7", "last 30 days")."""
+def column_stats(rows: list[dict]) -> dict:
+    """``{column: {sum, avg, min, max}}`` for the numeric columns, computed
+    here so the provider never does arithmetic. Empty for a single row, and
+    for a result that hit ``MAX_ROWS`` (it may be cut off — a total of part
+    of the data would be a wrong total). Id columns are skipped."""
+    rows = [r for r in rows or [] if isinstance(r, dict)]
+    if not (2 <= len(rows) < MAX_ROWS):
+        return {}
+    stats: dict = {}
+    for col in rows[0].keys():
+        name = str(col).lower()
+        if name == "id" or name.endswith("_id"):
+            continue
+        values = [r.get(col) for r in rows if r.get(col) is not None]
+        if len(values) < 2 or not all(
+                isinstance(v, (int, float)) and not isinstance(v, bool) for v in values):
+            continue
+        total = float(sum(values))
+        stats[str(col)] = {"sum": round(total, 2), "avg": round(total / len(values), 2),
+                           "min": min(values), "max": max(values)}
+        if len(stats) >= 6:
+            break
+    return stats
+
+
+def check_answer(answer: str, rows: list[dict], question: str = "",
+                 stats: dict | None = None) -> list[str]:
+    """Numbers in the sentence that are not in the rows, the row count, the
+    code-computed ``stats`` or the question itself ("Sek 7", "last 30 days")."""
     allowed = _numbers_in_rows(rows) | {str(len(rows or []))}
-    allowed |= {staff_chat._norm_num(n) for n in _NUM.findall(str(question or ""))}
+    allowed |= _numbers_in_rows(list((stats or {}).values()))
+    allowed |= {staff_chat._norm_num(n) for n in _NUM.findall(_THOUSANDS.sub("", str(question or "")))}
     bad = []
-    for n in _NUM.findall(str(answer or "")):
+    # "12,250.75" is one number, not "12,250" and "75".
+    for n in _NUM.findall(_THOUSANDS.sub("", str(answer or ""))):
         norm = staff_chat._norm_num(n)
         try:
             alt = {norm, f"{float(n.replace(',', '.')):.2f}", f"{round(float(n.replace(',', '.'))):g}"}
@@ -269,23 +505,29 @@ def check_answer(answer: str, rows: list[dict], question: str = "") -> list[str]
     return bad
 
 
-def answer_line(question: str, rows: list[dict], complete) -> tuple[str, list[str]]:
-    """One English sentence from the rows, or a plain count when the
+def answer_line(question: str, rows: list[dict], complete,
+                history: list[dict] | None = None) -> tuple[str, list[str]]:
+    """The short answer written from the rows, or a plain count when the
     provider fails or invents a number."""
     plain = ("Nothing matched." if not rows else
              f"{len(rows)} row{'s' if len(rows) != 1 else ''} matched.")
+    stats = column_stats(rows)
+    payload: dict = {"question": question, "rows": rows[:SHOW_ROWS], "row_count": len(rows)}
+    if stats:
+        payload["stats"] = stats
+    if history:
+        payload["conversation"] = [{"question": t.get("question"), "answer": t.get("answer")}
+                                   for t in history[-2:]]
     try:
-        result = complete(ANSWER_PROMPT, json.dumps(
-            {"question": question, "rows": rows[:SHOW_ROWS], "row_count": len(rows)},
-            ensure_ascii=False, default=str))
+        result = complete(ANSWER_PROMPT, json.dumps(payload, ensure_ascii=False, default=str))
     except Exception:
         logger.exception("director sql: answer failed")
         result = None
-    text = str(((result or {}).get("data") or {}).get("answer") or "").strip()
+    text = " ".join(str(((result or {}).get("data") or {}).get("answer") or "").split())
     if not text:
         return plain, ["ai unavailable"]
-    bad = check_answer(text, rows, question)
-    if bad or len(text) > 300 or staff_chat._MONEY.search(text.replace("RM", "")):
+    bad = check_answer(text, rows, question, stats)
+    if bad or len(text) > MAX_ANSWER_CHARS or staff_chat._MONEY.search(text.replace("RM", "")):
         return plain, [f"number {n} not in rows" for n in bad] or ["answer rejected"]
     return text, []
 
@@ -314,39 +556,100 @@ def format_rows(rows: list[dict], limit: int = SHOW_ROWS) -> str:
     return "\n".join(lines)
 
 
-def run(question: str, *, complete=None, run_sql) -> dict:
-    """The whole answer: ``{text, sql, row_count, ok, error, ms, answer}``.
-    ``run_sql(sql) -> list[dict]`` is the read-only executor. Never raises."""
+def _fetch(run_sql, sql: str) -> list[dict]:
+    rows = run_sql(sql) or []
+    if isinstance(rows, dict):
+        rows = [rows]
+    return [r for r in rows if isinstance(r, dict)][:MAX_ROWS]
+
+
+def run(question: str, *, complete=None, run_sql, chat_id=None, user_id=None,
+        now: float | None = None) -> dict:
+    """The whole answer: ``{text, kind, sql, row_count, ok, error, ms, answer,
+    retried}``. ``run_sql(sql) -> list[dict]`` is the read-only executor.
+    With a ``chat_id`` the chat's recent questions are used as context and
+    this one is remembered. Never raises."""
     complete = complete or staff_ai.complete_json
     started = time.monotonic()
-    gen = generate(question, complete)
-    out = {"question": question, "sql": gen["sql"], "raw_sql": gen["raw"], "row_count": 0,
-           "ok": False, "error": gen["error"], "answer": "", "ms": 0, "text": ""}
-    if not gen["sql"]:
-        out["text"] = (f"I couldn't turn that into a safe query ({gen['error']})."
-                       if gen["error"] else "I couldn't turn that into a query.")
+    history = recall(chat_id, now)
+    out = {"question": question, "sql": None, "raw_sql": None, "row_count": 0, "ok": False,
+           "error": "", "answer": "", "note": "", "ms": 0, "text": "", "kind": KIND_FAILED,
+           "retried": False}
+
+    def done() -> dict:
         out["ms"] = int((time.monotonic() - started) * 1000)
+        try:
+            remember(chat_id, out, user_id=user_id, now=now)
+        except Exception:
+            logger.exception("director sql: remember failed")
         return out
-    try:
-        rows = run_sql(gen["sql"]) or []
-        if isinstance(rows, dict):
-            rows = [rows]
-        rows = [r for r in rows if isinstance(r, dict)][:MAX_ROWS]
-    except Exception as exc:
-        logger.exception("director sql: query failed")
-        out.update(error=f"query failed: {str(exc)[:160]}",
-                   text="The query failed (a timeout or a bad column). Try asking differently.",
-                   ms=int((time.monotonic() - started) * 1000))
-        return out
-    answer, problems = answer_line(question, rows, complete)
-    table = format_rows(rows)
+
+    # "sql" after an answer shows the query behind it — no provider call.
+    if _SHOW_SQL_ASK.match(question.strip()):
+        last = next((t for t in reversed(history) if t.get("sql")), None)
+        out.update(kind=KIND_CHAT, error=KIND_CHAT,
+                   text=(f"SQL: {last['sql']}" if last else "There is no query to show yet."))
+        return done()
+
+    gen = generate(question, complete, history)
+    rows, db_error, tried = None, "", None
+    for attempt in (1, 2):
+        if gen["sql"]:
+            if gen["sql"] == tried:
+                break                       # the same statement would fail the same way
+            try:
+                rows = _fetch(run_sql, gen["sql"])
+                break
+            except Exception as exc:
+                logger.warning("director sql: query failed (attempt %d): %s", attempt, exc)
+                db_error = f"query failed: {str(exc)[:160]}"
+                tried = gen["sql"]
+                failed = {"sql": gen["sql"], "error": str(exc)[:300]}
+        elif gen["error"].startswith("rejected:") and gen["raw"]:
+            failed = {"sql": gen["raw"][:MAX_SQL_CHARS], "error": gen["error"]}
+        else:
+            break
+        if attempt == 2:
+            break
+        # One repair: hand the provider its statement and what went wrong.
+        gen = generate(question, complete, history, failed)
+        out["retried"] = True
+
+    out.update(sql=gen["sql"], raw_sql=gen["raw"], note=gen["note"])
+    if rows is None:
+        if not gen["sql"] and gen["clarify"]:
+            out.update(kind=KIND_CLARIFY, error=KIND_CLARIFY, answer=gen["clarify"],
+                       text=gen["clarify"])
+        elif not gen["sql"] and gen["chat"]:
+            out.update(kind=KIND_CHAT, error=KIND_CHAT, answer=gen["chat"], text=gen["chat"])
+        elif db_error:
+            out.update(error=db_error, text=(
+                "I tried that two ways and the query failed both times (a timeout or data "
+                "I don't have). Can you narrow it — one outlet, or a shorter period?"))
+        elif gen["error"] == "ai unavailable":
+            out.update(error=gen["error"],
+                       text="I can't reach the AI service right now. Try again in a minute.")
+        elif gen["error"].startswith("rejected:"):
+            out.update(error=gen["error"],
+                       text=f"I couldn't turn that into a safe query ({gen['error']}).")
+        else:
+            out.update(error=gen["error"], text=(
+                f"I can't answer that from the data I have ({gen['error']})."
+                if gen["error"] else "I couldn't turn that into a query."))
+        return done()
+
+    answer, problems = answer_line(question, rows, complete, history)
     parts = [answer]
-    if table:
-        parts.append(table)
-    parts.append(f"SQL: {gen['sql'][:300]}")
-    out.update(ok=True, row_count=len(rows), answer=answer, problems=problems,
-               text="\n\n".join(parts), ms=int((time.monotonic() - started) * 1000))
-    return out
+    # One row the sentence already covers needs no table under it.
+    if rows and (len(rows) > 1 or problems):
+        parts.append(format_rows(rows))
+    if not rows and gen["note"]:
+        parts.append(f"(I looked for: {gen['note'][:200]})")
+    if show_sql():
+        parts.append(f"SQL: {gen['sql'][:300]}")
+    out.update(ok=True, kind=KIND_ANSWER, error="", row_count=len(rows), answer=answer,
+               problems=problems, text="\n\n".join(parts))
+    return done()
 
 
 def log_row(result: dict, *, chat_id, user_id) -> dict:
