@@ -5210,14 +5210,24 @@ async def handle_ask_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
     else:
         interesting = bool(parsed.get("confident"))
+    # The next line of a conversation with the Q&A ("and last month?", or
+    # the reply to a question the bot asked back) belongs to that
+    # conversation, not to the item search — unless it is plainly a new
+    # item question.
+    user_id = _command_owner_id(update)
+    followup = director_sql.enabled() and director_sql.expects_followup(
+        message.chat_id, user_id, question)
+    if followup and not parsed.get("confident"):
+        interesting = False
     if interesting:
         await _send_answer(message, question)
         return
     # Anything else the item search can't take becomes one read-only SELECT
     # (director_sql) — when DIRECTOR_QA is on. In the group only questions
-    # are answered, so the owners' chatter is left alone.
-    if director_sql.enabled() and (private_reviewer or director_sql.looks_like_question(question)):
-        await _answer_sql(message, question, _command_owner_id(update))
+    # and follow-ups are answered, so the owners' chatter is left alone.
+    if director_sql.enabled() and (
+            private_reviewer or followup or director_sql.looks_like_question(question)):
+        await _answer_sql(message, question, user_id)
 
 
 def _run_readonly_sql(sql: str) -> list[dict]:
@@ -5228,8 +5238,10 @@ def _run_readonly_sql(sql: str) -> list[dict]:
 
 
 async def _answer_sql(message, question: str, user_id) -> None:
+    await human_touch.show_typing(message.get_bot(), message.chat_id)
     result = await asyncio.to_thread(
-        director_sql.run, question, run_sql=_run_readonly_sql)
+        director_sql.run, question, run_sql=_run_readonly_sql,
+        chat_id=message.chat_id, user_id=user_id)
     try:
         await asyncio.to_thread(
             lambda: supabase.table(director_sql.LOG_TABLE)
@@ -5237,8 +5249,9 @@ async def _answer_sql(message, question: str, user_id) -> None:
             .execute())
     except Exception:
         logger.exception("director sql: log failed (migrations/0055 applied?)")
-    logger.info("director sql: %s (%d rows, %d ms) %s", "ok" if result["ok"] else "no",
-                result["row_count"], result["ms"], result.get("error") or "")
+    logger.info("director sql: %s (%d rows, %d ms%s) %s", result.get("kind") or "no",
+                result["row_count"], result["ms"],
+                ", repaired" if result.get("retried") else "", result.get("error") or "")
     await _reply_chunked(message, result["text"])
 
 
