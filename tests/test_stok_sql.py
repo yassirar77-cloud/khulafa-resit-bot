@@ -19,13 +19,7 @@ import uuid
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DSN = os.environ.get("STOK_TEST_PG")
 
-SETUP_FILES = [
-    "tests/sql/supabase_stub.sql",
-    "migrations/0032_kitchen_daily_usage.sql",
-    "migrations/0033_kitchen_night_phase.sql",
-    "migrations/0037_kitchen_session_status_submitting.sql",
-    "migrations/0069_kitchen_flag_bad_data.sql",
-]
+SETUP_FILES = ["tests/sql/supabase_stub.sql"]
 
 
 def _psql(dsn, *args, sql=None):
@@ -47,10 +41,6 @@ class StokDapurSqlTest(unittest.TestCase):
         for f in SETUP_FILES:
             res = _psql(cls.dsn, "-f", f)
             assert res.returncode == 0, f"{f}: {res.stderr}"
-        res = _psql(cls.dsn, "-c",
-                    "ALTER TABLE kitchen_daily_usage ENABLE ROW LEVEL SECURITY;"
-                    "ALTER TABLE kitchen_log_session ENABLE ROW LEVEL SECURITY;")
-        assert res.returncode == 0, res.stderr
 
     @classmethod
     def tearDownClass(cls):

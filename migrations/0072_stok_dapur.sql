@@ -1,24 +1,34 @@
--- 0072: Khulafa Stok Dapur — kitchen stock PWA + office dashboard.
+-- 0072: Khulafa Stok Dapur — RAW STOCK kitchen app + office dashboard.
 --
--- Shares this project with the bot. Design rules (docs/stok_dapur.md):
+-- Scope (owner, 11 Nov 2026): raw stock ONLY, 8 categories (Barang Balaji,
+-- Masala, Rempah, Beras, Sayur, Ayam, Kambing, Daging). Per item the kitchen
+-- records Terima (pre-filled from the receipts the bot already OCR'd) ->
+-- Guna (daily) -> Baki (night count). Buang / Minta Stok are Phase 2 (the
+-- kinds exist here, the app does not show them yet).
+--
+-- Lauk / cooked keying (6PM / 12AM / 2AM, "Rekod siap", Guna vs POS) stays
+-- 100% in the Telegram bot. Nothing here reads or writes kitchen_daily_usage
+-- or kitchen_log_session.
+--
+-- Security:
 --   * Kitchen devices sign in with staff photo + 4-digit PIN through the
 --     stok-login Edge Function, which returns a normal Supabase session whose
 --     app_metadata carries {stok_role:'kitchen', stok_outlet, stok_staff}.
---     RLS keys every kitchen policy on those claims: a device only ever reads
---     or inserts ITS OWN outlet's stok_* rows. Kitchen roles get no grant on
---     receipts / sales_* / kitchen_daily_usage at all (the three SECURITY
---     DEFINER helpers below return quantities only — never RM, never POS).
---   * Office users sign in by email magic link; stok_is_office() = their
+--     RLS keys every kitchen policy on those claims: a device only reads or
+--     inserts ITS OWN outlet's stok_* rows. Kitchen sessions get no grant on
+--     receipts / sales_* at all; stok_terima_prefill (SECURITY DEFINER)
+--     returns supplier name + quantities only — never RM, never totals.
+--   * Office users sign in by e-mail magic link; stok_is_office() = their
 --     e-mail is in stok_office_users.
---   * The 6PM / 12AM / 2AM Guna phases are NOT written to kitchen_daily_usage
---     here. The bot's stok_bridge job promotes each app batch through the SAME
---     kitchen_usage.finalize_submission the Telegram Hantar button uses, so
---     the 2AM "Rekod siap" message, the reminders and the 9AM/11AM/2PM
---     Guna-vs-POS comparison keep working unchanged.
---   * Business date = the kitchen fold already used by kitchen_daily_usage:
---     anything before 12:00 Asia/Kuala_Lumpur belongs to the previous day
---     (kitchen_usage.business_date_for). 18:00, 00:00 and 02:00 land on the
---     same day under the old 17:00 rule too; only 12:00-17:00 differs.
+--   * PINs: bcrypt (pgcrypto), never granted to any client; 5 wrong = 15 min lock.
+--
+-- Business date = the kitchen fold already used by kitchen_daily_usage:
+-- before 12:00 Asia/Kuala_Lumpur belongs to the previous day
+-- (kitchen_usage.business_date_for), so a 2AM night count lands on the
+-- evening's day.
+--
+-- Items are seeded separately (0073_stok_items_seed.sql) once the owner has
+-- approved the list built from real receipts (docs/stok_dapur_item_proposal.md).
 --
 -- Idempotent: safe to re-run.
 
@@ -53,32 +63,45 @@ CREATE TABLE IF NOT EXISTS public.stok_outlets (
     sort             int NOT NULL DEFAULT 100
 );
 
-CREATE TABLE IF NOT EXISTS public.stok_items (
-    code            text PRIMARY KEY CHECK (code ~ '^[a-z0-9_]{2,40}$'),
-    name_bm         text NOT NULL,
-    name_ta         text,
-    name_bn         text,
-    icon            text,                        -- emoji fallback when no photo
-    photo_url       text,
-    category        text NOT NULL DEFAULT 'lain',
-    unit            text NOT NULL CHECK (unit IN ('pcs','kg','liter','tin','botol','pek','biji','ikat','karung','kotak','beg','papan')),
-    decimals        int  NOT NULL DEFAULT 0 CHECK (decimals BETWEEN 0 AND 2),
-    -- lauk (cooked dish) items are the Telegram keypad items: code = kitchen_daily_usage.item_code
-    kdu_item_code   text UNIQUE,
-    raw_item_code   text REFERENCES public.stok_items(code),   -- lauk -> raw stock item it uses
-    raw_factor      numeric NOT NULL DEFAULT 1,
-    portion_grams   numeric,                     -- wastage v12 portion rule (reference)
-    match_keywords  text[] NOT NULL DEFAULT '{}', -- upper-case receipt line keywords
-    exclude_keywords text[] NOT NULL DEFAULT '{}',
-    actions         text[] NOT NULL DEFAULT '{terima,guna,baki,buang,minta}',
-    outlets         text[],                      -- NULL = every outlet
-    sort            int NOT NULL DEFAULT 100,
-    active          boolean NOT NULL DEFAULT true,
-    created_at      timestamptz NOT NULL DEFAULT now(),
-    updated_at      timestamptz NOT NULL DEFAULT now()
+-- The 8 fixed categories (the big tiles on the kitchen home screen).
+CREATE TABLE IF NOT EXISTS public.stok_categories (
+    code     text PRIMARY KEY,
+    name_bm  text NOT NULL,
+    name_ta  text,
+    name_bn  text,
+    icon     text,
+    sort     int NOT NULL DEFAULT 100
 );
 
--- pack -> unit (e.g. 1 beg ayam = 80 pcs). Shown as quick-add chips on the keypad.
+CREATE TABLE IF NOT EXISTS public.stok_items (
+    code              text PRIMARY KEY CHECK (code ~ '^[a-z0-9_]{2,40}$'),
+    category          text NOT NULL REFERENCES public.stok_categories(code),
+    name_bm           text NOT NULL,
+    name_ta           text,
+    name_bn           text,
+    icon              text,                      -- emoji fallback when no photo
+    photo_url         text,
+    unit              text NOT NULL CHECK (unit IN ('kg','pcs','beg','karung','pek','tin','botol','kotak','ikat','biji')),
+    decimals          int  NOT NULL DEFAULT 0 CHECK (decimals BETWEEN 0 AND 2),
+    canonical_item    text,                      -- data/canonical_items_v2.json key
+    -- Terima pre-fill: a receipt line becomes this item when the receipt's
+    -- merchant matches one of merchant_patterns (ILIKE; no % = exact match;
+    -- empty = any supplier) AND the line contains one of match_keywords
+    -- (longest keyword wins) AND none of exclude_keywords.
+    merchant_patterns text[] NOT NULL DEFAULT '{}',
+    match_keywords    text[] NOT NULL DEFAULT '{}',
+    exclude_keywords  text[] NOT NULL DEFAULT '{}',
+    portion_grams     numeric,                   -- wastage v12 portion rule (reference only)
+    actions           text[] NOT NULL DEFAULT '{terima,guna,baki}',
+    outlets           text[],                    -- NULL = every outlet
+    sort              int NOT NULL DEFAULT 100,
+    active            boolean NOT NULL DEFAULT true,
+    created_at        timestamptz NOT NULL DEFAULT now(),
+    updated_at        timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS stok_items_category_idx ON public.stok_items (category);
+
+-- pack -> unit quick-add chips on the keypad (e.g. 1 beg = 80 pcs).
 CREATE TABLE IF NOT EXISTS public.stok_uom (
     id              bigserial PRIMARY KEY,
     item_code       text NOT NULL REFERENCES public.stok_items(code) ON DELETE CASCADE,
@@ -124,30 +147,21 @@ CREATE TABLE IF NOT EXISTS public.stok_office_users (
 );
 
 -- One submission from the app (one ✅ press). id is generated on the phone so
--- an offline queue can retry without ever double-saving.
+-- the offline queue can retry without ever double-saving.
 CREATE TABLE IF NOT EXISTS public.stok_batches (
     id             uuid PRIMARY KEY,
     outlet_code    text NOT NULL REFERENCES public.stok_outlets(outlet_code),
     business_date  date NOT NULL,
     kind           text NOT NULL CHECK (kind IN ('terima','guna','baki','buang','minta')),
-    phase          text CHECK (phase IN ('cooked','cooked_night','left','lain')),
     supplier       text,
     receipt_id     bigint,
     staff_id       uuid NOT NULL REFERENCES public.stok_staff(id),
     device_id      uuid REFERENCES public.stok_devices(device_id) ON DELETE SET NULL,
-    captured_at    timestamptz NOT NULL,
-    created_at     timestamptz NOT NULL DEFAULT now(),
-    item_count     int NOT NULL DEFAULT 0,
-    -- bot bridge: promotion into kitchen_daily_usage (guna 6PM/12AM/2AM only)
-    promote_status text NOT NULL DEFAULT 'skip'
-                   CHECK (promote_status IN ('pending','ok','duplicate','error','skip')),
-    promoted_at    timestamptz,
-    promote_error  text,
-    notified_at    timestamptz,
-    CONSTRAINT stok_batches_phase_ck CHECK ((kind = 'guna') = (phase IS NOT NULL))
+    captured_at    timestamptz NOT NULL,          -- when the staff pressed ✅ (phone clock, clamped)
+    created_at     timestamptz NOT NULL DEFAULT now(), -- when it reached the server
+    item_count     int NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS stok_batches_outlet_date_idx ON public.stok_batches (outlet_code, business_date);
-CREATE INDEX IF NOT EXISTS stok_batches_pending_idx ON public.stok_batches (created_at) WHERE promote_status = 'pending';
 CREATE INDEX IF NOT EXISTS stok_batches_staff_idx ON public.stok_batches (staff_id);
 CREATE INDEX IF NOT EXISTS stok_batches_device_idx ON public.stok_batches (device_id);
 CREATE INDEX IF NOT EXISTS stok_batches_receipt_idx ON public.stok_batches (receipt_id) WHERE receipt_id IS NOT NULL;
@@ -158,13 +172,12 @@ CREATE TABLE IF NOT EXISTS public.stok_entries (
     outlet_code   text NOT NULL REFERENCES public.stok_outlets(outlet_code),
     business_date date NOT NULL,
     kind          text NOT NULL,
-    phase         text,
     item_code     text NOT NULL REFERENCES public.stok_items(code),
     qty           numeric NOT NULL CHECK (qty >= 0 AND qty < 100000),
     unit          text NOT NULL,
     prefill_qty   numeric,                        -- what the OCR'd receipt said (terima)
-    reason        text CHECK (reason IN ('rosak','basi','jatuh','lebih_masak')),
-    photo_path    text,
+    reason        text CHECK (reason IN ('rosak','basi','jatuh','lebih_masak')),  -- buang (Phase 2)
+    photo_path    text,                           -- buang (Phase 2)
     staff_id      uuid NOT NULL REFERENCES public.stok_staff(id),
     created_at    timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT stok_entries_batch_item_unique UNIQUE (batch_id, item_code)
@@ -173,7 +186,7 @@ CREATE INDEX IF NOT EXISTS stok_entries_outlet_date_idx ON public.stok_entries (
 CREATE INDEX IF NOT EXISTS stok_entries_item_idx ON public.stok_entries (item_code);
 CREATE INDEX IF NOT EXISTS stok_entries_staff_idx ON public.stok_entries (staff_id);
 
--- one row per alert sent (the 02:30 "tak rekod" alert de-dupes on this)
+-- one row per alert sent (the "tak rekod" alert de-dupes on this)
 CREATE TABLE IF NOT EXISTS public.stok_alerts_log (
     id            bigserial PRIMARY KEY,
     outlet_code   text NOT NULL,
@@ -197,6 +210,7 @@ $$;
 -- ------------------------------------------------------------------ RLS --
 
 ALTER TABLE public.stok_outlets      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.stok_categories   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.stok_items        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.stok_uom          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.stok_staff        ENABLE ROW LEVEL SECURITY;
@@ -216,13 +230,15 @@ BEGIN
     END LOOP;
 END $$;
 
--- outlets: everyone signed in reads; office edits
+-- outlets: office reads all + edits; kitchen reads its own
 CREATE POLICY stok_outlets_read ON public.stok_outlets FOR SELECT TO authenticated
     USING ((SELECT public.stok_is_office()) OR outlet_code = (SELECT public.stok_jwt_outlet()));
 CREATE POLICY stok_outlets_office_write ON public.stok_outlets FOR UPDATE TO authenticated
     USING ((SELECT public.stok_is_office())) WITH CHECK ((SELECT public.stok_is_office()));
 
--- items / uom: kitchen reads (catalogue), office maintains (admin screen)
+-- catalogue: kitchen reads, office maintains (admin screen)
+CREATE POLICY stok_categories_read ON public.stok_categories FOR SELECT TO authenticated
+    USING ((SELECT public.stok_is_office()) OR (SELECT public.stok_jwt_outlet()) IS NOT NULL);
 CREATE POLICY stok_items_read ON public.stok_items FOR SELECT TO authenticated
     USING ((SELECT public.stok_is_office()) OR (SELECT public.stok_jwt_outlet()) IS NOT NULL);
 CREATE POLICY stok_items_office_ins ON public.stok_items FOR INSERT TO authenticated
@@ -246,8 +262,8 @@ CREATE POLICY stok_staff_office_ins ON public.stok_staff FOR INSERT TO authentic
 CREATE POLICY stok_staff_office_upd ON public.stok_staff FOR UPDATE TO authenticated
     USING ((SELECT public.stok_is_office())) WITH CHECK ((SELECT public.stok_is_office()));
 
-CREATE POLICY stok_devices_office_read ON public.stok_devices FOR SELECT TO authenticated
-    USING ((SELECT public.stok_is_office()));
+CREATE POLICY stok_devices_read ON public.stok_devices FOR SELECT TO authenticated
+    USING ((SELECT public.stok_is_office()) OR outlet_code = (SELECT public.stok_jwt_outlet()));
 CREATE POLICY stok_devices_office_upd ON public.stok_devices FOR UPDATE TO authenticated
     USING ((SELECT public.stok_is_office())) WITH CHECK ((SELECT public.stok_is_office()));
 
@@ -255,7 +271,7 @@ CREATE POLICY stok_office_users_read ON public.stok_office_users FOR SELECT TO a
     USING ((SELECT public.stok_is_office()));
 
 -- batches / entries: kitchen inserts + reads ONLY its own outlet (and only as
--- itself); office reads everything.
+-- itself); office reads everything; nobody updates or deletes from a client.
 CREATE POLICY stok_batches_read ON public.stok_batches FOR SELECT TO authenticated
     USING ((SELECT public.stok_is_office()) OR outlet_code = (SELECT public.stok_jwt_outlet()));
 CREATE POLICY stok_batches_kitchen_ins ON public.stok_batches FOR INSERT TO authenticated
@@ -270,19 +286,15 @@ CREATE POLICY stok_entries_kitchen_ins ON public.stok_entries FOR INSERT TO auth
 CREATE POLICY stok_alerts_log_office_read ON public.stok_alerts_log FOR SELECT TO authenticated
     USING ((SELECT public.stok_is_office()));
 
--- The office dashboard shows the Telegram/app lauk record next to the stock
--- grid; office only (kitchen must never see pos_qty).
-DROP POLICY IF EXISTS kitchen_daily_usage_stok_office_read ON public.kitchen_daily_usage;
-CREATE POLICY kitchen_daily_usage_stok_office_read ON public.kitchen_daily_usage
-    FOR SELECT TO authenticated USING ((SELECT public.stok_is_office()));
-
 -- ---------------------------------------------------------------- grants --
 -- 0063 revoked Supabase's default grants: open exactly what the app needs.
 
-REVOKE ALL ON public.stok_outlets, public.stok_items, public.stok_uom, public.stok_staff,
-              public.stok_devices, public.stok_office_users, public.stok_batches,
-              public.stok_entries, public.stok_alerts_log FROM anon, authenticated;
+REVOKE ALL ON public.stok_outlets, public.stok_categories, public.stok_items, public.stok_uom,
+              public.stok_staff, public.stok_devices, public.stok_office_users,
+              public.stok_batches, public.stok_entries, public.stok_alerts_log
+    FROM anon, authenticated;
 GRANT SELECT, UPDATE ON public.stok_outlets TO authenticated;
+GRANT SELECT ON public.stok_categories TO authenticated;
 GRANT SELECT, INSERT, UPDATE ON public.stok_items TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.stok_uom TO authenticated;
 GRANT USAGE ON SEQUENCE public.stok_uom_id_seq TO authenticated;
@@ -294,63 +306,17 @@ GRANT UPDATE (outlet_code, display_name, photo_url, active) ON public.stok_staff
 GRANT SELECT, UPDATE (label) ON public.stok_devices TO authenticated;
 GRANT SELECT ON public.stok_office_users TO authenticated;
 GRANT SELECT ON public.stok_batches TO authenticated;
-GRANT INSERT (id, outlet_code, business_date, kind, phase, supplier, receipt_id, staff_id,
-              device_id, captured_at, item_count, promote_status)
+GRANT INSERT (id, outlet_code, business_date, kind, supplier, receipt_id, staff_id,
+              device_id, captured_at, item_count)
     ON public.stok_batches TO authenticated;
 GRANT SELECT ON public.stok_entries TO authenticated;
-GRANT INSERT (batch_id, outlet_code, business_date, kind, phase, item_code, qty, unit,
+GRANT INSERT (batch_id, outlet_code, business_date, kind, item_code, qty, unit,
               prefill_qty, reason, photo_path, staff_id)
     ON public.stok_entries TO authenticated;
 GRANT USAGE ON SEQUENCE public.stok_entries_id_seq TO authenticated;
 GRANT SELECT ON public.stok_alerts_log TO authenticated;
-GRANT SELECT ON public.kitchen_daily_usage TO authenticated;   -- rows gated by the office-only policy
 
--- ------------------------------------------------- SECURITY DEFINER helpers --
--- Each one checks the caller's claims itself and returns quantities only.
-
--- Which Guna phases are already done today (Telegram OR app) — the app greys
--- out a phase that's been submitted, exactly like the bot refuses a 2nd Hantar.
-CREATE OR REPLACE FUNCTION public.stok_phase_status(p_date date DEFAULT NULL)
-RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = '' AS $$
-DECLARE
-    v_outlet text := public.stok_jwt_outlet();
-    v_date   date := coalesce(p_date, public.stok_business_date(now()));
-    v_out    jsonb := '{}'::jsonb;
-    v_phase  text;
-BEGIN
-    IF v_outlet IS NULL THEN
-        RAISE EXCEPTION 'kitchen session required' USING ERRCODE = '42501';
-    END IF;
-    FOREACH v_phase IN ARRAY ARRAY['cooked','cooked_night','left'] LOOP
-        v_out := v_out || jsonb_build_object(v_phase,
-            EXISTS (SELECT 1 FROM public.kitchen_log_session s
-                    WHERE s.outlet_code = v_outlet AND s.business_date = v_date
-                      AND s.phase = v_phase AND s.status IN ('submitted','submitting'))
-            OR EXISTS (SELECT 1 FROM public.stok_batches b
-                    WHERE b.outlet_code = v_outlet AND b.business_date = v_date
-                      AND b.kind = 'guna' AND b.phase = v_phase
-                      AND b.promote_status IN ('pending','ok')));
-    END LOOP;
-    RETURN jsonb_build_object('business_date', v_date, 'phases', v_out);
-END $$;
-
--- Most leftover the 2AM Baki-masak screen may accept per lauk item: today's
--- cooked + yesterday's leftover (mirrors kitchen_usage.left_limits). No POS.
-CREATE OR REPLACE FUNCTION public.stok_left_limits(p_date date DEFAULT NULL)
-RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
-    WITH d AS (SELECT public.stok_jwt_outlet() AS outlet,
-                      coalesce(p_date, public.stok_business_date(now())) AS bd)
-    SELECT coalesce(jsonb_object_agg(i.code, jsonb_build_object(
-               'cooked', t.cooked_qty,
-               'carry', greatest(coalesce(p.left_qty, 0), 0))), '{}'::jsonb)
-    FROM d
-    JOIN public.kitchen_daily_usage t ON t.outlet_code = d.outlet AND t.business_date = d.bd
-    JOIN public.stok_items i ON i.kdu_item_code = t.item_code
-    LEFT JOIN public.kitchen_daily_usage p
-           ON p.outlet_code = d.outlet AND p.business_date = d.bd - 1 AND p.item_code = t.item_code
-    WHERE d.outlet IS NOT NULL AND t.cooked_qty IS NOT NULL
-      AND (t.unit IS NULL OR t.unit = i.unit)
-$$;
+-- ------------------------------------------------- receipt helpers (pure) --
 
 -- first number in a jsonb value / string ("13", 13, "2.5 kg", "1,5")
 CREATE OR REPLACE FUNCTION public.stok_num(v jsonb)
@@ -375,9 +341,10 @@ LANGUAGE sql IMMUTABLE SET search_path = '' AS $$
                                          THEN p_items -> 'items' ELSE jsonb_build_array(p_items) END
                  ELSE '[]'::jsonb END AS a
     )
-    SELECT CASE WHEN jsonb_typeof(e) = 'string' THEN e #>> '{}'
-                ELSE coalesce(e ->> 'item', e ->> 'name', e ->> 'item_name',
-                              e ->> 'description', e ->> 'product') END,
+    SELECT regexp_replace(upper(trim(
+               CASE WHEN jsonb_typeof(e) = 'string' THEN e #>> '{}'
+                    ELSE coalesce(e ->> 'item', e ->> 'name', e ->> 'item_name',
+                                  e ->> 'description', e ->> 'product') END)), '\s+', ' ', 'g'),
            CASE WHEN jsonb_typeof(e) = 'object'
                 THEN coalesce(public.stok_num(e -> 'qty'), public.stok_num(e -> 'quantity'),
                               public.stok_num(e -> 'qty_kg'), public.stok_num(e -> 'weight'))
@@ -386,24 +353,29 @@ LANGUAGE sql IMMUTABLE SET search_path = '' AS $$
     WHERE jsonb_typeof(e) IN ('string', 'object')
 $$;
 
--- best stok item for a receipt line: the longest keyword that matches wins
--- ("TELUR IKAN" beats "TELUR"); exclude_keywords veto ("MINYAK DIESEL").
-CREATE OR REPLACE FUNCTION public.stok_match_item(p_name text)
+-- best stok item for a receipt line from a given supplier: the merchant must
+-- match the item's merchant_patterns, then the longest matching keyword wins
+-- ("TELUR IKAN" beats "TELUR"); exclude_keywords veto.
+CREATE OR REPLACE FUNCTION public.stok_match_item(p_name text, p_merchant text DEFAULT NULL)
 RETURNS text LANGUAGE sql STABLE SET search_path = '' AS $$
     SELECT i.code
     FROM public.stok_items i, unnest(i.match_keywords) AS kw
     WHERE i.active AND 'terima' = ANY(i.actions)
-      AND upper(coalesce(p_name, '')) LIKE '%' || kw || '%'
+      AND (cardinality(i.merchant_patterns) = 0
+           OR upper(trim(coalesce(p_merchant, ''))) ILIKE ANY (i.merchant_patterns))
+      AND upper(coalesce(p_name, '')) LIKE '%' || upper(kw) || '%'
       AND NOT EXISTS (SELECT 1 FROM unnest(i.exclude_keywords) x
-                      WHERE upper(p_name) LIKE '%' || x || '%')
+                      WHERE upper(p_name) LIKE '%' || upper(x) || '%')
     ORDER BY length(kw) DESC, i.sort
     LIMIT 1
 $$;
 
--- Terima pre-fill: today's supplier receipts the bot already OCR'd for the
--- caller's outlet, as {supplier, receipt_id, lines:[{item_code, qty, raw}]}.
--- Quantities and supplier names only — no prices, no totals. Receipts already
--- confirmed in a Terima batch are left out.
+-- ------------------------------------------------- SECURITY DEFINER helpers --
+
+-- Terima pre-fill: recent supplier receipts the bot already OCR'd for the
+-- caller's outlet, as [{receipt_id, supplier, at, lines:[{item_code, qty, raw}]}].
+-- Supplier names and quantities only — no prices, no totals. Receipts already
+-- confirmed in a Terima batch drop out.
 CREATE OR REPLACE FUNCTION public.stok_terima_prefill(p_hours int DEFAULT 20)
 RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
     WITH o AS (
@@ -421,7 +393,7 @@ RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
                           WHERE b.receipt_id = rc.id AND b.kind = 'terima')
     ), l AS (
         SELECT r.id, r.merchant, r.created_at, ln.line_name, ln.line_qty,
-               public.stok_match_item(ln.line_name) AS item_code
+               public.stok_match_item(ln.line_name, r.merchant) AS item_code
         FROM r, public.stok_receipt_lines(r.items) ln
     ), agg AS (
         SELECT id, merchant, created_at,
@@ -437,6 +409,20 @@ RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
     WHERE public.stok_jwt_outlet() IS NOT NULL
 $$;
 
+-- What this outlet has already recorded today (the kitchen home screen shows a
+-- ✅ on each done step). Counts only, own outlet only.
+CREATE OR REPLACE FUNCTION public.stok_today(p_date date DEFAULT NULL)
+RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+    WITH d AS (SELECT public.stok_jwt_outlet() AS outlet,
+                      coalesce(p_date, public.stok_business_date(now())) AS bd)
+    SELECT jsonb_build_object('business_date', d.bd, 'kinds', coalesce((
+        SELECT jsonb_object_agg(k.kind, k.n) FROM (
+            SELECT b.kind, count(*) AS n FROM public.stok_batches b
+            WHERE b.outlet_code = d.outlet AND b.business_date = d.bd
+            GROUP BY b.kind) k), '{}'::jsonb))
+    FROM d WHERE d.outlet IS NOT NULL
+$$;
+
 -- Submit one ✅ press. SECURITY INVOKER on purpose: the inserts go through the
 -- kitchen RLS policies above (own outlet, own staff id). Idempotent on the
 -- client-generated batch id so the offline queue can retry blindly.
@@ -447,12 +433,8 @@ DECLARE
     v_staff    uuid := public.stok_jwt_staff();
     v_id       uuid;
     v_kind     text := p ->> 'kind';
-    v_phase    text := nullif(p ->> 'phase', '');
     v_captured timestamptz;
     v_bd       date;
-    v_is_kdu   boolean;
-    v_limits   jsonb;
-    v_bad      jsonb := '[]'::jsonb;
     v_rows     jsonb := '[]'::jsonb;
     e          jsonb;
     it         record;
@@ -474,14 +456,9 @@ BEGIN
         RETURN jsonb_build_object('status', 'exists', 'id', v_id);
     END IF;
 
-    IF v_kind NOT IN ('terima','guna','baki','buang','minta') THEN
+    IF v_kind IS NULL OR v_kind NOT IN ('terima','guna','baki','buang','minta') THEN
         RAISE EXCEPTION 'bad kind %', v_kind USING ERRCODE = '22023';
     END IF;
-    IF v_kind = 'guna' AND (v_phase IS NULL OR v_phase NOT IN ('cooked','cooked_night','left','lain')) THEN
-        RAISE EXCEPTION 'bad phase %', v_phase USING ERRCODE = '22023';
-    END IF;
-    IF v_kind <> 'guna' THEN v_phase := NULL; END IF;
-    v_is_kdu := coalesce(v_phase IN ('cooked','cooked_night','left'), false);
 
     BEGIN
         v_captured := (p ->> 'captured_at')::timestamptz;
@@ -494,15 +471,9 @@ BEGIN
     END IF;
     v_bd := public.stok_business_date(v_captured);
 
-    IF jsonb_typeof(p -> 'items') <> 'array' OR jsonb_array_length(p -> 'items') = 0 THEN
+    IF jsonb_typeof(p -> 'items') IS DISTINCT FROM 'array' OR jsonb_array_length(p -> 'items') = 0 THEN
         RAISE EXCEPTION 'no items' USING ERRCODE = '22023';
     END IF;
-
-    IF v_is_kdu AND (public.stok_phase_status(v_bd) -> 'phases' ->> v_phase)::boolean THEN
-        RETURN jsonb_build_object('status', 'already_submitted', 'id', v_id,
-                                  'business_date', v_bd, 'phase', v_phase);
-    END IF;
-    IF v_phase = 'left' THEN v_limits := public.stok_left_limits(v_bd); END IF;
 
     FOR e IN SELECT * FROM jsonb_array_elements(p -> 'items') LOOP
         SELECT * INTO it FROM public.stok_items i WHERE i.code = e ->> 'item_code' AND i.active;
@@ -512,43 +483,27 @@ BEGIN
         IF it.outlets IS NOT NULL AND NOT v_outlet = ANY(it.outlets) THEN
             RAISE EXCEPTION 'item % not at outlet', it.code USING ERRCODE = '22023';
         END IF;
-        IF v_is_kdu THEN
-            IF it.kdu_item_code IS NULL THEN
-                RAISE EXCEPTION 'item % is not a lauk item', it.code USING ERRCODE = '22023';
-            END IF;
-        ELSIF NOT v_kind = ANY(it.actions) OR (v_kind = 'guna' AND it.kdu_item_code IS NOT NULL) THEN
+        IF NOT v_kind = ANY(it.actions) AND v_kind NOT IN ('buang', 'minta') THEN
             RAISE EXCEPTION 'item % not allowed for %', it.code, v_kind USING ERRCODE = '22023';
         END IF;
         v_qty := public.stok_num(e -> 'qty');
         IF v_qty IS NULL OR v_qty < 0 OR v_qty >= 100000 THEN
             RAISE EXCEPTION 'bad qty for %', it.code USING ERRCODE = '22023';
         END IF;
-        -- same grams rule as the Telegram keypad (KG_GRAMS_SUSPECT_AT = 50)
-        IF v_is_kdu AND it.unit = 'kg' AND v_qty >= 50 THEN
-            v_qty := round(v_qty / 1000.0, 2);
-        END IF;
         IF round(v_qty, it.decimals) <> v_qty THEN
             RAISE EXCEPTION 'too many decimals for %', it.code USING ERRCODE = '22023';
-        END IF;
-        IF v_phase = 'left' AND v_limits ? it.code
-           AND v_qty > (v_limits -> it.code ->> 'cooked')::numeric
-                       + coalesce((v_limits -> it.code ->> 'carry')::numeric, 0) + 1e-9 THEN
-            v_bad := v_bad || jsonb_build_object('item_code', it.code, 'left', v_qty,
-                         'cooked', v_limits -> it.code -> 'cooked',
-                         'carry', v_limits -> it.code -> 'carry');
         END IF;
         v_reason := nullif(e ->> 'reason', '');
         IF v_kind = 'buang' AND v_reason IS NULL THEN
             RAISE EXCEPTION 'buang needs a reason' USING ERRCODE = '22023';
         END IF;
+        IF v_rows @> jsonb_build_array(jsonb_build_object('item_code', it.code)) THEN
+            RAISE EXCEPTION 'item % twice in one batch', it.code USING ERRCODE = '22023';
+        END IF;
         v_rows := v_rows || jsonb_build_object('item_code', it.code, 'qty', v_qty, 'unit', it.unit,
                     'prefill_qty', public.stok_num(e -> 'prefill_qty'),
                     'reason', v_reason, 'photo_path', nullif(e ->> 'photo_path', ''));
     END LOOP;
-
-    IF jsonb_array_length(v_bad) > 0 THEN
-        RETURN jsonb_build_object('status', 'left_gt_cooked', 'id', v_id, 'items', v_bad);
-    END IF;
 
     BEGIN
         v_device := (p ->> 'device_id')::uuid;
@@ -559,17 +514,15 @@ BEGIN
         v_device := NULL;   -- devices are registered by stok-login
     END IF;
 
-    INSERT INTO public.stok_batches (id, outlet_code, business_date, kind, phase, supplier,
-                                     receipt_id, staff_id, device_id, captured_at, item_count,
-                                     promote_status)
-    VALUES (v_id, v_outlet, v_bd, v_kind, v_phase, left(nullif(p ->> 'supplier', ''), 120),
+    INSERT INTO public.stok_batches (id, outlet_code, business_date, kind, supplier, receipt_id,
+                                     staff_id, device_id, captured_at, item_count)
+    VALUES (v_id, v_outlet, v_bd, v_kind, left(nullif(p ->> 'supplier', ''), 120),
             CASE WHEN v_kind = 'terima' THEN public.stok_num(p -> 'receipt_id')::bigint END,
-            v_staff, v_device, v_captured, jsonb_array_length(v_rows),
-            CASE WHEN v_is_kdu THEN 'pending' ELSE 'skip' END);
+            v_staff, v_device, v_captured, jsonb_array_length(v_rows));
 
-    INSERT INTO public.stok_entries (batch_id, outlet_code, business_date, kind, phase, item_code,
+    INSERT INTO public.stok_entries (batch_id, outlet_code, business_date, kind, item_code,
                                      qty, unit, prefill_qty, reason, photo_path, staff_id)
-    SELECT v_id, v_outlet, v_bd, v_kind, v_phase, x ->> 'item_code', (x ->> 'qty')::numeric,
+    SELECT v_id, v_outlet, v_bd, v_kind, x ->> 'item_code', (x ->> 'qty')::numeric,
            x ->> 'unit', (x ->> 'prefill_qty')::numeric, x ->> 'reason', x ->> 'photo_path', v_staff
     FROM jsonb_array_elements(v_rows) x;
 
@@ -655,78 +608,61 @@ BEGIN
     RETURN jsonb_build_object('ok', true);
 END $$;
 
--- Office grid for one business day: raw stock rows (terima / guna / baki /
--- buang / expected / variance) + lauk rows (the kitchen_daily_usage record,
--- Telegram or app). SECURITY INVOKER: office RLS decides what is visible.
---
+-- Office grid for one business day, per outlet x item:
 --   expected     = previous count + terima - guna - buang
 --   actual_usage = previous count + terima - buang - counted baki
 --   variance_pct = (actual_usage - guna) / guna
 --     > +15%        high_wastage  (stock gone beyond what was recorded)
 --     -5% .. +15%   ok
---     < -5%         over_used     (recorded more usage than stock moved)
--- guna for a raw item includes the lauk cooked from it (raw_item_code x raw_factor).
+--     < -5%         over_used     (more usage recorded than stock moved)
+-- SECURITY INVOKER + an explicit office check: non-office callers get nothing.
 CREATE OR REPLACE FUNCTION public.stok_office_grid(p_date date, p_outlet text DEFAULT NULL)
 RETURNS TABLE (
-    row_type text, outlet_code text, item_code text, terima numeric, guna numeric,
+    outlet_code text, item_code text, category text, terima numeric, guna numeric,
     buang numeric, baki numeric, prev_baki numeric, prev_baki_date date, expected numeric,
-    actual_usage numeric, variance_pct numeric, status text,
-    cooked numeric, left_qty numeric, used numeric, pos_qty numeric, mismatch_flag text
+    actual_usage numeric, variance_pct numeric, status text
 ) LANGUAGE sql STABLE SECURITY INVOKER SET search_path = '' AS $$
     WITH outl AS (
         SELECT o.outlet_code FROM public.stok_outlets o
         WHERE o.active AND (p_outlet IS NULL OR o.outlet_code = p_outlet)
           AND public.stok_is_office()
-    ), raw AS (
-        SELECT i.code FROM public.stok_items i
-        WHERE i.active AND i.kdu_item_code IS NULL AND 'baki' = ANY(i.actions)
     ), ent AS (
         SELECT e.outlet_code, e.item_code,
                sum(e.qty) FILTER (WHERE e.kind = 'terima') AS terima,
-               sum(e.qty) FILTER (WHERE e.kind = 'guna' AND e.phase = 'lain') AS guna,
-               sum(e.qty) FILTER (WHERE e.kind = 'buang') AS buang
-        FROM public.stok_entries e JOIN outl USING (outlet_code)
+               sum(e.qty) FILTER (WHERE e.kind = 'guna')   AS guna,
+               sum(e.qty) FILTER (WHERE e.kind = 'buang')  AS buang
+        FROM public.stok_entries e JOIN outl ON outl.outlet_code = e.outlet_code
         WHERE e.business_date = p_date
         GROUP BY e.outlet_code, e.item_code
-    ), lauk_guna AS (
-        SELECT k.outlet_code, i.raw_item_code AS item_code, sum(k.cooked_qty * i.raw_factor) AS guna
-        FROM public.kitchen_daily_usage k JOIN outl USING (outlet_code)
-        JOIN public.stok_items i ON i.kdu_item_code = k.item_code
-        WHERE k.business_date = p_date AND i.raw_item_code IS NOT NULL
-          AND k.cooked_qty IS NOT NULL AND (k.unit IS NULL OR k.unit = i.unit)
-        GROUP BY k.outlet_code, i.raw_item_code
     ), counts AS (   -- latest count per outlet/item/day (a recount replaces)
         SELECT DISTINCT ON (e.outlet_code, e.item_code, e.business_date)
                e.outlet_code, e.item_code, e.business_date, e.qty
-        FROM public.stok_entries e JOIN outl USING (outlet_code)
+        FROM public.stok_entries e JOIN outl ON outl.outlet_code = e.outlet_code
         WHERE e.kind = 'baki' AND e.business_date BETWEEN p_date - 7 AND p_date
-        ORDER BY e.outlet_code, e.item_code, e.business_date, e.created_at DESC
+        ORDER BY e.outlet_code, e.item_code, e.business_date, e.created_at DESC, e.id DESC
     ), base AS (
-        SELECT o.outlet_code, r.code AS item_code,
-               coalesce(en.terima, 0) AS terima,
-               coalesce(en.guna, 0) + coalesce(lg.guna, 0) AS guna,
-               coalesce(en.buang, 0) AS buang,
-               c.qty AS baki,
+        SELECT o.outlet_code, i.code AS item_code, i.category,
+               coalesce(en.terima, 0) AS terima, coalesce(en.guna, 0) AS guna,
+               coalesce(en.buang, 0) AS buang, c.qty AS baki,
                pc.qty AS prev_baki, pc.business_date AS prev_baki_date,
-               (en.item_code IS NOT NULL OR lg.item_code IS NOT NULL OR c.qty IS NOT NULL) AS touched
-        FROM outl o CROSS JOIN raw r
-        LEFT JOIN ent en ON en.outlet_code = o.outlet_code AND en.item_code = r.code
-        LEFT JOIN lauk_guna lg ON lg.outlet_code = o.outlet_code AND lg.item_code = r.code
-        LEFT JOIN counts c ON c.outlet_code = o.outlet_code AND c.item_code = r.code
+               (en.item_code IS NOT NULL OR c.qty IS NOT NULL) AS touched
+        FROM outl o CROSS JOIN public.stok_items i
+        LEFT JOIN ent en ON en.outlet_code = o.outlet_code AND en.item_code = i.code
+        LEFT JOIN counts c ON c.outlet_code = o.outlet_code AND c.item_code = i.code
                           AND c.business_date = p_date
         LEFT JOIN LATERAL (
             SELECT c2.qty, c2.business_date FROM counts c2
-            WHERE c2.outlet_code = o.outlet_code AND c2.item_code = r.code
+            WHERE c2.outlet_code = o.outlet_code AND c2.item_code = i.code
               AND c2.business_date < p_date
             ORDER BY c2.business_date DESC LIMIT 1) pc ON true
     ), calc AS (
         SELECT b.*,
                b.prev_baki + b.terima - b.guna - b.buang AS expected,
                b.prev_baki + b.terima - b.buang - b.baki AS actual_usage
-        FROM base b
+        FROM base b WHERE b.touched
     )
-    SELECT 'raw', c.outlet_code, c.item_code, c.terima, c.guna, c.buang, c.baki, c.prev_baki,
-           c.prev_baki_date, c.expected, c.actual_usage,
+    SELECT c.outlet_code, c.item_code, c.category, c.terima, c.guna, c.buang, c.baki,
+           c.prev_baki, c.prev_baki_date, c.expected, c.actual_usage,
            CASE WHEN c.guna > 0 AND c.actual_usage IS NOT NULL
                 THEN round((c.actual_usage - c.guna) / c.guna, 4) END,
            CASE WHEN c.baki IS NULL THEN 'belum_kira'
@@ -736,30 +672,24 @@ RETURNS TABLE (
                                          ELSE 'over_used' END
                 WHEN (c.actual_usage - c.guna) / c.guna > 0.15 THEN 'high_wastage'
                 WHEN (c.actual_usage - c.guna) / c.guna < -0.05 THEN 'over_used'
-                ELSE 'ok' END,
-           NULL::numeric, NULL::numeric, NULL::numeric, NULL::numeric, NULL::text
-    FROM calc c WHERE c.touched
-    UNION ALL
-    SELECT 'lauk', k.outlet_code, k.item_code, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-           NULL, NULL, k.cooked_qty, k.left_qty, k.used_qty, k.pos_qty, k.mismatch_flag
-    FROM public.kitchen_daily_usage k JOIN outl USING (outlet_code)
-    WHERE k.business_date = p_date
+                ELSE 'ok' END
+    FROM calc c
 $$;
 
 -- ------------------------------------------------------- function grants --
 
 REVOKE ALL ON FUNCTION public.stok_business_date(timestamptz), public.stok_jwt_outlet(),
-    public.stok_jwt_staff(), public.stok_is_office(), public.stok_phase_status(date),
-    public.stok_left_limits(date), public.stok_num(jsonb), public.stok_receipt_lines(jsonb),
-    public.stok_match_item(text), public.stok_terima_prefill(int), public.stok_submit_batch(jsonb),
+    public.stok_jwt_staff(), public.stok_is_office(), public.stok_num(jsonb),
+    public.stok_receipt_lines(jsonb), public.stok_match_item(text, text),
+    public.stok_terima_prefill(int), public.stok_today(date), public.stok_submit_batch(jsonb),
     public.stok_roster(text), public.stok_live_outlets(), public.stok_check_pin(uuid, text),
     public.stok_set_pin(uuid, text), public.stok_office_grid(date, text)
     FROM PUBLIC, anon, authenticated;
 
 GRANT EXECUTE ON FUNCTION public.stok_business_date(timestamptz), public.stok_jwt_outlet(),
-    public.stok_jwt_staff(), public.stok_is_office(), public.stok_phase_status(date),
-    public.stok_left_limits(date), public.stok_num(jsonb), public.stok_receipt_lines(jsonb),
-    public.stok_match_item(text), public.stok_terima_prefill(int), public.stok_submit_batch(jsonb),
+    public.stok_jwt_staff(), public.stok_is_office(), public.stok_num(jsonb),
+    public.stok_receipt_lines(jsonb), public.stok_match_item(text, text),
+    public.stok_terima_prefill(int), public.stok_today(date), public.stok_submit_batch(jsonb),
     public.stok_set_pin(uuid, text), public.stok_office_grid(date, text)
     TO authenticated;
 -- the kitchen device needs these two BEFORE anyone has signed in
@@ -772,7 +702,7 @@ DO $$
 DECLARE t text;
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
-        FOREACH t IN ARRAY ARRAY['stok_batches', 'stok_entries', 'kitchen_daily_usage'] LOOP
+        FOREACH t IN ARRAY ARRAY['stok_batches', 'stok_entries'] LOOP
             IF NOT EXISTS (SELECT 1 FROM pg_publication_tables
                            WHERE pubname = 'supabase_realtime' AND schemaname = 'public'
                              AND tablename = t) THEN
@@ -783,6 +713,7 @@ BEGIN
 END $$;
 
 -- ----------------------------------------------------- photos (storage) --
+-- Public bucket for item + staff photos (uploaded by the office only).
 
 DO $$
 BEGIN
@@ -818,124 +749,16 @@ INSERT INTO public.stok_outlets (outlet_code, label, pos_code, receipt_patterns,
 ON CONFLICT (outlet_code) DO NOTHING;
 -- K.L Razak (S-RAZAK) is closed: deliberately not seeded.
 
--- Raw stock items (Phase 1 top ~40). Codes are stable keys; names editable in
--- the office admin screen. Tamil/Bengali names: please have a native speaker check.
-INSERT INTO public.stok_items (code, name_bm, name_ta, name_bn, icon, category, unit, decimals,
-                               portion_grams, match_keywords, exclude_keywords, sort) VALUES
- ('ayam_potong',   'Ayam Potong',    'கோழி துண்டு',      'মুরগির টুকরা',      '🍗', 'ayam',    'pcs', 0, NULL,
-    '{AYAM,LI AGAM,LI AYAM,SUPER CH,1/2 AYAM}', '{ISI AYAM,AYAM ISI,TELUR AYAM,SAYAP,WING,DADA,BREAST,PEHA,LEG,KAKI,HATI}', 10),
- ('ayam_bulat',    'Ayam Bulat',     'முழு கோழி',        'আস্ত মুরগি',        '🐔', 'ayam',    'pcs', 0, NULL,
-    '{WHOLE CHICKEN,AYAM BULAT,AYAM SEGAR}', '{}', 11),
- ('ayam_peha',     'Peha Ayam',      'கோழி தொடை',        'মুরগির রান',        '🍗', 'ayam',    'kg',  2, NULL,
-    '{WHOLE LEG,W.LEG,W/LEG,W LEG,CHICKEN LEG,LEG QUARTER,DRUMSTICK,THIGH,PEHA AYAM,PAHA AYAM,AYAM PEHA}', '{B.LEG,BONELESS}', 12),
- ('ayam_sayap',    'Sayap Ayam',     'கோழி இறக்கை',      'মুরগির ডানা',       '🍗', 'ayam',    'kg',  2, NULL,
-    '{WING,WINGS,SAYAP AYAM,AYAM SAYAP}', '{}', 13),
- ('ayam_dada',     'Dada Ayam',      'கோழி நெஞ்சு',      'মুরগির বুক',        '🍗', 'ayam',    'kg',  2, NULL,
-    '{BREAST,DADA AYAM,AYAM DADA}', '{}', 14),
- ('ayam_isi',      'Isi Ayam',       'எலும்பில்லா கோழி', 'হাড়ছাড়া মুরগি',   '🥩', 'ayam',    'kg',  2, 50,
-    '{ISI AYAM,AYAM ISI,B.LEG,BONELESS LEG,BONELESS CHICKEN,MINCED CHICKEN}', '{}', 15),
- ('kambing',       'Kambing',        'ஆட்டிறைச்சி',      'খাসির মাংস',        '🐐', 'daging',  'kg',  2, 180,
-    '{KAMBING,MUTTON,GOAT}', '{SUSU KAMBING}', 20),
- ('daging',        'Daging',         'மாட்டிறைச்சி',     'গরুর মাংস',         '🐄', 'daging',  'kg',  2, 60,
-    '{DAGING,BEEF,TOPSIDE}', '{}', 21),
- ('ikan_potong',   'Ikan',           'மீன்',             'মাছ',               '🐟', 'laut',    'pcs', 0, NULL,
-    '{IKAN,FISH,BAWAL,TENGGIRI,KEMBUNG,BAUNG,SELAR,PARI}', '{TELUR IKAN,KEPALA IKAN,IKAN BILIS,BILIS}', 30),
- ('telur_ikan_mentah','Telur Ikan',  'மீன் முட்டை',      'মাছের ডিম',         '🟠', 'laut',    'pcs', 0, NULL,
-    '{TELUR IKAN,FISH ROE}', '{}', 31),
- ('kepala_ikan',   'Kepala Ikan',    'மீன் தலை',         'মাছের মাথা',        '🐟', 'laut',    'pcs', 0, NULL,
-    '{KEPALA IKAN,FISH HEAD}', '{}', 32),
- ('ikan_bilis',    'Ikan Bilis',     'நெத்திலி',         'শুঁটকি মাছ',        '🐟', 'laut',    'kg',  2, NULL,
-    '{IKAN BILIS,BILIS,ANCHOVIES}', '{}', 33),
- ('sotong',        'Sotong',         'கணவாய்',           'স্কুইড',            '🦑', 'laut',    'kg',  2, NULL,
-    '{SOTONG,SQUID}', '{KICAP SOTONG}', 34),
- ('udang',         'Udang',          'இறால்',            'চিংড়ি',            '🦐', 'laut',    'kg',  2, NULL,
-    '{UDANG,PRAWN,JUDANG,VANAMEI}', '{}', 35),
- ('telur',         'Telur',          'முட்டை',           'ডিম',               '🥚', 'telur',   'biji',0, NULL,
-    '{TELUR,EGG}', '{TELUR IKAN}', 40),
- ('beras_biasa',   'Beras',          'அரிசி',            'চাল',               '🍚', 'beras',   'kg',  1, NULL,
-    '{BERAS,RICE}', '{BASMATI,BASMATHI,TEPUNG}', 50),
- ('beras_basmati', 'Beras Basmati',  'பாஸ்மதி அரிசி',    'বাসমতি চাল',        '🍚', 'beras',   'kg',  1, NULL,
-    '{BASMATI,BASMATHI}', '{}', 51),
- ('minyak_masak',  'Minyak Masak',   'சமையல் எண்ணெய்',   'রান্নার তেল',       '🛢️', 'minyak',  'kg',  1, NULL,
-    '{MINYAK MASAK,MINYAK SAWIT,COOKING OIL,PALM OIL,VEGETABLE OIL,MINYAK}', '{DIESEL,PETROL,RON,PRIMAX,SAPI,MINYAK KELAPA}', 60),
- ('susu_pekat',    'Susu Pekat',     'இனிப்பு பால்',     'কনডেন্সড মিল্ক',    '🥫', 'minuman', 'tin', 0, NULL,
-    '{SUSU PEKAT,CONDENSED}', '{}', 70),
- ('susu_cair',     'Susu Cair',      'பால் டின்',        'তরল দুধ',           '🥫', 'minuman', 'tin', 0, NULL,
-    '{SUSU CAIR,SUSU SEJAT,EVAPORATED}', '{}', 71),
- ('teh',           'Teh',            'தேநீர்',           'চা',                '🍵', 'minuman', 'kg',  2, NULL,
-    '{TEH,TEA,CAMELLIA,BOH}', '{TEA MASALA,TEH MASALA,TEH O BOTOL}', 72),
- ('kopi',          'Kopi',           'காபி',             'কফি',               '☕', 'minuman', 'kg',  2, NULL,
-    '{KOPI,COFFEE,NESCAFE}', '{}', 73),
- ('gula',          'Gula',           'சர்க்கரை',         'চিনি',              '🧂', 'minuman', 'kg',  1, NULL,
-    '{GULA,SUGAR}', '{GULA MELAKA,GULA MERAH}', 74),
- ('tepung_gandum', 'Tepung',         'மாவு',             'ময়দা',             '🌾', 'roti',    'kg',  1, NULL,
-    '{TEPUNG,FLOUR}', '{TEPUNG BERAS,TEPUNG JAGUNG}', 80),
- ('doh_roti',      'Doh Roti Canai', 'ரொட்டி மாவு',      'রুটির খামি',        '🫓', 'roti',    'pcs', 0, NULL,
-    '{ROTI CANAI,DOH ROTI}', '{}', 81),
- ('doh_capati',    'Doh Capati',     'சப்பாத்தி மாவு',   'চাপাতির খামি',      '🫓', 'roti',    'pcs', 0, NULL,
-    '{CAPATI,CHAPATI,CHAPATTI}', '{}', 82),
- ('dhal',          'Dhal',           'பருப்பு',          'ডাল',               '🫘', 'kering',  'kg',  1, NULL,
-    '{DHAL,DHALL,KACANG DAL,KACANG DHAL,PARIPPU,TOOR DAL}', '{}', 90),
- ('santan',        'Santan',         'தேங்காய்ப் பால்',  'নারকেলের দুধ',      '🥥', 'kering',  'kg',  1, NULL,
-    '{SANTAN}', '{}', 91),
- ('ghee',          'Minyak Sapi',    'நெய்',             'ঘি',                '🧈', 'kering',  'kg',  1, NULL,
-    '{GHEE,MINYAK SAPI,QBB}', '{}', 92),
- ('bawang_besar',  'Bawang Besar',   'பெரிய வெங்காயம்',  'পেঁয়াজ',           '🧅', 'sayur',   'kg',  1, NULL,
-    '{BAWANG BESAR,BAWANG HOLLAND,BAWANG INDIA,ONION}', '{BAWANG GORENG}', 100),
- ('bawang_merah',  'Bawang Merah',   'சின்ன வெங்காயம்',  'ছোট পেঁয়াজ',       '🧅', 'sayur',   'kg',  1, NULL,
-    '{BAWANG MERAH,BAWANG KECIL,SHALLOT}', '{}', 101),
- ('bawang_putih',  'Bawang Putih',   'பூண்டு',           'রসুন',              '🧄', 'sayur',   'kg',  1, NULL,
-    '{BAWANG PUTIH,GARLIC}', '{}', 102),
- ('halia',         'Halia',          'இஞ்சி',            'আদা',               '🫚', 'sayur',   'kg',  1, NULL,
-    '{HALIA,GINGER}', '{}', 103),
- ('cili_merah',    'Cili Merah',     'சிவப்பு மிளகாய்',  'লাল মরিচ',          '🌶️', 'sayur',   'kg',  1, NULL,
-    '{CILI MERAH,RED CHILLI}', '{SOS}', 104),
- ('cili_hijau',    'Cili Hijau',     'பச்சை மிளகாய்',    'কাঁচা মরিচ',        '🌶️', 'sayur',   'kg',  1, NULL,
-    '{CILI HIJAU,GREEN CHILLI}', '{}', 105),
- ('tomato',        'Tomato',         'தக்காளி',          'টমেটো',             '🍅', 'sayur',   'kg',  1, NULL,
-    '{TOMATO}', '{SOS TOMATO,TOMATO SOS,TOMATO SAUCE}', 106),
- ('kentang',       'Kentang',        'உருளைக்கிழங்கு',   'আলু',               '🥔', 'sayur',   'kg',  1, NULL,
-    '{KENTANG,POTATO}', '{}', 107),
- ('kobis',         'Kobis',          'முட்டைக்கோஸ்',     'বাঁধাকপি',          '🥬', 'sayur',   'kg',  1, NULL,
-    '{KOBIS,CABBAGE}', '{}', 108),
- ('timun',         'Timun',          'வெள்ளரிக்காய்',    'শসা',               '🥒', 'sayur',   'kg',  1, NULL,
-    '{TIMUN,CUCUMBER}', '{}', 109),
- ('lobak_merah',   'Lobak Merah',    'கேரட்',            'গাজর',              '🥕', 'sayur',   'kg',  1, NULL,
-    '{LOBAK MERAH,CARROT}', '{}', 110),
- ('bendi',         'Bendi',          'வெண்டைக்காய்',     'ঢেঁড়স',            '🫛', 'sayur',   'kg',  1, NULL,
-    '{BENDI,OKRA,LADIES FINGER}', '{}', 111),
- ('terung',        'Terung',         'கத்தரிக்காய்',     'বেগুন',             '🍆', 'sayur',   'kg',  1, NULL,
-    '{TERUNG,BRINJAL,EGGPLANT}', '{}', 112),
- ('kacang_panjang','Kacang Panjang', 'காராமணி',          'বরবটি',             '🫛', 'sayur',   'kg',  1, NULL,
-    '{KACANG PANJANG,LONG BEAN}', '{}', 113),
- ('limau',         'Limau',          'எலுமிச்சை',        'লেবু',              '🍋', 'sayur',   'kg',  1, NULL,
-    '{LIMAU,LIME,LEMON}', '{AIR LIMAU,LIME JUICE,LEMON JUICE}', 114)
+-- The 8 categories. Tamil / Bengali: please have a native speaker check.
+INSERT INTO public.stok_categories (code, name_bm, name_ta, name_bn, icon, sort) VALUES
+    ('ayam',    'Ayam',          'கோழி',         'মুরগি',        '🐔', 10),
+    ('daging',  'Daging',        'மாட்டிறைச்சி', 'গরুর মাংস',    '🐄', 20),
+    ('kambing', 'Kambing',       'ஆட்டிறைச்சி',  'খাসির মাংস',   '🐐', 30),
+    ('beras',   'Beras',         'அரிசி',        'চাল',          '🍚', 40),
+    ('sayur',   'Sayur',         'காய்கறி',      'সবজি',         '🥬', 50),
+    ('balaji',  'Barang Balaji', 'பலாஜி பொருள்', 'বালাজি মাল',   '📦', 60),
+    ('masala',  'Masala',        'மசாலா தூள்',   'মসলা গুঁড়া',  '🌶️', 70),
+    ('rempah',  'Rempah',        'முழு மசாலா',   'গোটা মসলা',    '🌿', 80)
 ON CONFLICT (code) DO NOTHING;
-
--- Lauk items = the Telegram keypad items (kitchen_usage._ITEMS): same codes,
--- same units. Guna phases only; raw_item_code links each to the raw stock it
--- comes from (PLEASE CONFIRM the ayam mapping/factors in the admin screen).
-INSERT INTO public.stok_items (code, name_bm, name_ta, name_bn, icon, category, unit, decimals,
-                               kdu_item_code, raw_item_code, raw_factor, portion_grams,
-                               actions, outlets, sort) VALUES
- ('ayam_goreng',       'Ayam Goreng',       'பொரித்த கோழி',  'মুরগি ভাজা',       '🍗', 'lauk', 'pcs', 0, 'ayam_goreng',       'ayam_potong', 1, NULL, '{guna}', NULL, 200),
- ('ayam_bawang',       'Ayam Bawang',       'வெங்காய கோழி',  'পেঁয়াজ মুরগি',    '🍗', 'lauk', 'pcs', 0, 'ayam_bawang',       'ayam_potong', 1, NULL, '{guna}', NULL, 201),
- ('ayam_rempah',       'Ayam Rempah',       'மசாலா கோழி',    'মসলা মুরগি',       '🍗', 'lauk', 'pcs', 0, 'ayam_rempah',       'ayam_potong', 1, NULL, '{guna}', '{BISTRO7}', 202),
- ('ayam_kicap',        'Ayam Kicap',        'சோயா கோழி',     'সয়া মুরগি',       '🍗', 'lauk', 'pcs', 0, 'ayam_kicap',        'ayam_potong', 1, NULL, '{guna}', NULL, 203),
- ('ayam_madu',         'Ayam Madu',         'தேன் கோழி',     'মধু মুরগি',        '🍯', 'lauk', 'pcs', 0, 'ayam_madu',         'ayam_potong', 1, NULL, '{guna}', NULL, 204),
- ('ayam_tandoori',     'Ayam Tandoori',     'தந்தூரி கோழி',  'তন্দুরি মুরগি',    '🔥', 'lauk', 'pcs', 0, 'ayam_tandoori',     'ayam_potong', 1, NULL, '{guna}', NULL, 205),
- ('ayam_kari_rendang', 'Ayam Kari/Rendang', 'கோழி கறி',      'মুরগির তরকারি',    '🍛', 'lauk', 'pcs', 0, 'ayam_kari_rendang', 'ayam_potong', 1, NULL, '{guna}', NULL, 206),
- ('ayam_65',           'Ayam 65',           'சிக்கன் 65',    'চিকেন ৬৫',         '🌶️', 'lauk', 'pcs', 0, 'ayam_65',           'ayam_potong', 1, NULL, '{guna}', NULL, 207),
- ('ikan_goreng',       'Ikan Goreng',       'பொரித்த மீன்',  'মাছ ভাজা',         '🐟', 'lauk', 'pcs', 0, 'ikan_goreng',       'ikan_potong', 1, NULL, '{guna}', NULL, 208),
- ('ikan_kari',         'Ikan Kari',         'மீன் கறி',      'মাছের তরকারি',     '🍛', 'lauk', 'pcs', 0, 'ikan_kari',         'ikan_potong', 1, NULL, '{guna}', NULL, 209),
- ('telur_ikan',        'Telur Ikan',        'மீன் முட்டை',   'মাছের ডিম',        '🟠', 'lauk', 'pcs', 0, 'telur_ikan',        'telur_ikan_mentah', 1, NULL, '{guna}', NULL, 210),
- ('kambing_masak',     'Kambing',           'ஆட்டிறைச்சி',   'খাসির মাংস',       '🐐', 'lauk', 'kg',  2, 'kambing',           'kambing', 1, 180, '{guna}', NULL, 211),
- ('daging_masak',      'Daging',            'மாட்டிறைச்சி',  'গরুর মাংস',        '🐄', 'lauk', 'kg',  2, 'daging',            'daging', 1, 60, '{guna}', NULL, 212)
-ON CONFLICT (code) DO NOTHING;
-
-INSERT INTO public.stok_uom (item_code, pack_unit, units_per_pack, note) VALUES
-    ('ayam_potong', 'beg',   80, 'owner: 1 bag ayam = 80 pcs'),
-    ('telur',       'papan', 30, '1 papan telur = 30 biji')
-ON CONFLICT (item_code, pack_unit) DO NOTHING;
 
 NOTIFY pgrst, 'reload schema';
