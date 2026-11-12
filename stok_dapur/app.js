@@ -23,8 +23,10 @@
     no_pin: ["Minta pejabat set PIN", "அலுவலகத்திடம் PIN கேள்", "অফিস থেকে PIN নিন"],
     empty_receipts: ["Tiada resit hari ini", "இன்று ரசீது இல்லை", "আজ কোনো রসিদ নেই"],
     stuck: ["Gagal — tunjuk pejabat", "தோல்வி — அலுவலகம்", "ব্যর্থ — অফিসকে দেখান"],
+    no_staff: ["Tiada staf — minta pejabat tambah", "பணியாளர் இல்லை — அலுவலகத்திடம் கேள்", "কোনো কর্মী নেই — অফিসকে বলুন"],
+    no_outlet: ["Tiada kedai aktif — minta pejabat hidupkan", "கடை இல்லை — அலுவலகத்திடம் கேள்", "কোনো দোকান নেই — অফিসকে বলুন"],
   };
-  const LANGS = [["bm", "🇲🇾"], ["ta", "🇮🇳"], ["bn", "🇧🇩"]];
+  const LANGS = [["bm", "BM"], ["ta", "தமிழ்"], ["bn", "বাংলা"]];
   const LIDX = { bm: 0, ta: 1, bn: 2 };
   function t(key) { return T[key][LIDX[S.cfg.lang || "bm"]] || T[key][0]; }
   function t3(key) { return T[key]; }
@@ -199,6 +201,7 @@
     const r = await rpc("stok_live_outlets", {});
     const list = document.getElementById("list");
     if (r.status !== 200) { list.innerHTML = `<div class="note">📶❌ ${esc(t("need_net"))}</div>`; return; }
+    if (!r.data.length) { list.innerHTML = `<div class="note">🏪✕ ${t3("no_outlet").map(esc).join("<br>")}</div>`; return; }
     list.innerHTML = r.data.map((o) => `<button class="tile big" data-o="${esc(o.code)}" data-l="${esc(o.label)}">🏪<div class="n1">${esc(o.label)}</div></button>`).join("");
     list.querySelectorAll("[data-o]").forEach((b) => b.onclick = () => {
       S.cfg.outlet_code = b.dataset.o; S.cfg.outlet_label = b.dataset.l; store.set("cfg", S.cfg);
@@ -207,17 +210,21 @@
   }
 
   async function screenStaff() {
+    let loaded = false;
     const draw = () => {
       $app.innerHTML = topbar(`<button class="ghost" id="chg">🏪 ${esc(S.cfg.outlet_label || S.cfg.outlet_code)}</button>`) +
         `<div class="grid g3">${S.roster.map((st) => `<button class="tile staff" data-s="${esc(st.id)}">${avatar(st)}<div class="n1">${esc(st.name)}</div></button>`).join("") ||
-          `<div class="note">📶❌ ${esc(t("need_net"))}</div>`}</div>`;
+          (loaded ? `<div class="note">👤✕ ${t3("no_staff").map(esc).join("<br>")}<br><br>🏪 ⬆️</div>`
+                  : navigator.onLine ? `<div class="spin"></div>` : `<div class="note">📶❌ ${esc(t("need_net"))}</div>`)}</div>`;
       bind();
       document.getElementById("chg").onclick = () => { if (confirm("Tukar kedai?")) { delete S.cfg.outlet_code; store.set("cfg", S.cfg); go("outlet"); } };
       $app.querySelectorAll("[data-s]").forEach((b) => b.onclick = () => { S.pinFor = S.roster.find((x) => x.id === b.dataset.s); go("pin"); });
     };
     draw();
     const r = await rpc("stok_roster", { p_outlet: S.cfg.outlet_code });
-    if (r.status === 200 && Array.isArray(r.data)) { S.roster = r.data; store.set("roster", r.data); if (S.screen === "staff") draw(); }
+    if (r.status === 200 && Array.isArray(r.data)) { S.roster = r.data; store.set("roster", r.data); }
+    loaded = r.status === 200;
+    if (S.screen === "staff") draw();
     syncQueue();
   }
 

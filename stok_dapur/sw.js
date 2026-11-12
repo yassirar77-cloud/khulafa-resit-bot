@@ -1,6 +1,6 @@
 /* Offline app shell. API calls (supabase.co) always go to the network; the
    app keeps its own offline queue in localStorage. Bump VERSION on deploy. */
-const VERSION = "stok-v1";
+const VERSION = "stok-v2";
 const SHELL = ["./", "index.html", "style.css", "config.js", "core.js", "app.js", "manifest.webmanifest",
   "icons/icon-192.png", "icons/icon-512.png", "panduan.html"];
 self.addEventListener("install", (e) => {
