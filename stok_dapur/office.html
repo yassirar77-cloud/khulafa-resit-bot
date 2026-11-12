@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0f172a">
+<title>Stok Dapur — Pejabat</title>
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="office.css">
+</head>
+<body>
+<header class="bar">
+  <div class="brand">🍳 Stok Dapur <span>Pejabat</span></div>
+  <nav id="tabs" hidden>
+    <button data-tab="grid" class="on">📊 Grid</button>
+    <button data-tab="rekod">🚦 Rekod</button>
+    <button data-tab="log">🕑 Aktiviti</button>
+    <button data-tab="staff">👥 Staf</button>
+    <button data-tab="items">📦 Barang</button>
+    <button data-tab="outlets">🏪 Outlet</button>
+  </nav>
+  <div id="me"></div>
+</header>
+<main id="main"><div class="spin"></div></main>
+<div id="toast"></div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="config.js"></script>
+<script src="core.js"></script>
+<script src="office.js"></script>
+</body>
+</html>

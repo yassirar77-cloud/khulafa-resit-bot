@@ -90,6 +90,8 @@ class StokDapurSqlTest(unittest.TestCase):
             ("SERAI LALAT", "GEDA TRADING", ""),               # mosquito coil, not serai
             ("AIR LIMAU", "GEDA TRADING", ""),
             ("TOMATO", "GEDA TRADING", "tomato"),
+            ("MUTTON MINCE 5 KG", "BESTARI FARM (M) SDN BHD", ""),   # not daging cincang
+            ("SALAD (NO TOMATO, CUCUMBER)", "LAI ENTERPRISE SDN BHD", ""),
         ]
         values = ",".join("('%s','%s','%s')" % (n.replace("'", "''"), m, e) for n, m, e in cases)
         res = _psql(dsn, "-At", "-c",

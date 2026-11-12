@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Panduan Pasang — Stok Dapur</title>
+<style>
+  @page { size: A4; margin: 10mm; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans Tamil", "Noto Sans Bengali", sans-serif; color: #111; background: #fff; }
+  .page { max-width: 190mm; margin: 0 auto; padding: 6mm; }
+  h1 { margin: 0; font-size: 30px; display: flex; align-items: center; gap: 12px; }
+  h1 img { width: 54px; height: 54px; border-radius: 12px; }
+  .sub { color: #444; margin: 2px 0 10px; font-size: 15px; }
+  .url { display: inline-block; font-size: 22px; font-weight: 900; background: #fde68a; padding: 6px 14px; border-radius: 10px; margin: 4px 0 10px; letter-spacing: .3px; }
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .step { border: 3px solid #14532d; border-radius: 14px; padding: 8px; position: relative; min-height: 165px; }
+  .num { position: absolute; top: -12px; left: -10px; background: #14532d; color: #fff; width: 34px; height: 34px; border-radius: 50%;
+         font-weight: 900; font-size: 20px; display: flex; align-items: center; justify-content: center; }
+  .phone { margin: 0 auto 6px; width: 92px; height: 110px; border: 3px solid #111; border-radius: 14px; display: flex; flex-direction: column;
+           align-items: center; justify-content: center; gap: 4px; font-size: 30px; background: #f1f5f9; }
+  .phone small { font-size: 11px; font-weight: 700; }
+  .t { font-weight: 800; font-size: 15px; text-align: center; }
+  .ta, .bn { font-size: 12px; color: #333; text-align: center; }
+  .rules { margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .rule { border-radius: 12px; padding: 8px 10px; font-size: 14px; }
+  .g { background: #dcfce7; } .r { background: #fee2e2; } .y { background: #fef3c7; } .b { background: #dbeafe; }
+  .big { font-size: 22px; }
+  .foot { margin-top: 8px; font-size: 12px; color: #555; text-align: center; }
+  @media print { .noprint { display: none; } }
+  .noprint { text-align: center; margin: 10px; }
+  .noprint button { font-size: 18px; padding: 10px 18px; }
+</style>
+</head>
+<body>
+<div class="noprint"><button onclick="print()">🖨️ Cetak / Print</button></div>
+<div class="page">
+  <h1><img src="icons/icon-192.png" alt="">Stok Dapur — Cara Pasang</h1>
+  <div class="sub">எப்படி நிறுவுவது · কীভাবে ইনস্টল করবেন</div>
+  <div>Buka Chrome, taip / Chrome-ல் திற / Chrome খুলুন:</div>
+  <div class="url" id="u">khulafa-stok-dapur.onrender.com</div>
+
+  <div class="steps">
+    <div class="step"><div class="num">1</div><div class="phone">🌐<small>Chrome</small></div>
+      <div class="t">Buka Chrome, taip alamat di atas</div><div class="ta">Chrome திறந்து முகவரி தட்டச்சு</div><div class="bn">Chrome খুলে ঠিকানা লিখুন</div></div>
+    <div class="step"><div class="num">2</div><div class="phone">⋮<small>menu</small></div>
+      <div class="t">Tekan ⋮ (3 titik) di atas kanan</div><div class="ta">மேல் வலது ⋮ அழுத்து</div><div class="bn">উপরে ডানে ⋮ চাপুন</div></div>
+    <div class="step"><div class="num">3</div><div class="phone">📲<small>Tambah ke<br>skrin utama</small></div>
+      <div class="t">"Tambah ke skrin utama" / "Install app"</div><div class="ta">"முகப்புத் திரையில் சேர்"</div><div class="bn">"হোম স্ক্রিনে যোগ করুন"</div></div>
+    <div class="step"><div class="num">4</div><div class="phone">🏪<small>SEK-20</small></div>
+      <div class="t">Sekali sahaja: pilih kedai</div><div class="ta">ஒருமுறை: கடையைத் தேர்ந்தெடு</div><div class="bn">একবার: দোকান বাছুন</div></div>
+    <div class="step"><div class="num">5</div><div class="phone">👤<small>gambar anda</small></div>
+      <div class="t">Tekan gambar ANDA</div><div class="ta">உங்கள் படத்தை அழுத்து</div><div class="bn">আপনার ছবিতে চাপুন</div></div>
+    <div class="step"><div class="num">6</div><div class="phone">🔢<small>● ● ● ●</small></div>
+      <div class="t">Masukkan PIN 4 nombor</div><div class="ta">4 இலக்க PIN</div><div class="bn">৪ সংখ্যার PIN দিন</div></div>
+  </div>
+
+  <div class="rules">
+    <div class="rule g"><span class="big">🚚 Terima</span> — barang sampai: tekan resit, semak nombor, ✅<br>
+      <span class="ta">பொருள் வந்தது: ரசீது → சரிபார் → ✅</span> · <span class="bn">মাল এলে: রসিদ → মিলিয়ে দেখুন → ✅</span></div>
+    <div class="rule y"><span class="big">🍳 Guna</span> — ambil keluar untuk masak<br>
+      <span class="ta">சமைக்க எடுத்தது</span> · <span class="bn">রান্নার জন্য বের করা</span></div>
+    <div class="rule b"><span class="big">🌙 Baki</span> — kira stok malam (akhir syif)<br>
+      <span class="ta">இரவு மீதி எண்ணிக்கை</span> · <span class="bn">রাতে অবশিষ্ট গণনা</span></div>
+    <div class="rule g"><span class="big">✅ = simpan</span> &nbsp; <span class="big">❌ = batal</span><br>
+      Skrin hijau besar ✓ + bunyi = sudah simpan · பச்சை ✓ = சேமிக்கப்பட்டது · সবুজ ✓ = সংরক্ষিত</div>
+    <div class="rule r"><span class="big">⏳ belum hantar</span> — tiada internet. Data SELAMAT dalam telefon, akan hantar sendiri bila internet ada.<br>
+      <span class="ta">இணையம் இல்லை — தானாக அனுப்பும்</span> · <span class="bn">ইন্টারনেট নেই — নিজে থেকে পাঠাবে</span></div>
+    <div class="rule y"><span class="big">🇲🇾 🇮🇳 🇧🇩</span> — tekan bendera untuk tukar bahasa<br>
+      <span class="ta">மொழி மாற்ற கொடியை அழுத்து</span> · <span class="bn">ভাষা বদলাতে পতাকায় চাপুন</span></div>
+  </div>
+  <div class="foot">PIN lupa / salah 5 kali (kunci 15 minit)? Hubungi pejabat. · PIN மறந்தால் அலுவலகத்தை அழைக்கவும் · PIN ভুলে গেলে অফিসে বলুন</div>
+</div>
+<script>document.getElementById("u").textContent = location.host || "khulafa-stok-dapur.onrender.com";</script>
+</body>
+</html>
