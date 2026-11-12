@@ -83,6 +83,14 @@ CREATE TABLE IF NOT EXISTS public.stok_items (
     photo_url         text,
     unit              text NOT NULL CHECK (unit IN ('kg','pcs','beg','karung','pek','tin','botol','kotak','ikat','biji')),
     decimals          int  NOT NULL DEFAULT 0 CHECK (decimals BETWEEN 0 AND 2),
+    -- Terima may come in a different unit than Guna/Baki are counted in
+    -- (Ayam: the bill is kg, the kitchen counts beg/pcs). NULL = same as unit.
+    -- terima_to_unit converts it (count units per terima unit); NULL = not
+    -- known yet (pack sizes from Wahab), so the office grid can't compute
+    -- variance for that item until it is filled in.
+    terima_unit       text CHECK (terima_unit IN ('kg','pcs','beg','karung','pek','tin','botol','kotak','ikat','biji')),
+    terima_decimals   int  NOT NULL DEFAULT 2 CHECK (terima_decimals BETWEEN 0 AND 2),
+    terima_to_unit    numeric CHECK (terima_to_unit > 0),
     canonical_item    text,                      -- data/canonical_items_v2.json key
     -- Terima pre-fill: a receipt line becomes this item when the receipt's
     -- merchant matches one of merchant_patterns (ILIKE; no % = exact match;
@@ -490,7 +498,8 @@ BEGIN
         IF v_qty IS NULL OR v_qty < 0 OR v_qty >= 100000 THEN
             RAISE EXCEPTION 'bad qty for %', it.code USING ERRCODE = '22023';
         END IF;
-        IF round(v_qty, it.decimals) <> v_qty THEN
+        IF round(v_qty, CASE WHEN v_kind = 'terima' AND it.terima_unit IS NOT NULL
+                             THEN it.terima_decimals ELSE it.decimals END) <> v_qty THEN
             RAISE EXCEPTION 'too many decimals for %', it.code USING ERRCODE = '22023';
         END IF;
         v_reason := nullif(e ->> 'reason', '');
@@ -500,7 +509,8 @@ BEGIN
         IF v_rows @> jsonb_build_array(jsonb_build_object('item_code', it.code)) THEN
             RAISE EXCEPTION 'item % twice in one batch', it.code USING ERRCODE = '22023';
         END IF;
-        v_rows := v_rows || jsonb_build_object('item_code', it.code, 'qty', v_qty, 'unit', it.unit,
+        v_rows := v_rows || jsonb_build_object('item_code', it.code, 'qty', v_qty,
+                    'unit', CASE WHEN v_kind = 'terima' THEN coalesce(it.terima_unit, it.unit) ELSE it.unit END,
                     'prefill_qty', public.stok_num(e -> 'prefill_qty'),
                     'reason', v_reason, 'photo_path', nullif(e ->> 'photo_path', ''));
     END LOOP;
@@ -618,7 +628,7 @@ END $$;
 -- SECURITY INVOKER + an explicit office check: non-office callers get nothing.
 CREATE OR REPLACE FUNCTION public.stok_office_grid(p_date date, p_outlet text DEFAULT NULL)
 RETURNS TABLE (
-    outlet_code text, item_code text, category text, terima numeric, guna numeric,
+    outlet_code text, item_code text, category text, terima_raw numeric, terima numeric, guna numeric,
     buang numeric, baki numeric, prev_baki numeric, prev_baki_date date, expected numeric,
     actual_usage numeric, variance_pct numeric, status text
 ) LANGUAGE sql STABLE SECURITY INVOKER SET search_path = '' AS $$
@@ -628,10 +638,15 @@ RETURNS TABLE (
           AND public.stok_is_office()
     ), ent AS (
         SELECT e.outlet_code, e.item_code,
-               sum(e.qty) FILTER (WHERE e.kind = 'terima') AS terima,
+               sum(e.qty) FILTER (WHERE e.kind = 'terima') AS terima_raw,
+               -- terima in count units: NULL when the item's conversion is unknown
+               sum(CASE WHEN e.unit = i.unit THEN e.qty ELSE e.qty * i.terima_to_unit END)
+                   FILTER (WHERE e.kind = 'terima') AS terima,
+               bool_or(e.kind = 'terima' AND e.unit <> i.unit AND i.terima_to_unit IS NULL) AS no_conv,
                sum(e.qty) FILTER (WHERE e.kind = 'guna')   AS guna,
                sum(e.qty) FILTER (WHERE e.kind = 'buang')  AS buang
         FROM public.stok_entries e JOIN outl ON outl.outlet_code = e.outlet_code
+        JOIN public.stok_items i ON i.code = e.item_code
         WHERE e.business_date = p_date
         GROUP BY e.outlet_code, e.item_code
     ), counts AS (   -- latest count per outlet/item/day (a recount replaces)
@@ -642,7 +657,9 @@ RETURNS TABLE (
         ORDER BY e.outlet_code, e.item_code, e.business_date, e.created_at DESC, e.id DESC
     ), base AS (
         SELECT o.outlet_code, i.code AS item_code, i.category,
-               coalesce(en.terima, 0) AS terima, coalesce(en.guna, 0) AS guna,
+               en.terima_raw, coalesce(en.no_conv, false) AS no_conv,
+               CASE WHEN coalesce(en.no_conv, false) THEN NULL ELSE coalesce(en.terima, 0) END AS terima,
+               coalesce(en.guna, 0) AS guna,
                coalesce(en.buang, 0) AS buang, c.qty AS baki,
                pc.qty AS prev_baki, pc.business_date AS prev_baki_date,
                (en.item_code IS NOT NULL OR c.qty IS NOT NULL) AS touched
@@ -661,11 +678,12 @@ RETURNS TABLE (
                b.prev_baki + b.terima - b.buang - b.baki AS actual_usage
         FROM base b WHERE b.touched
     )
-    SELECT c.outlet_code, c.item_code, c.category, c.terima, c.guna, c.buang, c.baki,
+    SELECT c.outlet_code, c.item_code, c.category, c.terima_raw, c.terima, c.guna, c.buang, c.baki,
            c.prev_baki, c.prev_baki_date, c.expected, c.actual_usage,
            CASE WHEN c.guna > 0 AND c.actual_usage IS NOT NULL
                 THEN round((c.actual_usage - c.guna) / c.guna, 4) END,
            CASE WHEN c.baki IS NULL THEN 'belum_kira'
+                WHEN c.no_conv THEN 'perlu_saiz_pek'
                 WHEN c.prev_baki IS NULL THEN 'tiada_baki_semalam'
                 WHEN c.guna = 0 THEN CASE WHEN abs(c.actual_usage) < 0.0001 THEN 'ok'
                                          WHEN c.actual_usage > 0 THEN 'high_wastage'

@@ -14,10 +14,11 @@ INSERT INTO stok_devices (device_id, outlet_code, label) VALUES
   ('00000000-0000-0000-0000-00000000d001', 'SEK20', 'tablet dapur');
 
 -- a few items shaped like the approved seed (0073)
+INSERT INTO stok_items (code, category, name_bm, unit, decimals, terima_unit, terima_to_unit, merchant_patterns, match_keywords, exclude_keywords, sort) VALUES
+  ('ayam_whole_leg', 'ayam',    'Peha Ayam',        'pcs', 0, 'kg', 4,    '{BESTARI FARM (M) SDN BHD}', '{WHOLE LEG,WHITE LEG}', '{}', 10),
+  ('ayam_superch',   'ayam',    'Ayam Super',       'pcs', 0, 'kg', NULL, '{BESTARI FARM (M) SDN BHD}', '{SUPERCH,SUPER CH}', '{P8}', 11),
+  ('ayam_p8',        'ayam',    'Ayam Potong 8',    'pcs', 0, 'kg', NULL, '{BESTARI FARM (M) SDN BHD}', '{P8}', '{}', 12);
 INSERT INTO stok_items (code, category, name_bm, unit, decimals, merchant_patterns, match_keywords, exclude_keywords, sort) VALUES
-  ('ayam_whole_leg', 'ayam',    'Peha Ayam',        'kg',  2, '{BESTARI FARM (M) SDN BHD}', '{WHOLE LEG,WHITE LEG}', '{}', 10),
-  ('ayam_superch',   'ayam',    'Ayam Super',       'kg',  2, '{BESTARI FARM (M) SDN BHD}', '{SUPERCH,SUPER CH}', '{P8}', 11),
-  ('ayam_p8',        'ayam',    'Ayam Potong 8',    'kg',  2, '{BESTARI FARM (M) SDN BHD}', '{P8}', '{}', 12),
   ('daging_segar',   'daging',  'Daging Segar',     'kg',  2, '{BESTARI FARM (M) SDN BHD}', '{BEEF}', '{CINCANG}', 20),
   ('kambing_mysore', 'kambing', 'Kambing Mysore',   'kg',  2, '{BESTARI FARM (M) SDN BHD}', '{MUTTON MYSURE,MUTTON MYSORE}', '{}', 30),
   ('kambing_leg',    'kambing', 'Kambing Kaki',     'kg',  2, '{MD HAN%}', '{MUTTON LEG BONE}', '{}', 31),
@@ -155,6 +156,7 @@ BEGIN
         'kind', 'terima', 'supplier', 'BESTARI FARM (M) SDN BHD', 'receipt_id', 9001,
         'device_id', '00000000-0000-0000-0000-00000000d001', 'captured_at', now(),
         'items', jsonb_build_array(jsonb_build_object('item_code', 'ayam_whole_leg', 'qty', 38, 'prefill_qty', 40),
+                                   jsonb_build_object('item_code', 'ayam_superch', 'qty', 29.4, 'prefill_qty', 29.4),
                                    jsonb_build_object('item_code', 'daging_segar', 'qty', 22.5, 'prefill_qty', 22.5))));
   ASSERT r ->> 'status' = 'ok', 'terima ok: ' || r::text;
   ASSERT jsonb_array_length(stok_terima_prefill(20)) = 2, 'confirmed receipt drops out of the pre-fill';
@@ -162,17 +164,24 @@ BEGIN
   r := stok_submit_batch(jsonb_build_object('id', '10000000-0000-0000-0000-000000000001', 'kind', 'terima',
         'items', jsonb_build_array(jsonb_build_object('item_code', 'ayam_whole_leg', 'qty', 1))));
   ASSERT r ->> 'status' = 'exists', 'same id is idempotent (offline retry)';
-  ASSERT (SELECT count(*) FROM stok_entries) = 2, 'retry wrote nothing';
+  ASSERT (SELECT count(*) FROM stok_entries) = 3, 'retry wrote nothing';
+  ASSERT (SELECT unit FROM stok_entries WHERE item_code = 'ayam_whole_leg') = 'kg', 'ayam terima is stored in kg';
 
   -- Guna then Baki (a recount the same night is allowed; the latest wins)
   r := stok_submit_batch(jsonb_build_object('id', '10000000-0000-0000-0000-000000000002', 'kind', 'guna',
-        'items', jsonb_build_array(jsonb_build_object('item_code', 'ayam_whole_leg', 'qty', 30))));
-  ASSERT r ->> 'status' = 'ok', 'guna ok';
+        'items', jsonb_build_array(jsonb_build_object('item_code', 'ayam_whole_leg', 'qty', 150))));
+  ASSERT r ->> 'status' = 'ok', 'guna ok (pcs)';
   r := stok_submit_batch(jsonb_build_object('id', '10000000-0000-0000-0000-000000000003', 'kind', 'baki',
-        'items', jsonb_build_array(jsonb_build_object('item_code', 'ayam_whole_leg', 'qty', 9))));
+        'items', jsonb_build_array(jsonb_build_object('item_code', 'ayam_whole_leg', 'qty', 9),
+                                   jsonb_build_object('item_code', 'ayam_superch', 'qty', 12))));
   ASSERT r ->> 'status' = 'ok', 'baki ok';
-  r := stok_submit_batch(jsonb_build_object('id', '10000000-0000-0000-0000-000000000004', 'kind', 'baki',
+  BEGIN
+    PERFORM stok_submit_batch(jsonb_build_object('id', '10000000-0000-0000-0000-00000000000c', 'kind', 'baki',
         'items', jsonb_build_array(jsonb_build_object('item_code', 'ayam_whole_leg', 'qty', 8.5))));
+    RAISE EXCEPTION 'half a piece accepted';
+  EXCEPTION WHEN invalid_parameter_value THEN NULL; END;
+  r := stok_submit_batch(jsonb_build_object('id', '10000000-0000-0000-0000-000000000004', 'kind', 'baki',
+        'items', jsonb_build_array(jsonb_build_object('item_code', 'ayam_whole_leg', 'qty', 10))));
   ASSERT r ->> 'status' = 'ok', 'recount ok';
   ASSERT (stok_today() -> 'kinds' ->> 'baki')::int = 2 AND (stok_today() -> 'kinds' ->> 'terima')::int = 1, 'today summary';
   -- a phone clock 2 days in the future must not move the record
@@ -276,13 +285,14 @@ EXCEPTION WHEN insufficient_privilege THEN NULL; END $$;
 RESET ROLE;
 
 -- ----------------------------------------------------- office: variance --
--- whole leg: yesterday counted 10, today terima 38, guna 30, recount 8.5
---   expected = 10 + 38 - 30 = 18; actual usage = 10 + 38 - 8.5 = 39.5
---   (39.5 - 30) / 30 = +31.7% -> HIGH WASTAGE
+-- whole leg (pcs; terima kg x 4 pcs/kg): yesterday counted 40, today terima
+-- 38 kg = 152 pcs, guna 150, recount 10
+--   expected = 40 + 152 - 150 = 42; actual usage = 40 + 152 - 10 = 182
+--   (182 - 150) / 150 = +21.3% -> HIGH WASTAGE
 INSERT INTO stok_batches (id, outlet_code, business_date, kind, staff_id, captured_at) VALUES
  ('20000000-0000-0000-0000-000000000001', 'SEK20', stok_business_date(now()) - 1, 'baki', '00000000-0000-0000-0000-0000000000a1', now() - interval '1 day');
 INSERT INTO stok_entries (batch_id, outlet_code, business_date, kind, item_code, qty, unit, staff_id) VALUES
- ('20000000-0000-0000-0000-000000000001', 'SEK20', stok_business_date(now()) - 1, 'baki', 'ayam_whole_leg', 10, 'kg', '00000000-0000-0000-0000-0000000000a1'),
+ ('20000000-0000-0000-0000-000000000001', 'SEK20', stok_business_date(now()) - 1, 'baki', 'ayam_whole_leg', 40, 'pcs', '00000000-0000-0000-0000-0000000000a1'),
  ('20000000-0000-0000-0000-000000000001', 'SEK20', stok_business_date(now()) - 1, 'baki', 'gula_pasir', 3, 'karung', '00000000-0000-0000-0000-0000000000a1');
 
 SELECT pg_temp.claims_office();
@@ -291,9 +301,12 @@ DO $$
 DECLARE g record;
 BEGIN
   SELECT * INTO g FROM stok_office_grid(stok_business_date(now()), 'SEK20') WHERE item_code = 'ayam_whole_leg';
-  ASSERT g.baki = 8.5, 'latest recount wins: ' || row_to_json(g)::text;
-  ASSERT g.expected = 18 AND g.actual_usage = 39.5, 'expected 18 / used 39.5: ' || row_to_json(g)::text;
-  ASSERT g.status = 'high_wastage' AND g.variance_pct = 0.3167, '+31.7% = HIGH WASTAGE: ' || row_to_json(g)::text;
+  ASSERT g.baki = 10, 'latest recount wins: ' || row_to_json(g)::text;
+  ASSERT g.terima_raw = 38 AND g.terima = 152, 'terima kg -> pcs: ' || row_to_json(g)::text;
+  ASSERT g.expected = 42 AND g.actual_usage = 182, 'expected 42 / used 182: ' || row_to_json(g)::text;
+  ASSERT g.status = 'high_wastage' AND g.variance_pct = 0.2133, '+21.3% = HIGH WASTAGE: ' || row_to_json(g)::text;
+  SELECT * INTO g FROM stok_office_grid(stok_business_date(now()), 'SEK20') WHERE item_code = 'ayam_superch';
+  ASSERT g.status = 'perlu_saiz_pek' AND g.terima IS NULL AND g.terima_raw = 29.4, 'no pack size -> no variance: ' || row_to_json(g)::text;
   SELECT * INTO g FROM stok_office_grid(stok_business_date(now()), 'SEK20') WHERE item_code = 'gula_pasir';
   ASSERT g.status = 'belum_kira' AND g.guna = 1, 'guna without a count yet: ' || row_to_json(g)::text;
   SELECT * INTO g FROM stok_office_grid(stok_business_date(now()), 'SEK20') WHERE item_code = 'daging_segar';
