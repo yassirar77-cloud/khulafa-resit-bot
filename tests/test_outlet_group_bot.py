@@ -43,6 +43,35 @@ class OutletGroupBotTests(unittest.TestCase):
         self.assertEqual(result, "sent")
         return parent.await_args
 
+    def _send_with(self, side_effect):
+        from telegram.error import RetryAfter  # noqa: F401
+        with mock.patch.object(
+            ExtBot, "send_message", new=mock.AsyncMock(side_effect=side_effect)
+        ) as parent, mock.patch.object(cn, "shift_at", return_value=(cn.MORNING, None)), \
+                mock.patch.object(outlet_group_bot.asyncio, "sleep", new=mock.AsyncMock()) as nap:
+            try:
+                result = asyncio.run(self.bot.send_message(chat_id=GROUP, text="Stok?"))
+            except Exception as exc:
+                result = exc
+        return result, parent.await_count, nap.await_count
+
+    def test_flood_control_waits_and_sends_again(self):
+        from telegram.error import RetryAfter
+        result, sends, naps = self._send_with([RetryAfter(13), "sent"])
+        self.assertEqual((result, sends, naps), ("sent", 2, 1))
+
+    def test_flood_control_gives_up_after_retries(self):
+        from telegram.error import RetryAfter
+        result, sends, _ = self._send_with([RetryAfter(1)] * 5)
+        self.assertIsInstance(result, RetryAfter)
+        self.assertEqual(sends, outlet_group_bot.FLOOD_RETRIES + 1)
+
+    def test_very_long_flood_wait_is_not_slept_through(self):
+        from telegram.error import RetryAfter
+        result, sends, naps = self._send_with([RetryAfter(900), "sent"])
+        self.assertIsInstance(result, RetryAfter)
+        self.assertEqual((sends, naps), (1, 0))
+
     def test_group_message_gets_cashier_prefix(self):
         call = self._send(chat_id=GROUP, text="Stok?")
         self.assertEqual(call.args[1], "Cashier,\nStok?")
