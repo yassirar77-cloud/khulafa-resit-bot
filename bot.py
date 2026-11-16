@@ -15,6 +15,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from flask import Flask, jsonify, render_template
 from openai import OpenAI
 from supabase import Client, create_client
+
+from db_client import ThreadLocalClient
 from telegram import (
     BotCommand,
     InlineKeyboardButton,
@@ -304,7 +306,10 @@ OUTLET_TITLE_PREFIX = "khulafa"
 OUTLET_TRAILING_NOISE = {"resit", "resits", "receipt", "receipts"}
 
 zai_client = OpenAI(api_key=ZAI_API_KEY, base_url=ZAI_BASE_URL)
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# One client per thread behind the shared name (db_client): the bot's database
+# calls run in worker threads, and two threads on one client's HTTP/2
+# connection fail with "[Errno 11] Resource temporarily unavailable".
+supabase: Client = ThreadLocalClient(lambda: create_client(SUPABASE_URL, SUPABASE_KEY))
 
 OCR_PROMPT = (
     "You are a receipt OCR assistant specialised in Malaysian supplier invoices "
@@ -2407,12 +2412,11 @@ async def _outside_send_strike(bot, result: dict, *, chat_id, reply_to_message_i
         return False
     if outside_purchase.scold_channel() == "dm" and contact.get("telegram_user_id"):
         try:
-            await bot.send_message(
-                chat_id=contact["telegram_user_id"],
-                text=outside_purchase.group_message(
-                    row, shown_no, shown_history, contact.get("language") or "bm"),
-            )
-            sent_dm = True
+            dm_text = outside_purchase.group_message(
+                row, shown_no, shown_history, contact.get("language") or "bm")
+            for chunk in chunk_message(dm_text):
+                await bot.send_message(chat_id=contact["telegram_user_id"], text=chunk)
+                sent_dm = True
         except Exception:
             # The cashier has not started the bot: the group gets it instead.
             logger.info("outside purchase: DM to cashier failed, replying in the group",
@@ -2420,12 +2424,17 @@ async def _outside_send_strike(bot, result: dict, *, chat_id, reply_to_message_i
     sent_group = False
     if not sent_dm and chat_id is not None:
         try:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=outside_purchase.group_message(row, shown_no, shown_history, "bm_tamil"),
-                reply_to_message_id=reply_to_message_id, allow_sending_without_reply=True,
-            )
-            sent_group = True
+            # Two languages plus the strike list can pass Telegram's 4096
+            # characters ("Message is too long"): send it in pieces, the
+            # first one as the reply under the receipt.
+            group_text = outside_purchase.group_message(row, shown_no, shown_history, "bm_tamil")
+            for n, chunk in enumerate(chunk_message(group_text)):
+                await bot.send_message(
+                    chat_id=chat_id, text=chunk,
+                    reply_to_message_id=reply_to_message_id if n == 0 else None,
+                    allow_sending_without_reply=True,
+                )
+                sent_group = True
         except Exception:
             logger.exception("outside purchase: group message failed (purchase %s)", row.get("id"))
     if (sent_dm or sent_group) and row.get("id") is not None:
@@ -7643,7 +7652,7 @@ async def _handle_staff_text(message, context, text: str, code: str) -> None:
     now = datetime.now(MALAYSIA_TZ)
     waiting = await asyncio.to_thread(_detail_thread, message.chat_id)
     if staff_live.awaiting_detail(waiting, now):
-        await _save_detail(waiting, message, code, text)
+        await _save_detail(waiting, message, code, text, context=context)
         return
     reply_to = message.reply_to_message
     thread = await asyncio.to_thread(
@@ -7746,7 +7755,7 @@ async def _acknowledge(message, thread, parsed, text) -> None:
         logger.exception("staff ack: failed (thread %s)", thread.get("id"))
 
 
-async def _save_detail(thread, message, code, text=None) -> None:
+async def _save_detail(thread, message, code, text=None, *, context) -> None:
     """Typed (or spoken) details after a "Change" / "Problem" tap: read them,
     add them to that answer, and learn any order items."""
     text = text if text is not None else message.text

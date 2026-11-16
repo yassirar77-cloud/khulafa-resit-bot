@@ -148,6 +148,10 @@ class StaffLiveWiring(unittest.TestCase):
         self.assertIn("vocabulary=staff_chat.item_vocabulary()", ackfn)
         detail = _block(self.src, "async def _save_detail(")
         self.assertIn("await _acknowledge(message, thread, parsed, text)", detail)
+        # _save_detail uses context.application (issue flagging), so it must
+        # be handed the context — it once raised NameError on every detail.
+        self.assertIn("text=None, *, context)", detail)
+        self.assertIn("await _save_detail(waiting, message, code, text, context=context)", body)
         self.assertIn("staff_live.asks_if_bot(text)", body)
         self.assertIn('parsed.get("asks_if_bot")', body)
         self.assertIn("await _save_order_answer(thread, parsed, text)", body)
