@@ -638,7 +638,11 @@ class WiringTests(unittest.TestCase):
     def test_shadow_mode_sends_nothing_to_cashiers(self):
         send = self._block("async def _outside_send_strike(")
         self.assertIn("if not outside_purchase.is_live():", send)
-        self.assertLess(send.index("if not outside_purchase.is_live():"), send.index("bot.send_message(\n                chat_id=chat_id"))
+        self.assertLess(send.index("if not outside_purchase.is_live():"), send.index("chat_id=chat_id, text=chunk"))
+        # The two-language strike message is sent in pieces: one long message
+        # failed in production with "Message is too long".
+        self.assertIn("for n, chunk in enumerate(chunk_message(group_text)):", send)
+        self.assertIn("for chunk in chunk_message(dm_text):", send)
         over = self._block("async def overbuy_on_upload(")
         self.assertIn('live = flag.get("status") == overbuy_check.PENDING', over)
         self.assertIn("if live:", over)
