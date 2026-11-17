@@ -43,6 +43,7 @@ _D_SUBJECT_RE = re.compile(r"^\s*(D-[\w\s]+?)\s+ON\s+\d", re.IGNORECASE)
 # 15-minute poll. Recognising them lets the ingest layer skip them terminally
 # (marked \Seen). If monthly ingestion is ever built, recover the old emails
 # with a seen-mail sweep (unseen_only=False).
+_UID_RE = re.compile(rb"UID (\d+)")
 _MONTHLY_SUBJECT_RE = re.compile(r"^\s*MONTHLY\s+REPORT\b", re.IGNORECASE)
 
 
@@ -96,7 +97,8 @@ class Mailbox:
         return cls(conn, folder)
 
     def search(self, *, sender: str = DEFAULT_SENDER, subject_token: str = DEFAULT_SUBJECT_TOKEN,
-               unseen_only: bool = True, since: datetime | None = None) -> list[bytes]:
+               unseen_only: bool = True, since: datetime | None = None,
+               seen_only: bool = False) -> list[bytes]:
         """Return matching message UIDs. Criteria are ANDed by IMAP: the POS
         sender, a SHIFTCLOSE subject, (optionally) unread only, and an optional
         SINCE date.
@@ -108,7 +110,10 @@ class Mailbox:
         email as read — silently dropping that shift forever (the poll only
         searches UNSEEN). UIDs are stable for the life of the mailbox."""
         criteria: list[str] = []
-        if unseen_only:
+        if seen_only:
+            # Already-read mail only (the read-mail recovery sweep).
+            criteria.append("SEEN")
+        elif unseen_only:
             criteria.append("UNSEEN")
         if sender:
             criteria.append(f'FROM "{sender}"')
@@ -135,6 +140,38 @@ class Mailbox:
             raise RuntimeError(f"IMAP fetch failed for {msg_id!r}")
         raw = msg_data[0][1]
         return email.message_from_bytes(raw, policy=policy.default)
+
+    def fetch_message_ids(self, msg_ids, chunk_size: int = 200) -> dict:
+        """Map each UID to its ``Message-ID`` header WITHOUT downloading the
+        message (a few hundred bytes per mail instead of the whole attachment).
+
+        Lets the read-mail recovery sweep decide which already-read emails
+        were never ingested before paying for a full fetch. PEEK, so no flag
+        is touched. UIDs whose header could not be read are simply absent."""
+        out: dict = {}
+        ids = [i if isinstance(i, bytes) else str(i).encode() for i in msg_ids]
+        for start in range(0, len(ids), chunk_size):
+            chunk = ids[start:start + chunk_size]
+            typ, data = self._conn.uid(
+                "FETCH", b",".join(chunk).decode(),
+                "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
+            if typ != "OK" or not data:
+                continue
+            for pos, item in enumerate(data):
+                if not isinstance(item, tuple) or len(item) < 2:
+                    continue
+                # The UID normally precedes the literal ("12 (UID 345 BODY[...]
+                # {56}"); some servers put it after, in the next element.
+                m = _UID_RE.search(item[0] or b"")
+                if not m and pos + 1 < len(data) and isinstance(data[pos + 1], bytes):
+                    m = _UID_RE.search(data[pos + 1])
+                if not m:
+                    continue
+                mid = email.message_from_bytes(
+                    item[1] or b"", policy=policy.default)["message-id"]
+                if mid and str(mid).strip():
+                    out[m.group(1)] = str(mid).strip()
+        return out
 
     def mark_seen(self, msg_id) -> None:
         self._conn.uid("STORE", msg_id, "+FLAGS", "\\Seen")
