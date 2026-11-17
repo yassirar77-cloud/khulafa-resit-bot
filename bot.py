@@ -149,7 +149,8 @@ import sales_analytics
 import shop_price_comparison
 import weekly_manager_reports as wmr
 from digest_data import gather_digest_data, log_digest
-from sales_ingest import run_ingest_once
+from sales_ingest import run_ingest_once, run_read_recovery_once
+import pos_shift_gaps
 from sales_parser import OUTLET_CANONICAL_BY_CODE
 from receipt_classifier import ReceiptType, classify_receipt
 
@@ -5469,7 +5470,16 @@ async def sales_ingest_status_command(update: Update, context: ContextTypes.DEFA
         logger.exception("sales_ingest_status failed")
         await message.reply_text("Failed to read ingest log.")
         return
-    await message.reply_text(sales_analytics.format_ingest_status(rows))
+    # Missing shift numbers + silent outlets. Best-effort: the log summary is
+    # still sent if this check fails.
+    try:
+        health = await asyncio.to_thread(
+            pos_shift_gaps.status_lines, supabase, datetime.now(MALAYSIA_TZ))
+    except Exception:
+        logger.exception("sales_ingest_status: shift-gap check failed")
+        health = None
+    for chunk in chunk_message(sales_analytics.format_ingest_status(rows, health)):
+        await message.reply_text(chunk)
 
 
 def _fetch_sales_daily_latency(outlet_code, since_date):
@@ -5516,9 +5526,29 @@ async def sales_ingest_manual_command(update: Update, context: ContextTypes.DEFA
     message = update.effective_message
     if not message or not is_reviewer(_command_owner_id(update)):
         return
-    await message.reply_text("Fetching shift-close emails…")
+    # "/sales_ingest_manual 30" = deep recovery: also re-scan the READ mail of
+    # the last 30 days for anything that was never ingested.
+    deep_days = None
+    if context.args:
+        try:
+            deep_days = int(context.args[0])
+        except ValueError:
+            deep_days = None
+        if deep_days is None or deep_days < 1:
+            await message.reply_text(
+                "Usage: /sales_ingest_manual [DAYS]\n"
+                "Example: /sales_ingest_manual 30 — also recover emails of the "
+                "last 30 days that were read but never ingested.")
+            return
+    await message.reply_text(
+        f"Fetching shift-close emails (deep recovery, {deep_days} days)…"
+        if deep_days else "Fetching shift-close emails…")
     try:
-        summary = await asyncio.to_thread(run_ingest_once, supabase)
+        if deep_days:
+            summary = await asyncio.to_thread(
+                run_read_recovery_once, supabase, days=deep_days)
+        else:
+            summary = await asyncio.to_thread(run_ingest_once, supabase)
     except KeyError as exc:
         await message.reply_text(
             f"Missing env var {exc}. Set GMAIL_INBOX and GMAIL_APP_PASSWORD on the service."
@@ -5538,6 +5568,16 @@ async def sales_ingest_manual_command(update: Update, context: ContextTypes.DEFA
         f"• Skipped (unknown): {summary['skipped_unknown']}\n"
         f"• Errors: {summary['errors']}"
     )
+    rec = summary.get("read_recovered") or {}
+    if rec:
+        text += (
+            f"\n• Read mail checked: {rec.get('scanned', 0)}"
+            f"\n• Recovered (read before the poll): {rec.get('inserted', 0)}"
+        )
+        for subj in (rec.get("subjects") or [])[:15]:
+            text += f"\n   - {subj}"
+        if rec.get("errors"):
+            text += f"\n• Recovery errors: {rec['errors']}"
     dead = summary.get("dead_letter", 0)
     stuck = summary.get("dead_letter_subjects") or []
     if dead:
@@ -9634,6 +9674,13 @@ async def post_pos_arrival_alert(application: Application) -> None:
     except Exception:
         logger.exception("POS arrival check failed")
         return
+    # Exact lost shift numbers + outlets that stopped emailing. Separate
+    # try: a failure here must not suppress the arrival lines above.
+    try:
+        lines = list(lines) + await asyncio.to_thread(
+            pos_shift_gaps.alert_lines, _pos_alert_client, datetime.now(MALAYSIA_TZ))
+    except Exception:
+        logger.exception("POS shift-gap check failed")
     if not lines:
         logger.info("POS arrival check: all files in")
         return

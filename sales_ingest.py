@@ -781,7 +781,7 @@ def _is_final_log_row(status, detail) -> bool:
 
 
 def run(*, store, mailbox, now_my, since=None, unseen_only=True,
-        subject_token=None, msg_ids=None) -> dict:
+        subject_token=None, msg_ids=None, inserted_detail=None) -> dict:
     """Drive the mailbox end-to-end. Returns a summary dict.
 
     The ``outlet_canonical`` registry is loaded ONCE per run (no per-email
@@ -801,7 +801,9 @@ def run(*, store, mailbox, now_my, since=None, unseen_only=True,
     message-id dedup keeps everything already stored idempotent.
 
     ``msg_ids`` processes exactly those UIDs instead of searching (the
-    read-mail recovery sweep, which has already picked the unhandled ones)."""
+    read-mail recovery sweep, which has already picked the unhandled ones);
+    ``inserted_detail`` tags the log row of each plain insert of that pass so
+    the status report can tell recovered shifts from normally polled ones."""
     summary = {
         "fetched": 0, "inserted": 0, "skipped": 0,
         "skipped_inactive": 0, "skipped_report": 0, "skipped_unknown": 0,
@@ -809,6 +811,7 @@ def run(*, store, mailbox, now_my, since=None, unseen_only=True,
         "dead_letter": 0, "dead_letter_subjects": [],
         "parked": 0, "parked_subjects": [],
         "new_outlets": [], "migration_0038_needed": False,
+        "inserted_subjects": [],
     }
     outlets = store.load_outlets()  # one query, reused for the whole batch
     error_counts = _load_error_counts(store)  # prior failures per message-id
@@ -896,6 +899,11 @@ def run(*, store, mailbox, now_my, since=None, unseen_only=True,
                 continue
             error_counts[mid] = error_counts.get(mid, 0) + 1
 
+        if status == "inserted":
+            if detail is None and inserted_detail:
+                detail = inserted_detail
+            if len(summary["inserted_subjects"]) < 30:
+                summary["inserted_subjects"].append(email_dict.get("subject"))
         _maybe_log(store, _log_entry(email_dict, status, detail, outlet_name))
         summary[_COUNTER_BY_STATUS.get(status, "errors")] += 1
         if status in _MARK_SEEN_STATUSES:
@@ -917,6 +925,10 @@ def run(*, store, mailbox, now_my, since=None, unseen_only=True,
 # for. Only the Message-ID headers are downloaded to decide; a mail already
 # handled costs nothing more.
 READ_SWEEP_DAYS = 7
+# Upper bound for an owner-requested deep sweep (/sales_ingest_manual N).
+READ_SWEEP_MAX_DAYS = 90
+# sales_ingest_log.detail on a shift stored by the sweep rather than the poll.
+RECOVERED_DETAIL = "recovered_read_mail"
 # The log lookup reaches further back than the mail search so a mail handled
 # just before the window edge is still recognised.
 _READ_SWEEP_LOG_MARGIN_DAYS = 2
@@ -953,8 +965,40 @@ def recover_read_mail(*, store, mailbox, now_my, days=None) -> dict:
             todo.append(uid)
     if not todo:
         return {"scanned": len(uids), "fetched": 0, "inserted": 0}
-    summary = run(store=store, mailbox=mailbox, now_my=now_my, msg_ids=todo)
+    summary = run(store=store, mailbox=mailbox, now_my=now_my, msg_ids=todo,
+                  inserted_detail=RECOVERED_DETAIL)
     summary["scanned"] = len(uids)
+    return summary
+
+
+def _recovery_digest(recovered) -> dict:
+    out = {k: recovered.get(k, 0)
+           for k in ("scanned", "fetched", "inserted", "skipped",
+                     "skipped_inactive", "errors")}
+    out["subjects"] = list(recovered.get("inserted_subjects") or [])
+    return out
+
+
+def run_read_recovery_once(client=None, *, days, now_my=None) -> dict:
+    """Owner-requested deep sweep: ingest every POS email of the last ``days``
+    days (capped at READ_SWEEP_MAX_DAYS) that is in the inbox but was never
+    ingested, read or not. For gaps older than the automatic per-poll window.
+    Idempotent — anything already stored is skipped."""
+    days = max(1, min(int(days), READ_SWEEP_MAX_DAYS))
+    client = client or _build_client()
+    now_my = now_my or datetime.now(MALAYSIA_TZ)
+    store = SupabaseSalesStore(client)
+    mailbox = Mailbox.connect()
+    try:
+        # Unread mail first (normal path), then the read mail of the window.
+        summary = run(store=store, mailbox=mailbox, now_my=now_my)
+        recovered = recover_read_mail(
+            store=store, mailbox=mailbox, now_my=now_my, days=days)
+    finally:
+        mailbox.close()
+    summary["read_recovered"] = _recovery_digest(recovered)
+    summary["read_recovered"]["days"] = days
+    logger.info("Sales deep recovery (%s days): %s", days, summary)
     return summary
 
 
@@ -1076,14 +1120,12 @@ def run_ingest_once(client=None, *, now_my=None, since=None, unseen_only=True,
             try:
                 recovered = recover_read_mail(
                     store=store, mailbox=mailbox, now_my=now_my)
-                summary["read_recovered"] = {
-                    k: recovered.get(k, 0)
-                    for k in ("scanned", "fetched", "inserted", "skipped", "errors")
-                }
+                summary["read_recovered"] = _recovery_digest(recovered)
                 if recovered.get("inserted"):
                     logger.warning(
                         "Recovered %s POS email(s) that were marked read before "
-                        "the poll saw them", recovered["inserted"])
+                        "the poll saw them: %s", recovered["inserted"],
+                        "; ".join(str(x) for x in recovered.get("inserted_subjects") or []))
                 if recovered.get("new_outlets"):
                     summary["new_outlets"].extend(recovered["new_outlets"])
                 if recovered.get("migration_0038_needed"):

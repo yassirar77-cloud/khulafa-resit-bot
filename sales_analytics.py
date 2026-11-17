@@ -268,20 +268,41 @@ def format_top_items_sold(items, n) -> str:
     return "\n".join(lines)
 
 
-def format_ingest_status(log_rows) -> str:
-    """Summarise the last batch of sales_ingest_log rows: counts by status."""
+def format_ingest_status(log_rows, health_lines=None) -> str:
+    """Summarise the last batch of sales_ingest_log rows: counts by status.
+
+    ``health_lines`` (optional) are the missing-shift / silent-outlet lines
+    from ``pos_shift_gaps.status_lines``; ``[]`` means "checked, all clear",
+    ``None`` means the check was not run."""
     def n(*statuses):
         return sum(1 for r in log_rows if r.get("status") in statuses)
 
+    recovered = [r for r in log_rows if r.get("status") == "inserted"
+                 and r.get("detail") == "recovered_read_mail"]
     lines = [
         "Sales ingest — last 24h:",
         f"• Fetched: {len(log_rows)}",
         f"• Inserted: {n('inserted')}",
         f"• Skipped (duplicate): {n('skipped')}",
         f"• Skipped (inactive): {n('skipped_inactive')}",
+        f"• Skipped (monthly/other report): {n('skipped_report')}",
         f"• Skipped (unknown): {n('skipped_unknown')}",
         f"• Errors: {n('error')}",
     ]
+    if recovered:
+        lines.append(
+            f"• Recovered (email was read before the poll): {len(recovered)}")
+        for r in recovered[:10]:
+            lines.append(f"   - {r.get('source_subject') or '?'}")
+    if health_lines is not None:
+        lines.append("")
+        if health_lines:
+            lines.append("Missing shifts / silent outlets (last 14 days):")
+            lines.extend(f"• {x}" for x in health_lines[:25])
+            if len(health_lines) > 25:
+                lines.append(f"• … and {len(health_lines) - 25} more")
+        else:
+            lines.append("No missing shift numbers, no silent outlets (last 14 days).")
     errors = [x for x in log_rows if x.get("status") == "error"]
     if errors:
         lines.append("Recent errors:")

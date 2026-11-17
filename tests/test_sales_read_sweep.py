@@ -77,6 +77,16 @@ class ReadSweepTests(unittest.TestCase):
         self.assertIsNone(mailbox.search_kwargs["subject_token"])
         self.assertEqual(mailbox.search_kwargs["since"].date().isoformat(), "2026-05-19")
 
+    def test_recovered_insert_is_tagged_in_the_log(self):
+        mailbox = SweepMailbox({
+            b"7": make_email(SUBJECT, _klang_content(), message_id="<lost>"),
+        })
+        store = SweepStore()
+        summary = recover_read_mail(store=store, mailbox=mailbox, now_my=NOW, days=7)
+        self.assertEqual(store.logs[-1]["status"], "inserted")
+        self.assertEqual(store.logs[-1]["detail"], "recovered_read_mail")
+        self.assertEqual(summary["inserted_subjects"], [SUBJECT])
+
     def test_already_handled_mail_is_not_downloaded(self):
         mailbox = SweepMailbox({
             b"7": make_email(SUBJECT, _klang_content(), message_id="<done>"),
