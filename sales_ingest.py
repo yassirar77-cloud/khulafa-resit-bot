@@ -498,6 +498,29 @@ class SupabaseSalesStore:
         except Exception:  # noqa: BLE001 - logging must never break ingestion
             logger.warning("Could not write sales_ingest_log row", exc_info=True)
 
+    def load_handled_message_ids(self, since_iso) -> set:
+        """Message-ids the ingest has already reached a FINAL decision on
+        since ``since_iso`` (per ``sales_ingest_log``): stored, duplicate,
+        inactive outlet, unsupported report, parked, or no attachment.
+
+        The read-mail recovery sweep skips these without downloading them, so
+        only mail that was read by a person BEFORE any poll saw it is fetched.
+        Raises on a failed read — the caller then skips the sweep rather than
+        re-downloading the whole window."""
+        from db_pagination import fetch_all_pages
+        rows = fetch_all_pages(
+            lambda: self.client.table(SALES_INGEST_LOG_TABLE)
+            .select("source_message_id, status, detail")
+            .gte("ran_at", since_iso)
+            .order("id", desc=False)
+        )
+        handled: set = set()
+        for r in rows:
+            mid = (r.get("source_message_id") or "").strip()
+            if mid and _is_final_log_row(r.get("status"), r.get("detail")):
+                handled.add(mid)
+        return handled
+
     def load_error_counts(self) -> dict:
         """Count prior ``error`` rows per ``source_message_id`` (one query,
         reused for the whole batch). Drives the dead-letter cap: once a
@@ -747,8 +770,18 @@ _COUNTER_BY_STATUS = {
 }
 
 
+def _is_final_log_row(status, detail) -> bool:
+    """True when a ``sales_ingest_log`` row records a FINAL decision for its
+    email (nothing a retry would change), as opposed to a retryable failure."""
+    if status in _MARK_SEEN_STATUSES:
+        return True
+    detail = detail or ""
+    return status == "error" and (
+        detail == "no_txt_attachment" or detail.startswith("dead_letter_parked:"))
+
+
 def run(*, store, mailbox, now_my, since=None, unseen_only=True,
-        subject_token=None) -> dict:
+        subject_token=None, msg_ids=None) -> dict:
     """Drive the mailbox end-to-end. Returns a summary dict.
 
     The ``outlet_canonical`` registry is loaded ONCE per run (no per-email
@@ -765,7 +798,10 @@ def run(*, store, mailbox, now_my, since=None, unseen_only=True,
     and optionally ``subject_token`` to target one outlet's emails). Recovery
     use: emails skipped as inactive/duplicate in the past were marked read, so
     the normal UNSEEN poll can never revisit them — a seen sweep can, and the
-    message-id dedup keeps everything already stored idempotent."""
+    message-id dedup keeps everything already stored idempotent.
+
+    ``msg_ids`` processes exactly those UIDs instead of searching (the
+    read-mail recovery sweep, which has already picked the unhandled ones)."""
     summary = {
         "fetched": 0, "inserted": 0, "skipped": 0,
         "skipped_inactive": 0, "skipped_report": 0, "skipped_unknown": 0,
@@ -778,8 +814,10 @@ def run(*, store, mailbox, now_my, since=None, unseen_only=True,
     error_counts = _load_error_counts(store)  # prior failures per message-id
     # subject_token=None (the default): fetch ALL matching POS mail (S- AND D-),
     # classify in code. A recovery sweep may narrow it to one outlet's subjects.
-    for msg_id in mailbox.search(since=since, subject_token=subject_token,
-                                 unseen_only=unseen_only):
+    if msg_ids is None:
+        msg_ids = mailbox.search(since=since, subject_token=subject_token,
+                                 unseen_only=unseen_only)
+    for msg_id in msg_ids:
         try:
             msg = mailbox.fetch(msg_id)
             email_dict = extract_shift_close(msg)
@@ -789,8 +827,12 @@ def run(*, store, mailbox, now_my, since=None, unseen_only=True,
             continue
         if email_dict is None:
             summary["errors"] += 1
+            # Log the real Message-ID (not the IMAP UID) so the read-mail
+            # sweep recognises this email as already looked at.
             _maybe_log(store, _log_entry(
-                {"message_id": str(msg_id)}, "error", "no_txt_attachment", None))
+                {"message_id": msg["message-id"] or str(msg_id),
+                 "subject": msg["subject"]},
+                "error", "no_txt_attachment", None))
             continue
 
         summary["fetched"] += 1
@@ -861,6 +903,58 @@ def run(*, store, mailbox, now_my, since=None, unseen_only=True,
                 mailbox.mark_seen(msg_id)
             except Exception:  # noqa: BLE001
                 logger.warning("Could not mark %r seen", msg_id, exc_info=True)
+    return summary
+
+
+# --- read-mail recovery sweep --------------------------------------------------
+
+# The poll only searches UNSEEN mail, and the master inbox is shared with
+# people. Whenever someone opens a POS email in Gmail before the next poll it
+# is marked read and the poll never sees it — production lost the 19:00 closes
+# of six outlets on 13 Nov 2026 that way (the emails were in the inbox, read
+# minutes before the 19:15 poll). So every poll also looks at the READ mail of
+# the last few days and ingests whatever the ingest log has no final decision
+# for. Only the Message-ID headers are downloaded to decide; a mail already
+# handled costs nothing more.
+READ_SWEEP_DAYS = 7
+# The log lookup reaches further back than the mail search so a mail handled
+# just before the window edge is still recognised.
+_READ_SWEEP_LOG_MARGIN_DAYS = 2
+
+
+def _read_sweep_days() -> int:
+    try:
+        return max(0, int(os.environ.get("SALES_READ_SWEEP_DAYS", READ_SWEEP_DAYS)))
+    except (TypeError, ValueError):
+        return READ_SWEEP_DAYS
+
+
+def recover_read_mail(*, store, mailbox, now_my, days=None) -> dict:
+    """Ingest POS emails of the last ``days`` days that were marked read before
+    any poll processed them. Returns a ``run``-style summary plus ``scanned``
+    (read mails looked at); ``fetched`` is how many were actually unhandled."""
+    days = _read_sweep_days() if days is None else days
+    if days <= 0:
+        return {"scanned": 0, "fetched": 0, "inserted": 0}
+    since = now_my - timedelta(days=days)
+    uids = mailbox.search(since=since, subject_token=None, seen_only=True)
+    if not uids:
+        return {"scanned": 0, "fetched": 0, "inserted": 0}
+    handled = store.load_handled_message_ids(
+        (since - timedelta(days=_READ_SWEEP_LOG_MARGIN_DAYS)).isoformat())
+    message_ids = mailbox.fetch_message_ids(uids)
+    todo = []
+    for uid in uids:
+        key = uid if isinstance(uid, bytes) else str(uid).encode()
+        mid = message_ids.get(key)
+        # No readable Message-ID: nothing to recognise it by next time, so it
+        # would be re-downloaded on every poll forever. Leave it alone.
+        if mid and mid not in handled:
+            todo.append(uid)
+    if not todo:
+        return {"scanned": len(uids), "fetched": 0, "inserted": 0}
+    summary = run(store=store, mailbox=mailbox, now_my=now_my, msg_ids=todo)
+    summary["scanned"] = len(uids)
     return summary
 
 
@@ -976,6 +1070,27 @@ def run_ingest_once(client=None, *, now_my=None, since=None, unseen_only=True,
     try:
         summary = run(store=store, mailbox=mailbox, now_my=now_my, since=since,
                       unseen_only=unseen_only, subject_token=subject_token)
+        # Regular poll only (not a targeted/recovery call): also pick up mail a
+        # person read before we got to it. Best-effort — never fails the poll.
+        if unseen_only and since is None and subject_token is None:
+            try:
+                recovered = recover_read_mail(
+                    store=store, mailbox=mailbox, now_my=now_my)
+                summary["read_recovered"] = {
+                    k: recovered.get(k, 0)
+                    for k in ("scanned", "fetched", "inserted", "skipped", "errors")
+                }
+                if recovered.get("inserted"):
+                    logger.warning(
+                        "Recovered %s POS email(s) that were marked read before "
+                        "the poll saw them", recovered["inserted"])
+                if recovered.get("new_outlets"):
+                    summary["new_outlets"].extend(recovered["new_outlets"])
+                if recovered.get("migration_0038_needed"):
+                    summary["migration_0038_needed"] = True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Read-mail recovery sweep failed (%s: %s)",
+                               type(exc).__name__, exc, exc_info=True)
     finally:
         mailbox.close()
     # Self-heal: shifts stored before the itemwise parser get their per-dish
