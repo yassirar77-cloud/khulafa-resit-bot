@@ -10,6 +10,26 @@ APScheduler jobs, a Flask health server). Data lives in Supabase.
 * Tests: `python -m unittest discover -s tests -p "test_*.py"` (no network).
 * Migrations: `migrations/00NN_*.sql`, applied once in the Supabase SQL editor.
 
+## Bill reading that checks itself
+
+`ocr_smart.py`, wired into `bot.run_verification`. A bill carries its own
+proof: qty x unit price = line total, and the lines add up to the bill total.
+Every reading is now checked against that, and a number is only ever changed
+when the arithmetic (or the calendar) backs the change.
+
+| Step | What it does | Model call |
+| --- | --- | --- |
+| Free fixes (before the audit) | A decimal point lost on one line (2 x 1150 against a printed 23.00), a missing qty or price the line total gives away, per-kg lines read as the bird count, a bill total exactly 10x / 100x off its lines, a future date (or an old one the transcription contradicts) where swapping day / month or the year lands in the last two weeks | none |
+| Audit corrections, arbitrated | The second pass's corrections are applied only if they do not break a bill that already adds up; the smallest change that makes the bill add up wins; a "corrected" item list that drops lines is refused | none |
+| Targeted re-read | When the bill still does not add up, the model is shown the lines, the gap and the suspect lines and asked to read those digits again. The answer is used only if it adds up AND agrees with the first reading on one side (same total, or same line sum). SST / discount / rounding / deposit lines are accepted as the reason for a gap only when the first transcription mentions them | one, only for bills that do not add up |
+
+What was changed (or refused) is written to `receipts.verification_notes`
+(`self-check: ...`, `verifier correction refused: ...`, `re-read rejected`)
+and logged as `OCR self-check: verdict=... fixes=... reread=... state=...`.
+`OCR_SELF_CHECK=off` restores the old behaviour; `OCR_REREAD=off` keeps the
+free fixes without the extra call; `OCR_REREAD_MODEL` picks the re-read model
+(default `ZAI_VERIFY_MODEL`). No migration.
+
 ## DeepSeek in this bot
 
 DeepSeek is the language model behind the **staff chat**. It never decides

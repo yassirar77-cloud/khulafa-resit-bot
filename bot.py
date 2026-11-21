@@ -44,6 +44,7 @@ from image_store import probe_cloudinary, upload_receipt_image
 from image_utils import resize_for_ocr
 from items_utils import normalize_items
 from money_utils import normalize_total
+import ocr_smart
 from ocr_quality import total_conflicts_with_item_sum
 from pending_review import (
     apply_edits_to_parsed,
@@ -174,6 +175,9 @@ WEBAPP_URL = os.environ.get("WEBAPP_URL", "")
 
 ZAI_MODEL = os.environ.get("ZAI_MODEL", "glm-4.6v-flash")
 ZAI_VERIFY_MODEL = os.environ.get("ZAI_VERIFY_MODEL", ZAI_MODEL)
+# Model for the targeted re-read of a bill whose numbers do not add up
+# (ocr_smart). Defaults to the verifier's model.
+OCR_REREAD_MODEL = os.environ.get("OCR_REREAD_MODEL", "").strip() or ZAI_VERIFY_MODEL
 # OCR provider for the first pass. Default keeps the proven chat-completions
 # path; set ZAI_OCR_PROVIDER=glm-ocr to use the cheaper layout_parsing endpoint.
 ZAI_OCR_PROVIDER = os.environ.get("ZAI_OCR_PROVIDER", "glm-4.6v-flash")
@@ -1261,9 +1265,48 @@ def _bump_verdict(verdict: str) -> None:
     )
 
 
+async def reread_bill(image_bytes: bytes, prompt: str) -> dict:
+    """One targeted re-read of a bill whose numbers do not add up
+    (ocr_smart.build_reread_prompt). Raises on API failure or non-JSON."""
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    start = time.monotonic()
+    response = await asyncio.to_thread(
+        zai_client.chat.completions.create,
+        model=OCR_REREAD_MODEL,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                ],
+            }
+        ],
+        temperature=0.0,
+    )
+    content = response.choices[0].message.content or "{}"
+    content = content.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    logger.info("OCR re-read response: latency=%.2fs resp_chars=%d",
+                time.monotonic() - start, len(content))
+    return json.loads(content)
+
+
 async def run_verification(image_bytes: bytes, parsed: dict) -> tuple[dict, str]:
     """Run the second-pass verification, mutating `parsed` if corrections
-    apply. Returns ({status, notes, confidence}, user_reply_prefix)."""
+    apply. Returns ({status, notes, confidence}, user_reply_prefix).
+
+    With the self-check on (ocr_smart, default) the reading is also checked
+    against the bill's own arithmetic: free fixes before the audit, the
+    audit's corrections applied only when they do not break a bill that adds
+    up, and one targeted re-read when the numbers still disagree."""
+    smart = ocr_smart.enabled()
+    smart_notes: list[str] = []
+    if smart:
+        try:
+            smart_notes.extend(ocr_smart.pre_check(parsed))
+        except Exception:
+            logger.exception("ocr_smart.pre_check failed; continuing with the reading as-is")
+
     try:
         result = await verify_extraction(image_bytes, parsed)
     except Exception as exc:
@@ -1279,51 +1322,75 @@ async def run_verification(image_bytes: bytes, parsed: dict) -> tuple[dict, str]
     errors = result["errors"]
     corrections = result["corrections"]
     notes = "; ".join(str(e) for e in errors) if errors else None
+    _bump_verdict(verdict)
 
-    def _final(status):
-        # Resolved AFTER any corrections so the math-agreement check sees the
-        # data we actually store. Math agreement -> 100; WRONG -> 80; etc.
-        return resolve_confidence(
-            status, confidence, parsed.get("items"), _to_float(parsed.get("total"))
+    # A WRONG verdict the verifier itself is unsure of (< 50) never has its
+    # corrections applied.
+    unsure = verdict == "WRONG" and confidence is not None and confidence < 50
+    changes: list[str] = []
+    refused: list[str] = []
+    if verdict != "CONFIRMED" and not unsure:
+        if smart:
+            try:
+                corrections, refused = ocr_smart.arbitrate_corrections(parsed, corrections)
+            except Exception:
+                logger.exception("ocr_smart.arbitrate_corrections failed; applying as given")
+        changes = _apply_corrections(parsed, corrections)
+
+    reread_outcome = None
+    if smart:
+        post = await ocr_smart.post_check(
+            parsed, lambda prompt: reread_bill(image_bytes, prompt))
+        smart_notes.extend(post["notes"])
+        reread_outcome = post["reread"]
+        logger.info(
+            "OCR self-check: verdict=%s fixes=%d refused=%d reread=%s state=%s",
+            verdict, len(smart_notes), len(refused), reread_outcome, post["state"],
         )
+
+    # Resolved AFTER every correction so the math-agreement check sees the
+    # data we actually store. Math agreement -> 100; WRONG -> 80; etc. Tax /
+    # discount lines the re-read found are taken off the total first.
+    math_total = ocr_smart.math_total(parsed) if smart else _to_float(parsed.get("total"))
+    final = resolve_confidence(verdict, confidence, parsed.get("items"), math_total)
+
+    smart_text = ocr_smart.summarize(smart_notes)
+    stored_notes = [notes] if notes else []
+    if smart_text:
+        stored_notes.append(f"self-check: {ocr_smart.summarize(smart_notes, limit=8)}")
+    if refused:
+        stored_notes.append("verifier correction refused: " + ", ".join(refused))
+    if reread_outcome in ("rejected", "failed"):
+        stored_notes.append(f"re-read {reread_outcome}")
+    verification = {
+        "status": verdict,
+        "notes": "; ".join(stored_notes) if stored_notes else None,
+        "confidence": final,
+    }
+    fixed = f" — self-corrected: {smart_text}" if smart_text else ""
 
     if verdict == "CONFIRMED":
-        _bump_verdict("CONFIRMED")
-        final = _final("CONFIRMED")
-        return (
-            {"status": "CONFIRMED", "notes": notes, "confidence": final},
-            f"✅ Verified ({final}%)",
-        )
+        return verification, f"✅ Verified ({final}%){fixed}"
 
     if verdict == "PARTIAL":
-        changes = _apply_corrections(parsed, corrections)
-        _bump_verdict("PARTIAL")
-        final = _final("PARTIAL")
         change_text = ", ".join(changes) if changes else (notes or "minor issues")
-        return (
-            {"status": "PARTIAL", "notes": notes, "confidence": final},
-            f"⚠️ Verified with corrections ({final}%): {change_text}",
-        )
+        return verification, f"⚠️ Verified with corrections ({final}%): {change_text}{fixed}"
 
     # verdict == "WRONG"
-    _bump_verdict("WRONG")
-    if confidence is not None and confidence < 50:
-        # Don't auto-apply corrections — but math agreement can still vouch for
-        # it (resolve_confidence returns 100), keeping a clean receipt out of
-        # review even when the verifier is unsure.
-        final = _final("WRONG")
+    if unsure:
+        if smart_text and final == 100:
+            # The self-check made the bill add up — nothing left to ask.
+            return verification, f"✅ Self-corrected ({final}%): {smart_text}"
         total = parsed.get("total")
         return (
-            {"status": "WRONG", "notes": notes, "confidence": final},
+            verification,
             f"❓ OCR uncertain ({final}%) — please verify total RM{total} and items",
         )
-    changes = _apply_corrections(parsed, corrections)
-    final = _final("WRONG")
+    if refused and not changes:
+        # The audit wanted to change numbers on a bill that already adds up.
+        return verification, f"✅ Verified ({final}%) — the bill adds up, first reading kept{fixed}"
     summary = ", ".join(changes) if changes else (notes or "see verifier notes")
-    return (
-        {"status": "WRONG", "notes": notes, "confidence": final},
-        f"✅ Auto-corrected ({final}%): {summary}",
-    )
+    return verification, f"✅ Auto-corrected ({final}%): {summary}{fixed}"
 
 
 def _review_keyboard(review_id) -> InlineKeyboardMarkup:
