@@ -136,7 +136,7 @@ class BotWiring(unittest.TestCase):
 
     def test_run_verification_uses_resolve_confidence(self):
         idx = self.src.index("async def run_verification(")
-        body = self.src[idx:idx + 2500]
+        body = self.src[idx:self.src.index("def _review_keyboard(")]
         self.assertIn("resolve_confidence(", body)
 
     def test_route_to_review_dedups(self):
